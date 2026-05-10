@@ -1,0 +1,17 @@
+app:
+  port: "8080"
+  env: "development"
+
+meta:
+  api_base_url: "https://graph.facebook.com/v23.0"
+  access_token: ""
+  phone_number_id: ""
+  business_account_id: ""
+  webhook_verify_token: "change-me"
+  app_secret: ""
+  request_timeout: "10s"
+
+portfolio:
+  test_url: "https://example.com/portfolio/test-format"
+  basic_url: "https://example.com/portfolio/basic-format"
+  standard_url: "https://example.com/portfolio/standard-format"

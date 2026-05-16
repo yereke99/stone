@@ -505,11 +505,16 @@ func TestAdminNotificationSentOnceAfterBriefCollected(t *testing.T) {
 		t.Fatalf("admin chat id = %q, want normalized admin chat id", got)
 	}
 	adminMessage := sender.messages[2]
-	if !strings.Contains(adminMessage, "Новая заявка Stone production") ||
-		!strings.Contains(adminMessage, "Клиент: "+chatID) ||
-		!strings.Contains(adminMessage, "Пакет: standard") ||
-		!strings.Contains(adminMessage, "Последнее сообщение: Продаём мебель") {
+	if !strings.Contains(adminMessage, "🔥 Новая заявка Stone production") ||
+		!strings.Contains(adminMessage, "📞 Телефон клиента: +7 701 000 00 00") ||
+		!strings.Contains(adminMessage, "📌 Статус: Передать менеджеру") ||
+		!strings.Contains(adminMessage, "🧭 Этап: Бриф принят, нужен менеджер") ||
+		!strings.Contains(adminMessage, "📦 Пакет: Standard / Стандарт") ||
+		!strings.Contains(adminMessage, "📝 Последнее сообщение: Продаём мебель") {
 		t.Fatalf("unexpected admin message:\n%s", adminMessage)
+	}
+	if strings.Contains(adminMessage, "handoff_required") || strings.Contains(adminMessage, "AI-опыт") {
+		t.Fatalf("admin message contains technical fields:\n%s", adminMessage)
 	}
 
 	sendText(t, service, chatID, "ок")

@@ -575,44 +575,94 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
 	lines := []string{
-		"Новая заявка Stone production",
-		"Клиент: " + conversation.ChatID,
+		"🔥 Новая заявка Stone production",
+	}
+	if phone := formatPhoneForAdmin(conversation.ChatID); phone != "" {
+		lines = append(lines, "📞 Телефон клиента: "+phone)
+	} else {
+		lines = append(lines, "📞 Клиент: "+conversation.ChatID)
 	}
 	if link := whatsappLink(conversation.ChatID); link != "" {
-		lines = append(lines, "WhatsApp: "+link)
+		lines = append(lines, "💬 WhatsApp: "+link)
 	}
 	lines = append(lines,
-		"Статус: "+valueOrDash(conversation.LeadStatus),
-		"Этап: "+valueOrDash(conversation.Stage),
+		"📌 Статус: "+adminStatusLabel(conversation.LeadStatus),
+		"🧭 Этап: "+adminStageLabel(conversation.Stage),
 	)
 	if lead.SelectedPackage != "" {
-		lines = append(lines, "Пакет: "+lead.SelectedPackage)
+		lines = append(lines, "📦 Пакет: "+adminPackageLabel(lead.SelectedPackage))
 	}
 	if lead.Niche != "" {
-		lines = append(lines, "Ниша: "+lead.Niche)
+		lines = append(lines, "🏷 Ниша: "+lead.Niche)
 	}
 	if lead.Goal != "" {
-		lines = append(lines, "Цель: "+lead.Goal)
+		lines = append(lines, "🎯 Цель: "+lead.Goal)
 	}
 	if platform := lead.platformSummary(); platform != "" {
-		lines = append(lines, "Площадка: "+platform)
+		lines = append(lines, "📣 Площадка: "+platform)
 	}
 	if lead.Deadline != "" {
-		lines = append(lines, "Срок: "+lead.Deadline)
+		lines = append(lines, "⏰ Срок: "+lead.Deadline)
 	}
 	if lead.Budget != "" {
-		lines = append(lines, "Бюджет/интерес: "+lead.Budget)
+		lines = append(lines, "💰 Бюджет/интерес: "+lead.Budget)
 	}
 	if lead.TargetAudience != "" {
-		lines = append(lines, "Аудитория: "+lead.TargetAudience)
-	}
-	if lead.AIExperience != "" {
-		lines = append(lines, "AI-опыт: "+lead.AIExperience)
+		lines = append(lines, "👥 Аудитория: "+lead.TargetAudience)
 	}
 	if text := strings.TrimSpace(conversation.LastIncomingText); text != "" {
-		lines = append(lines, "Последнее сообщение: "+text)
+		lines = append(lines, "📝 Последнее сообщение: "+text)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func adminStatusLabel(status string) string {
+	switch normalizeLeadStatus(status) {
+	case LeadStatusHandoffRequired:
+		return "Передать менеджеру"
+	case LeadStatusHot:
+		return "Горячий лид"
+	case LeadStatusWarm:
+		return "Тёплый лид"
+	case LeadStatusNew:
+		return "Новый лид"
+	case LeadStatusClosed:
+		return "Закрыт / отказ"
+	case LeadStatusMuted:
+		return "Не писать автоматически"
+	default:
+		return valueOrDash(status)
+	}
+}
+
+func adminStageLabel(stage string) string {
+	switch strings.TrimSpace(stage) {
+	case StageHandoffRequired, StageBriefCollected:
+		return "Бриф принят, нужен менеджер"
+	case StageBriefRequested:
+		return "Бриф отправлен клиенту"
+	case StagePackageSelected:
+		return "Пакет выбран"
+	case StagePackageSuggested:
+		return "Пакеты предложены"
+	case StagePortfolioSent:
+		return "Портфолио отправлено"
+	default:
+		return valueOrDash(stage)
+	}
+}
+
+func adminPackageLabel(packageKey string) string {
+	switch strings.ToLower(strings.TrimSpace(packageKey)) {
+	case "test":
+		return "Test / Тестовый"
+	case "basic":
+		return "Basic / Базовый"
+	case "standard":
+		return "Standard / Стандарт"
+	default:
+		return valueOrDash(packageKey)
+	}
 }
 
 func normalizeAdminChatIDs(values []string) []string {
@@ -662,6 +712,24 @@ func whatsappLink(chatID string) string {
 		return ""
 	}
 	return "https://wa.me/" + phone
+}
+
+func formatPhoneForAdmin(chatID string) string {
+	phone, _, _ := strings.Cut(strings.TrimSpace(chatID), "@")
+	var digits strings.Builder
+	for _, r := range phone {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	raw := digits.String()
+	if len(raw) == 11 && strings.HasPrefix(raw, "8") {
+		raw = "7" + raw[1:]
+	}
+	if len(raw) != 11 || !strings.HasPrefix(raw, "7") {
+		return raw
+	}
+	return fmt.Sprintf("+7 %s %s %s %s", raw[1:4], raw[4:7], raw[7:9], raw[9:11])
 }
 
 func valueOrDash(value string) string {

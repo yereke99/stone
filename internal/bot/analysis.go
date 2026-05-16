@@ -29,6 +29,7 @@ const (
 	IntentObjection        = "objection"
 	IntentNegativeReaction = "negative_reaction"
 	IntentBriefAnswer      = "brief_answer"
+	IntentHumanRequest     = "human_request"
 	IntentMute             = "mute"
 	IntentOther            = "other"
 )
@@ -111,6 +112,8 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentMute
 	case isNegativeReaction(normalized):
 		analysis.Intent = IntentNegativeReaction
+	case containsHumanRequest(normalized):
+		analysis.Intent = IntentHumanRequest
 	case containsPortfolioRequest(text):
 		analysis.Intent = IntentPortfolioRequest
 	case containsDeadlineQuestion(normalized):
@@ -184,7 +187,7 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	if analysis.TargetAudience != nil && strings.TrimSpace(*analysis.TargetAudience) != "" {
 		s.TargetAudience = strings.TrimSpace(*analysis.TargetAudience)
 	}
-	if analysis.Intent == IntentPackageSelection && analysis.SelectedLevel > 0 {
+	if (analysis.Intent == IntentPackageSelection || analysis.Intent == IntentHumanRequest) && analysis.SelectedLevel > 0 {
 		s.SelectedPackage = packageKey(analysis.SelectedLevel)
 		s.LeadStatus = LeadStatusHot
 	}
@@ -193,6 +196,10 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	}
 	if analysis.Intent == IntentBriefAnswer {
 		s.BriefCompleted = true
+		s.ContactBriefReady = true
+		s.LeadStatus = LeadStatusHandoffRequired
+	}
+	if analysis.Intent == IntentHumanRequest {
 		s.ContactBriefReady = true
 		s.LeadStatus = LeadStatusHandoffRequired
 	}
@@ -509,6 +516,16 @@ func isNegativeReaction(normalized string) bool {
 	return containsAny(normalized, []string{
 		"надоел", "достал", "отстан", "отвали", "иди ты", "пошел", "пошёл", "тупой",
 		"шаршатты", "мазалама", "жоғал", "annoying", "stop asking",
+	})
+}
+
+func containsHumanRequest(normalized string) bool {
+	return containsAny(normalized, []string{
+		"оператор", "менеджер", "админ", "администратор", "живой человек", "специалист",
+		"свяжите", "соедините", "подключите", "позвоните", "напишите админу", "пишите к админу",
+		"нужен оператор", "нужен менеджер", "где оператор", "где менеджер", "передайте менеджеру",
+		"срочно менеджер", "срочно оператор", "manager", "operator", "human", "real person", "admin",
+		"connect me", "call me", "need a manager", "need operator", "менеджер керек", "оператор керек",
 	})
 }
 

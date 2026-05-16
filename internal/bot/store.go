@@ -32,29 +32,30 @@ type ChatMessage struct {
 type LeadData = LeadState
 
 type Conversation struct {
-	ChatID              string
-	Language            string
-	Stage               string
-	LeadStatus          string
-	Lead                LeadData
-	Messages            []ChatMessage
-	ProcessedMessageIDs map[string]time.Time
-	LastIncomingText    string
-	LastIncomingAt      time.Time
-	LastReplyText       string
-	LastReplyAt         time.Time
-	AskedFields         map[string]bool
-	CompletedFields     map[string]bool
-	SentVideos          map[int]bool
-	SentVideoFiles      map[string]time.Time
-	SentPortfolio       bool
-	BriefAsked          bool
-	BriefCollected      bool
-	AdminNotifiedAt     time.Time
-	SelectedLevel       int
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	LastUpdated         time.Time
+	ChatID                  string
+	Language                string
+	Stage                   string
+	LeadStatus              string
+	Lead                    LeadData
+	Messages                []ChatMessage
+	ProcessedMessageIDs     map[string]time.Time
+	LastIncomingText        string
+	LastIncomingAt          time.Time
+	LastReplyText           string
+	LastReplyAt             time.Time
+	AskedFields             map[string]bool
+	CompletedFields         map[string]bool
+	SentVideos              map[int]bool
+	SentVideoFiles          map[string]time.Time
+	SentPortfolio           bool
+	BriefAsked              bool
+	BriefCollected          bool
+	AdminNotifiedAt         time.Time
+	AdminOperatorNotifiedAt time.Time
+	SelectedLevel           int
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+	LastUpdated             time.Time
 }
 
 type ConversationStore struct {
@@ -293,6 +294,45 @@ func (s *ConversationStore) MarkAdminNotified(ctx context.Context, chatID string
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
 	conversation.AdminNotifiedAt = now
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return nil
+}
+
+func (s *ConversationStore) AdminOperatorNotificationSent(ctx context.Context, chatID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false, nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	return !conversation.AdminOperatorNotifiedAt.IsZero(), nil
+}
+
+func (s *ConversationStore) MarkAdminOperatorNotified(ctx context.Context, chatID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.AdminOperatorNotifiedAt = now
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return nil

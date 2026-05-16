@@ -27,6 +27,7 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 - если клиент warm/hot, не возвращайся к квалификации; двигай к примеру, пакету, брифу или менеджеру;
 - если selected_package заполнен, не продавай заново и не повторяй цены; переходи к короткому брифу;
 - если brief_completed=true или lead_status=handoff_required, не продолжай продажу: коротко подтверди, что менеджер подключится;
+- если клиент просит оператора, админа, менеджера, живого человека, звонок или пишет срочно связаться — это прямой запрос человека: stage=handoff_required, lead_status=handoff_required, need_human=true; сначала подтверди подключение менеджера и не спрашивай пакет/портфолио заново;
 - не отправляй видео повторно, если оно уже есть в sent_videos, кроме явной просьбы отправить ещё раз;
 - не выдумывай ссылки и файлы, используй только текущую механику send_videos.
 
@@ -171,6 +172,17 @@ func BriefCollectedText(language string) string {
 		return "Received, thank you. I am passing the details to the Stone production manager — next we will clarify details and prepare the video."
 	default:
 		return "Принял, спасибо. Передаю данные менеджеру Stone production — дальше уточним детали и подготовим ролик."
+	}
+}
+
+func HumanHandoffText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім, менеджерді қосамын. Ол осы чатта жауап беріп, тапсырысты нақтылайды."
+	case "en":
+		return "Got it, I am connecting a manager. They will reply here and help with the order."
+	default:
+		return "Понял, подключаю менеджера Stone production. Он ответит в этом чате и поможет с заказом."
 	}
 }
 

@@ -273,6 +273,15 @@ func (s *Service) handleLocalCommand(ctx context.Context, chatID string, text st
 		return true, s.sendAndRemember(ctx, chatID, BriefCollectedText(language), StageHandoffRequired, conversation.SelectedLevel)
 	}
 
+	if analysis.Intent == IntentHumanRequest {
+		s.info("local rule used", zap.String("chat_hash", chatFingerprint(chatID)), zap.String("rule", "human_request"), zap.Int("selected_level", analysis.SelectedLevel))
+		level := analysis.SelectedLevel
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		return true, s.sendAndRemember(ctx, chatID, HumanHandoffText(language), StageHandoffRequired, level)
+	}
+
 	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired || normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired || conversation.Stage == StageHandoffRequired {
 		s.info("local rule used",
 			zap.String("chat_hash", chatFingerprint(chatID)),
@@ -522,18 +531,6 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 		return
 	}
 
-	sent, err := s.store.AdminNotificationSent(ctx, chatID)
-	if err != nil {
-		s.warn("admin notification state check failed",
-			zap.String("chat_hash", chatFingerprint(chatID)),
-			zap.Error(err),
-		)
-		return
-	}
-	if sent {
-		return
-	}
-
 	conversation, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
 		s.warn("admin notification snapshot failed",
@@ -542,6 +539,26 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 		)
 		return
 	}
+	operatorRequest := isOperatorRequestText(conversation.LastIncomingText)
+
+	var sent bool
+	if operatorRequest {
+		sent, err = s.store.AdminOperatorNotificationSent(ctx, chatID)
+	} else {
+		sent, err = s.store.AdminNotificationSent(ctx, chatID)
+	}
+	if err != nil {
+		s.warn("admin notification state check failed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Bool("operator_request", operatorRequest),
+			zap.Error(err),
+		)
+		return
+	}
+	if sent {
+		return
+	}
+
 	if normalizeLeadStatus(conversation.LeadStatus) != LeadStatusHandoffRequired &&
 		normalizeLeadStatus(conversation.Lead.LeadStatus) != LeadStatusHandoffRequired {
 		return
@@ -564,9 +581,15 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 		)
 	}
 
-	if err := s.store.MarkAdminNotified(ctx, chatID); err != nil {
+	if operatorRequest {
+		err = s.store.MarkAdminOperatorNotified(ctx, chatID)
+	} else {
+		err = s.store.MarkAdminNotified(ctx, chatID)
+	}
+	if err != nil {
 		s.warn("admin notification mark failed",
 			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Bool("operator_request", operatorRequest),
 			zap.Error(err),
 		)
 	}
@@ -574,8 +597,13 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
+	operatorRequest := isOperatorRequestText(conversation.LastIncomingText)
+	title := "🔥 Новая заявка Stone production"
+	if operatorRequest {
+		title = "🚨 Срочно: клиент просит оператора"
+	}
 	lines := []string{
-		"🔥 Новая заявка Stone production",
+		title,
 	}
 	if phone := formatPhoneForAdmin(conversation.ChatID); phone != "" {
 		lines = append(lines, "📞 Телефон клиента: "+phone)
@@ -585,9 +613,15 @@ func adminLeadNotificationText(conversation Conversation) string {
 	if link := whatsappLink(conversation.ChatID); link != "" {
 		lines = append(lines, "💬 WhatsApp: "+link)
 	}
+	statusLabel := adminStatusLabel(conversation.LeadStatus)
+	stageLabel := adminStageLabel(conversation.Stage)
+	if operatorRequest {
+		statusLabel = "Срочно нужен оператор"
+		stageLabel = "Клиент просит живого менеджера"
+	}
 	lines = append(lines,
-		"📌 Статус: "+adminStatusLabel(conversation.LeadStatus),
-		"🧭 Этап: "+adminStageLabel(conversation.Stage),
+		"📌 Статус: "+statusLabel,
+		"🧭 Этап: "+stageLabel,
 	)
 	if lead.SelectedPackage != "" {
 		lines = append(lines, "📦 Пакет: "+adminPackageLabel(lead.SelectedPackage))
@@ -712,6 +746,10 @@ func whatsappLink(chatID string) string {
 		return ""
 	}
 	return "https://wa.me/" + phone
+}
+
+func isOperatorRequestText(text string) bool {
+	return containsHumanRequest(normalizeForAnalysis(text))
 }
 
 func formatPhoneForAdmin(chatID string) string {

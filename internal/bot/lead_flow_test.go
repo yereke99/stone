@@ -527,6 +527,69 @@ func TestAdminNotificationSentOnceAfterBriefCollected(t *testing.T) {
 	}
 }
 
+func TestOperatorRequestSendsUrgentAdminNotification(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := NewService(sender, &fakeAI{}, store, "./video", PortfolioLinks{}, "auto", nil, "+7 701 951 9013")
+	chatID := "77471850499@c.us"
+
+	if err := store.UpdateLanguage(context.Background(), chatID, "ru"); err != nil {
+		t.Fatalf("UpdateLanguage() error = %v", err)
+	}
+	if err := store.UpdateLead(context.Background(), chatID, LeadState{
+		Niche:         "продажи спортивной беговой обуви",
+		Goal:          "рост продаж",
+		Platforms:     []string{"Instagram", "TikTok", "сайт"},
+		Platform:      "Instagram, TikTok, сайт",
+		Deadline:      "за 3 дня",
+		PortfolioSent: true,
+		LeadStatus:    LeadStatusWarm,
+	}); err != nil {
+		t.Fatalf("UpdateLead() error = %v", err)
+	}
+	if err := store.UpdateState(context.Background(), chatID, StagePortfolioSent, 0); err != nil {
+		t.Fatalf("UpdateState() error = %v", err)
+	}
+
+	sendText(t, service, chatID, "ну пишите к админу срочно! мне видео надо стандарт пакет хочу купить! пример отправьте срочно")
+
+	if len(sender.messages) != 2 {
+		t.Fatalf("sent messages = %d, want client handoff + urgent admin summary: %#v", len(sender.messages), sender.messages)
+	}
+	if sender.chatIDs[0] != chatID {
+		t.Fatalf("client reply chat id = %q, want %q", sender.chatIDs[0], chatID)
+	}
+	if !strings.Contains(sender.messages[0], "подключаю менеджера") {
+		t.Fatalf("unexpected client reply: %q", sender.messages[0])
+	}
+	if sender.chatIDs[1] != "77019519013@c.us" {
+		t.Fatalf("admin chat id = %q, want normalized admin chat id", sender.chatIDs[1])
+	}
+	adminMessage := sender.messages[1]
+	if !strings.Contains(adminMessage, "🚨 Срочно: клиент просит оператора") ||
+		!strings.Contains(adminMessage, "📞 Телефон клиента: +7 747 185 04 99") ||
+		!strings.Contains(adminMessage, "📌 Статус: Срочно нужен оператор") ||
+		!strings.Contains(adminMessage, "🧭 Этап: Клиент просит живого менеджера") ||
+		!strings.Contains(adminMessage, "📦 Пакет: Standard / Стандарт") ||
+		!strings.Contains(adminMessage, "🏷 Ниша: продажи спортивной беговой обуви") {
+		t.Fatalf("unexpected urgent admin message:\n%s", adminMessage)
+	}
+	if strings.Contains(adminMessage, "handoff_required") || strings.Contains(adminMessage, "AI-опыт") {
+		t.Fatalf("urgent admin message contains technical fields:\n%s", adminMessage)
+	}
+
+	conversation, err := store.Snapshot(context.Background(), chatID)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if conversation.Stage != StageHandoffRequired || conversation.Lead.LeadStatus != LeadStatusHandoffRequired {
+		t.Fatalf("handoff state = stage %q status %q, want handoff_required", conversation.Stage, conversation.Lead.LeadStatus)
+	}
+	if conversation.Lead.SelectedPackage != "standard" {
+		t.Fatalf("selected package = %q, want standard", conversation.Lead.SelectedPackage)
+	}
+}
+
 func TestCanceledContextDoesNotSend(t *testing.T) {
 	sender := &fakeSender{}
 	service := newTestService(sender, NewConversationStore(), PortfolioLinks{})

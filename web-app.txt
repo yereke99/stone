@@ -1,0 +1,1303 @@
+WEB APP / BACKEND GUIDE ДЛЯ ПРОЕКТА STONE
+=========================================
+
+Коротко:
+Этот проект - Go backend для WhatsApp AI sales manager. Он принимает webhook от
+Meta WhatsApp Cloud API, ведет диалог с клиентом по шагам, отвечает в WhatsApp и
+продает AI рекламные ролики: Test, Basic, Standard.
+
+Важно:
+Это не frontend web-app с React/Vue. Здесь "web" часть - HTTP API:
+- GET /health
+- GET /webhook
+- POST /webhook
+
+
+1. ЧТО ДЕЛАЕТ ПРОЕКТ
+--------------------
+
+Проект автоматизирует первичный WhatsApp-диалог с клиентом.
+
+Бизнес-логика:
+- услуга: AI рекламные ролики за 48 часов без съемки;
+- ролики готовы под запуск рекламы;
+- цены:
+  - Test format: 35 000 KZT
+  - Basic format: 50 000 KZT
+  - Standard format: 75 000 KZT
+- языки: русский, казахский, английский;
+- если язык непонятен, используется русский;
+- каждое сообщение бота должно быть от 5 до 35 слов;
+- бот использует только заданные ссылки на портфолио из конфигурации.
+
+
+2. ОСНОВНАЯ СТРУКТУРА ПРОЕКТА
+-----------------------------
+
+cmd/main.go
+  Точка входа приложения. Загружает конфиг, создает logger, storage, bot manager,
+  Meta client, HTTP handlers, router и запускает HTTP server.
+
+internal/config/config.go
+  Загружает настройки из environment variables.
+
+internal/logger/logger.go
+  Создает zap logger. В production включает production config, иначе development.
+
+internal/http/router.go
+  Регистрирует HTTP routes и middleware:
+  - access log
+  - panic recovery
+
+internal/http/handler/health.go
+  Handler для GET /health.
+
+internal/http/handler/webhook.go
+  Handler для GET /webhook и POST /webhook.
+  GET нужен для верификации webhook в Meta.
+  POST нужен для приема входящих сообщений WhatsApp.
+
+internal/http/handler/response.go
+  Общий helper writeJSON.
+
+internal/bot/manager.go
+  Главная логика обработки входящего текста.
+  Здесь хранится порядок шагов диалога и реакция на триггеры:
+  - objection
+  - portfolio request
+  - ready signal
+
+internal/bot/flow.go
+  Тексты сообщений бота, портфолио-сообщения, policy validation 5-35 слов.
+
+internal/bot/language.go
+  Определение языка: ru, kz, en.
+
+internal/bot/state.go
+  Структуры State, Step и интерфейс StateStore.
+
+internal/storage/memory.go
+  In-memory хранилище состояний пользователей.
+  После рестарта сервиса состояния пропадают.
+
+internal/meta/client.go
+  Клиент Meta WhatsApp Cloud API:
+  - отправка текстового сообщения;
+  - проверка X-Hub-Signature-256;
+  - структуры webhook payload;
+  - извлечение только text messages.
+
+internal/bot/flow_test.go
+  Тесты текстов бота и определения языка.
+
+internal/meta/client_test.go
+  Тесты проверки подписи Meta webhook.
+
+Dockerfile
+  Multi-stage Docker build.
+
+docker-compose.yml
+  Запуск сервиса через docker compose.
+
+.env.example
+  Пример environment variables.
+
+configs/config.example.yaml
+  Пример YAML-конфига, но текущий код читает именно env variables.
+
+
+3. КАК ЗАПУСКАЕТСЯ ПРИЛОЖЕНИЕ
+-----------------------------
+
+Последовательность в cmd/main.go:
+
+1. config.Load()
+   Читает env variables:
+   - APP_PORT
+   - ENV
+   - META_API_BASE_URL
+   - META_WEBHOOK_VERIFY_TOKEN
+   - META_ACCESS_TOKEN
+   - META_PHONE_NUMBER_ID
+   - META_BUSINESS_ACCOUNT_ID
+   - META_APP_SECRET
+   - META_REQUEST_TIMEOUT
+   - PORTFOLIO_TEST_URL
+   - PORTFOLIO_BASIC_URL
+   - PORTFOLIO_STANDARD_URL
+
+2. logger.New(cfg.Env)
+   Создает zap logger.
+
+3. storage.NewMemoryStore()
+   Создает память для состояний пользователей.
+
+4. bot.NewManager(...)
+   Создает менеджер бота и передает ему:
+   - StateStore
+   - portfolio links
+   - logger
+
+5. meta.NewClient(cfg.Meta, zapLogger)
+   Создает клиент для WhatsApp Cloud API.
+
+6. Создаются handlers:
+   - healthHandler
+   - webhookHandler
+
+7. httpserver.NewRouter(...)
+   Регистрирует:
+   - GET /health
+   - GET /webhook
+   - POST /webhook
+
+8. http.Server запускается на cfg.HTTPAddress().
+
+9. Приложение слушает SIGTERM / SIGINT и корректно выключается через
+   server.Shutdown(ctx).
+
+
+4. ENV CONFIG
+-------------
+
+Минимальный .env:
+
+APP_PORT=8080
+ENV=development
+
+META_API_BASE_URL=https://graph.facebook.com/v23.0
+META_ACCESS_TOKEN=
+META_PHONE_NUMBER_ID=
+META_BUSINESS_ACCOUNT_ID=
+META_WEBHOOK_VERIFY_TOKEN=change-me
+META_APP_SECRET=
+META_REQUEST_TIMEOUT=10s
+
+PORTFOLIO_TEST_URL=https://example.com/portfolio/test-format
+PORTFOLIO_BASIC_URL=https://example.com/portfolio/basic-format
+PORTFOLIO_STANDARD_URL=https://example.com/portfolio/standard-format
+
+Обязательные переменные:
+- APP_PORT
+- ENV
+- META_API_BASE_URL
+- META_WEBHOOK_VERIFY_TOKEN
+
+Необязательные, но нужные для реальной отправки WhatsApp сообщений:
+- META_ACCESS_TOKEN
+- META_PHONE_NUMBER_ID
+- META_BUSINESS_ACCOUNT_ID
+- META_APP_SECRET
+
+Если META_ACCESS_TOKEN или META_PHONE_NUMBER_ID пустые, бот обработает webhook,
+но Meta client вернет ErrNotConfigured и ответ не уйдет в WhatsApp.
+
+Если META_APP_SECRET пустой, подпись webhook не проверяется.
+Если META_APP_SECRET задан, POST /webhook требует корректный header:
+
+X-Hub-Signature-256: sha256=<hmac_sha256_body>
+
+
+5. HTTP ENDPOINTS
+-----------------
+
+GET /health
+Возвращает состояние сервиса.
+
+Пример ответа:
+
+{
+  "status": "ok",
+  "env": "development",
+  "started_at": "2026-05-11T08:00:00Z"
+}
+
+
+GET /webhook
+Нужен для Meta webhook verification.
+
+Meta отправляет query params:
+- hub.mode
+- hub.verify_token
+- hub.challenge
+
+Логика:
+- если hub.mode == "subscribe"
+- и hub.verify_token == META_WEBHOOK_VERIFY_TOKEN
+- тогда сервис возвращает hub.challenge со статусом 200
+- иначе 403
+
+Пример:
+
+curl "http://localhost:8080/webhook?hub.mode=subscribe&hub.verify_token=change-me&hub.challenge=123"
+
+Ожидаемый ответ:
+
+123
+
+
+POST /webhook
+Нужен для входящих WhatsApp events от Meta.
+
+Логика:
+1. Читает body максимум 1 MB.
+2. Проверяет X-Hub-Signature-256, если задан META_APP_SECRET.
+3. Парсит JSON в meta.WebhookPayload.
+4. Достает только текстовые сообщения через payload.TextMessages().
+5. Для каждого сообщения вызывает:
+
+   h.bot.HandleIncoming(ctx, message.From, message.Text)
+
+6. Для каждого reply вызывает:
+
+   h.sender.SendTextMessage(ctx, message.From, reply.Text)
+
+7. Возвращает JSON:
+
+{
+  "received": 1,
+  "sent": 1,
+  "failed": 0
+}
+
+Если Meta client не настроен, ответ не отправляется, но сервис не падает.
+
+
+6. WEBHOOK PAYLOAD FLOW
+-----------------------
+
+Meta -> POST /webhook
+  -> WebhookHandler.receiveWebhook
+    -> VerifySignature
+    -> json.Unmarshal
+    -> payload.TextMessages()
+    -> bot.Manager.HandleIncoming
+      -> load user state
+      -> detect language for new user
+      -> calculate replies
+      -> validate 5-35 words
+      -> save state
+    -> meta.Client.SendTextMessage
+      -> POST {META_API_BASE_URL}/{META_PHONE_NUMBER_ID}/messages
+
+
+7. BOT STATE MACHINE
+--------------------
+
+State хранится по userID, где userID = WhatsApp sender phone/id из message.From.
+
+State:
+
+type State struct {
+    UserID       string
+    Language     Language
+    Step         Step
+    UsedAIVideos *bool
+    UpdatedAt    time.Time
+}
+
+Steps:
+- welcome
+- diagnostics_goal
+- diagnostics_platform
+- expertise
+- offer
+- portfolio
+- closing
+
+Порядок обычного диалога:
+
+1. Новый пользователь
+   - определяется язык
+   - Step становится diagnostics_goal
+   - отправляется welcomeMessage
+
+2. StepDiagnosticsGoal
+   - Step становится diagnostics_platform
+   - отправляется askGoalMessage
+
+3. StepDiagnosticsPlatform
+   - Step становится expertise
+   - отправляется askPlatformMessage
+
+4. StepExpertise
+   - Step становится offer
+   - отправляется askUsedAIMessage
+
+5. StepOffer
+   - бот пытается понять, использовал ли клиент AI videos раньше
+   - если да/нет понятно:
+     - UsedAIVideos сохраняется
+     - Step становится portfolio
+     - отправляется offerMessage
+   - если непонятно:
+     - Step остается offer
+     - отправляется clarifyUsedAIMessage
+
+6. StepPortfolio
+   - Step становится closing
+   - отправляется portfolioPromptMessage
+
+7. Любой другой/default
+   - Step становится closing
+   - отправляется questionnaireMessage
+
+
+8. ГЛОБАЛЬНЫЕ ТРИГГЕРЫ БОТА
+---------------------------
+
+Перед обычным switch по step проверяются три группы фраз.
+
+1. Objection:
+   Слова:
+   - дорого
+   - подумаю
+   - позже
+   - expensive
+   - think
+   - қымбат
+   - кейін
+
+   Ответ:
+   objectionMessage(language)
+
+   Step не меняется.
+
+
+2. Portfolio request:
+   Слова:
+   - портфолио
+   - пример
+   - кейс
+   - portfolio
+   - example
+   - мысал
+
+   Ответ:
+   три сообщения:
+   - Test format portfolio
+   - Basic format portfolio
+   - Standard format portfolio
+
+   Step не меняется.
+
+
+3. Ready signal:
+   Слова:
+   - готов
+   - начнем
+   - хочу
+   - давайте
+   - ready
+   - start
+   - дайын
+
+   Действие:
+   - Step становится closing
+   - отправляется questionnaireMessage(language)
+
+
+9. LANGUAGE DETECTION
+---------------------
+
+Файл:
+internal/bot/language.go
+
+Алгоритм:
+
+1. Сначала ищет казахские маркеры:
+   - ә, ғ, қ, ң, ө, ұ, ү, һ, і
+   - сәлем, баға, қанша, қалай, қымбат, ойлан, сатылым
+
+2. Если есть Cyrillic, возвращает ru.
+
+3. Если есть Latin, возвращает en.
+
+4. Если ничего не понятно, возвращает ru.
+
+Примеры:
+- "Здравствуйте, сколько стоит ролик?" -> ru
+- "Сәлем, баға қанша?" -> kz
+- "Hello, what is the price?" -> en
+- "12345" -> ru
+
+
+10. MESSAGE POLICY
+------------------
+
+Файл:
+internal/bot/flow.go
+
+Правило:
+- каждое сообщение бота должно быть от 5 до 35 слов.
+
+Константы:
+
+const (
+    minBotWords = 5
+    maxBotWords = 35
+)
+
+Перед сохранением state и отправкой ответа вызывается:
+
+validateMessagePolicy(replies)
+
+Если сообщение нарушает лимит:
+- HandleIncoming возвращает error;
+- webhook handler логирует ошибку;
+- reply не отправляется;
+- state не сохраняется.
+
+Важно:
+wordCount не считает чисто числовые токены словами.
+Например "35 000" не увеличивает count как обычные слова.
+
+
+11. STORAGE
+-----------
+
+Сейчас используется:
+
+internal/storage/memory.go
+
+Плюсы:
+- просто;
+- быстро;
+- удобно для локальной разработки.
+
+Минусы:
+- после рестарта все состояния пользователей пропадают;
+- несколько инстансов приложения не делят состояние.
+
+Чтобы заменить storage на PostgreSQL, Redis или другое хранилище, нужно
+реализовать интерфейс:
+
+type StateStore interface {
+    Get(ctx context.Context, userID string) (State, bool, error)
+    Save(ctx context.Context, state State) error
+}
+
+
+12. META WHATSAPP CLIENT
+------------------------
+
+Файл:
+internal/meta/client.go
+
+Отправка текста:
+
+func (c *Client) SendTextMessage(ctx context.Context, to string, body string) error
+
+Если конфиг полный, отправляет POST:
+
+{META_API_BASE_URL}/{META_PHONE_NUMBER_ID}/messages
+
+Headers:
+
+Authorization: Bearer <META_ACCESS_TOKEN>
+Content-Type: application/json
+
+Body:
+
+{
+  "messaging_product": "whatsapp",
+  "recipient_type": "individual",
+  "to": "<recipient>",
+  "type": "text",
+  "text": {
+    "preview_url": false,
+    "body": "<message>"
+  }
+}
+
+Если Meta API вернет не 2xx, клиент возвращает error с status code и частью body.
+
+
+13. ЛОКАЛЬНЫЙ ЗАПУСК
+--------------------
+
+1. Создать .env:
+
+cp .env.example .env
+
+2. Загрузить env и запустить:
+
+export $(grep -v '^#' .env | xargs)
+go run ./cmd
+
+3. Проверить health:
+
+curl http://localhost:8080/health
+
+4. Проверить webhook verification:
+
+curl "http://localhost:8080/webhook?hub.mode=subscribe&hub.verify_token=change-me&hub.challenge=123"
+
+
+14. DOCKER ЗАПУСК
+-----------------
+
+docker compose up --build
+
+docker-compose.yml:
+- собирает текущий Dockerfile;
+- берет env из .env;
+- пробрасывает порт APP_PORT;
+- включает healthcheck через /health.
+
+Dockerfile:
+- builder stage на golang:1.25-alpine;
+- go mod download;
+- go build -o /bin/stone ./cmd;
+- runtime stage на alpine:3.22;
+- запускает бинарник /app/stone от appuser.
+
+
+15. ТЕСТЫ
+---------
+
+Запуск:
+
+go test ./...
+
+Что покрыто:
+- static bot messages respect 5-35 word policy;
+- language detection;
+- Meta webhook signature verification.
+
+Если меняешь тексты в internal/bot/flow.go, обязательно запускай:
+
+go test ./internal/bot
+
+Если меняешь подписи, webhook или Meta client:
+
+go test ./internal/meta
+go test ./...
+
+
+16. ШАБЛОН: НОВЫЙ HTTP HANDLER
+------------------------------
+
+Пример: добавить endpoint GET /version.
+
+Создать файл:
+internal/http/handler/version.go
+
+Код:
+
+package handler
+
+import "net/http"
+
+type VersionHandler struct {
+    version string
+}
+
+func NewVersionHandler(version string) *VersionHandler {
+    return &VersionHandler{
+        version: version,
+    }
+}
+
+func (h *VersionHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+    writeJSON(w, http.StatusOK, map[string]string{
+        "version": h.version,
+    })
+}
+
+Дальше изменить router:
+
+func NewRouter(
+    health *handler.HealthHandler,
+    webhook *handler.WebhookHandler,
+    version *handler.VersionHandler,
+    logger *zap.Logger,
+) http.Handler {
+    mux := http.NewServeMux()
+    mux.Handle("GET /health", health)
+    mux.Handle("GET /webhook", webhook)
+    mux.Handle("POST /webhook", webhook)
+    mux.Handle("GET /version", version)
+
+    return recoverMiddleware(logger, accessLogMiddleware(logger, mux))
+}
+
+Дальше изменить cmd/main.go:
+
+versionHandler := httpHandler.NewVersionHandler("dev")
+
+server := &http.Server{
+    Addr: cfg.HTTPAddress(),
+    Handler: httpserver.NewRouter(
+        healthHandler,
+        webhookHandler,
+        versionHandler,
+        zapLogger,
+    ),
+}
+
+
+17. ШАБЛОН: НОВЫЙ JSON RESPONSE
+-------------------------------
+
+Используй общий helper:
+
+writeJSON(w, http.StatusOK, map[string]any{
+    "ok": true,
+    "data": payload,
+})
+
+Для ошибок можно использовать стандартный http.Error:
+
+http.Error(w, "invalid request", http.StatusBadRequest)
+
+Стиль проекта:
+- handlers маленькие;
+- зависимости передаются через constructor;
+- бизнес-логика не должна жить внутри router;
+- JSON пишет writeJSON;
+- logger передается явно.
+
+
+18. ШАБЛОН: НОВЫЙ BOT MESSAGE
+-----------------------------
+
+Добавить функцию в internal/bot/flow.go:
+
+func newMessage(language Language) string {
+    switch language {
+    case LanguageKZ:
+        return "Казахский текст от пяти до тридцати пяти слов."
+    case LanguageEN:
+        return "English text between five and thirty five words."
+    default:
+        return "Русский текст от пяти до тридцати пяти слов."
+    }
+}
+
+Потом вызвать ее в manager.go внутри nextReplies:
+
+case StepSomeNewStep:
+    state.Step = StepNextStep
+    return singleReply(newMessage(state.Language))
+
+Важно:
+- текст должен пройти validateMessagePolicy;
+- не делай сообщение длиннее 35 слов;
+- для каждого языка должен быть fallback;
+- после изменения добавь сообщение в TestStaticMessagesRespectPolicy.
+
+
+19. ШАБЛОН: НОВЫЙ STEP В ДИАЛОГЕ
+--------------------------------
+
+1. Добавить step в internal/bot/state.go:
+
+const (
+    StepWelcome             Step = "welcome"
+    StepDiagnosticsGoal     Step = "diagnostics_goal"
+    StepDiagnosticsPlatform Step = "diagnostics_platform"
+    StepExpertise           Step = "expertise"
+    StepOffer               Step = "offer"
+    StepPortfolio           Step = "portfolio"
+    StepClosing             Step = "closing"
+    StepBudget              Step = "budget"
+)
+
+2. Добавить message function в internal/bot/flow.go:
+
+func askBudgetMessage(language Language) string {
+    switch language {
+    case LanguageKZ:
+        return "Жобаның ыңғайлы бюджет диапазоны қандай екенін қысқаша айтыңыз."
+    case LanguageEN:
+        return "Please share the comfortable budget range for this project."
+    default:
+        return "Подскажите, какой диапазон бюджета комфортен для этого проекта?"
+    }
+}
+
+3. Вставить step в internal/bot/manager.go:
+
+case StepDiagnosticsPlatform:
+    state.Step = StepBudget
+    return singleReply(askPlatformMessage(state.Language))
+case StepBudget:
+    state.Step = StepExpertise
+    return singleReply(askBudgetMessage(state.Language))
+
+4. Добавить askBudgetMessage в тест:
+
+messages := []string{
+    welcomeMessage(language),
+    askGoalMessage(language),
+    askPlatformMessage(language),
+    askBudgetMessage(language),
+    ...
+}
+
+5. Запустить:
+
+go test ./...
+
+
+20. ШАБЛОН: НОВЫЙ GLOBAL TRIGGER
+--------------------------------
+
+Пример: клиент спрашивает про сроки.
+
+1. Добавить detector в internal/bot/manager.go:
+
+func containsDeadlineQuestion(text string) bool {
+    return containsAny(normalize(text), []string{
+        "срок", "когда", "долго", "deadline", "how long", "мерзім",
+    })
+}
+
+2. Добавить message в internal/bot/flow.go:
+
+func deadlineMessage(language Language) string {
+    switch language {
+    case LanguageKZ:
+        return "Әдетте алғашқы дайын роликті 48 сағат ішінде жібереміз."
+    case LanguageEN:
+        return "Usually we send the first ready video within 48 hours."
+    default:
+        return "Обычно первый готовый ролик отправляем в течение 48 часов."
+    }
+}
+
+3. В nextReplies добавить проверку до switch:
+
+if containsDeadlineQuestion(text) {
+    return singleReply(deadlineMessage(state.Language))
+}
+
+4. Добавить deadlineMessage в flow_test.go.
+
+
+21. ШАБЛОН: REPLACE MEMORY STORAGE
+----------------------------------
+
+Новый storage должен реализовать bot.StateStore.
+
+Пример skeleton:
+
+package storage
+
+import (
+    "context"
+
+    "github.com/yereke99/stone/internal/bot"
+)
+
+type PostgresStore struct {
+    // db *sql.DB
+}
+
+func NewPostgresStore(/* db *sql.DB */) *PostgresStore {
+    return &PostgresStore{}
+}
+
+func (s *PostgresStore) Get(ctx context.Context, userID string) (bot.State, bool, error) {
+    if err := ctx.Err(); err != nil {
+        return bot.State{}, false, err
+    }
+
+    // SELECT user_id, language, step, used_ai_videos, updated_at
+    // FROM bot_states
+    // WHERE user_id = $1
+
+    return bot.State{}, false, nil
+}
+
+func (s *PostgresStore) Save(ctx context.Context, state bot.State) error {
+    if err := ctx.Err(); err != nil {
+        return err
+    }
+
+    // INSERT INTO bot_states (...)
+    // VALUES (...)
+    // ON CONFLICT (user_id) DO UPDATE SET ...
+
+    return nil
+}
+
+Потом в cmd/main.go заменить:
+
+stateStore := storage.NewMemoryStore()
+
+на:
+
+stateStore := storage.NewPostgresStore(...)
+
+
+22. ШАБЛОН: НОВЫЙ META MESSAGE METHOD
+-------------------------------------
+
+Сейчас есть только SendTextMessage.
+Если нужен, например, image message, добавь новый метод в internal/meta/client.go.
+
+Skeleton:
+
+type SendImageRequest struct {
+    MessagingProduct string `json:"messaging_product"`
+    RecipientType    string `json:"recipient_type"`
+    To               string `json:"to"`
+    Type             string `json:"type"`
+    Image            Image  `json:"image"`
+}
+
+type Image struct {
+    Link string `json:"link"`
+}
+
+func (c *Client) SendImageMessage(ctx context.Context, to string, imageURL string) error {
+    if c.cfg.APIBaseURL == "" || c.cfg.AccessToken == "" || c.cfg.PhoneNumberID == "" {
+        return ErrNotConfigured
+    }
+
+    payload := SendImageRequest{
+        MessagingProduct: "whatsapp",
+        RecipientType:    "individual",
+        To:               to,
+        Type:             "image",
+        Image: Image{
+            Link: imageURL,
+        },
+    }
+
+    requestBody, err := json.Marshal(payload)
+    if err != nil {
+        return fmt.Errorf("marshal meta image payload: %w", err)
+    }
+
+    url := fmt.Sprintf("%s/%s/messages", strings.TrimRight(c.cfg.APIBaseURL, "/"), c.cfg.PhoneNumberID)
+    req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(requestBody))
+    if err != nil {
+        return fmt.Errorf("create meta image request: %w", err)
+    }
+
+    req.Header.Set("Authorization", "Bearer "+c.cfg.AccessToken)
+    req.Header.Set("Content-Type", "application/json")
+
+    resp, err := c.httpClient.Do(req)
+    if err != nil {
+        return fmt.Errorf("send meta image message: %w", err)
+    }
+    defer func() {
+        _ = resp.Body.Close()
+    }()
+
+    if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+        responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+        return fmt.Errorf("meta api returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+    }
+
+    c.logger.Info("meta image message sent", zap.String("to", to), zap.Int("status", resp.StatusCode))
+    return nil
+}
+
+Если этот метод нужен handler-у, расширь interface MessageSender.
+
+
+23. ШАБЛОН: ТЕСТ ДЛЯ BOT FLOW
+-----------------------------
+
+Пример unit test на переходы:
+
+package bot
+
+import (
+    "context"
+    "testing"
+
+    "github.com/yereke99/stone/internal/storage"
+    "go.uber.org/zap"
+)
+
+func TestManagerFlow(t *testing.T) {
+    manager := NewManager(
+        storage.NewMemoryStore(),
+        PortfolioLinks{},
+        zap.NewNop(),
+    )
+
+    replies, err := manager.HandleIncoming(context.Background(), "user-1", "Здравствуйте")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if len(replies) != 1 {
+        t.Fatalf("expected 1 reply, got %d", len(replies))
+    }
+
+    replies, err = manager.HandleIncoming(context.Background(), "user-1", "Хочу заявки")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if len(replies) != 1 {
+        t.Fatalf("expected 1 reply, got %d", len(replies))
+    }
+}
+
+
+24. ШАБЛОН: ТЕСТ ДЛЯ HTTP HANDLER
+---------------------------------
+
+Пример:
+
+package handler
+
+import (
+    "net/http"
+    "net/http/httptest"
+    "testing"
+)
+
+func TestHealthHandler(t *testing.T) {
+    handler := NewHealthHandler("test")
+
+    req := httptest.NewRequest(http.MethodGet, "/health", nil)
+    rec := httptest.NewRecorder()
+
+    handler.ServeHTTP(rec, req)
+
+    if rec.Code != http.StatusOK {
+        t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+    }
+}
+
+
+25. ШАБЛОН: MOCK MESSAGE SENDER ДЛЯ WEBHOOK TEST
+------------------------------------------------
+
+WebhookHandler зависит от interface:
+
+type MessageSender interface {
+    SendTextMessage(ctx context.Context, to string, body string) error
+}
+
+Для тестов можно сделать fake sender:
+
+type fakeSender struct {
+    sent []string
+}
+
+func (f *fakeSender) SendTextMessage(ctx context.Context, to string, body string) error {
+    if err := ctx.Err(); err != nil {
+        return err
+    }
+    f.sent = append(f.sent, body)
+    return nil
+}
+
+Так можно тестировать webhook без реального Meta API.
+
+
+26. КАК ДОБАВИТЬ НОВУЮ НАСТРОЙКУ
+--------------------------------
+
+Пример: добавить COMPANY_NAME.
+
+1. Добавить в .env.example:
+
+COMPANY_NAME=Stone Production
+
+2. Добавить поле в Config:
+
+type Config struct {
+    AppPort     string
+    Env         string
+    CompanyName string
+    Meta        MetaConfig
+    Portfolio   PortfolioConfig
+}
+
+3. Прочитать в Load:
+
+CompanyName: strings.TrimSpace(os.Getenv("COMPANY_NAME")),
+
+Если переменная обязательная:
+
+CompanyName: required("COMPANY_NAME"),
+
+4. Передать туда, где нужна:
+
+botManager := bot.NewManager(..., cfg.CompanyName, ...)
+
+5. Обновить README или этот файл.
+
+
+27. КАК ДОБАВИТЬ НОВЫЙ PORTFOLIO URL
+------------------------------------
+
+Пример: Premium format.
+
+1. .env.example:
+
+PORTFOLIO_PREMIUM_URL=https://example.com/portfolio/premium-format
+
+2. internal/config/config.go:
+
+type PortfolioConfig struct {
+    TestURL     string
+    BasicURL    string
+    StandardURL string
+    PremiumURL  string
+}
+
+Portfolio: PortfolioConfig{
+    TestURL:     strings.TrimSpace(os.Getenv("PORTFOLIO_TEST_URL")),
+    BasicURL:    strings.TrimSpace(os.Getenv("PORTFOLIO_BASIC_URL")),
+    StandardURL: strings.TrimSpace(os.Getenv("PORTFOLIO_STANDARD_URL")),
+    PremiumURL:  strings.TrimSpace(os.Getenv("PORTFOLIO_PREMIUM_URL")),
+},
+
+3. internal/bot/flow.go:
+
+type PortfolioLinks struct {
+    TestURL     string
+    BasicURL    string
+    StandardURL string
+    PremiumURL  string
+}
+
+func portfolioMessages(language Language, links PortfolioLinks) []string {
+    return []string{
+        portfolioMessage(language, "Test format", links.TestURL),
+        portfolioMessage(language, "Basic format", links.BasicURL),
+        portfolioMessage(language, "Standard format", links.StandardURL),
+        portfolioMessage(language, "Premium format", links.PremiumURL),
+    }
+}
+
+4. cmd/main.go:
+
+bot.PortfolioLinks{
+    TestURL:     cfg.Portfolio.TestURL,
+    BasicURL:    cfg.Portfolio.BasicURL,
+    StandardURL: cfg.Portfolio.StandardURL,
+    PremiumURL:  cfg.Portfolio.PremiumURL,
+}
+
+5. internal/bot/flow_test.go:
+
+links := PortfolioLinks{
+    TestURL:     "...",
+    BasicURL:    "...",
+    StandardURL: "...",
+    PremiumURL:  "...",
+}
+
+
+28. CODE STYLE В ЭТОМ ПРОЕКТЕ
+-----------------------------
+
+Следуй такому стилю:
+
+- Go стандартный net/http, без внешнего router framework.
+- Handlers реализуют ServeHTTP.
+- Зависимости передаются через constructor.
+- Логи через zap.Logger.
+- Ошибки оборачиваются через fmt.Errorf("context: %w", err).
+- Конфиг читается из env.
+- Бизнес-логика бота живет в internal/bot.
+- HTTP слой не должен знать детали state machine.
+- Meta API детали живут в internal/meta.
+- Storage заменяется через interface bot.StateStore.
+- Тексты бота держатся в flow.go.
+- Каждый новый текст должен проходить 5-35 word policy.
+- После изменения логики запускать go test ./...
+
+
+29. ГДЕ ЧТО МЕНЯТЬ
+------------------
+
+Нужно поменять текст ответа бота:
+  internal/bot/flow.go
+  internal/bot/flow_test.go
+
+Нужно поменять порядок диалога:
+  internal/bot/manager.go
+  internal/bot/state.go
+  internal/bot/flow.go
+  internal/bot/flow_test.go
+
+Нужно добавить новый webhook behavior:
+  internal/http/handler/webhook.go
+  internal/meta/client.go
+  internal/bot/manager.go
+
+Нужно добавить endpoint:
+  internal/http/handler/<name>.go
+  internal/http/router.go
+  cmd/main.go
+
+Нужно добавить env variable:
+  .env.example
+  internal/config/config.go
+  README.md
+
+Нужно заменить память на базу:
+  internal/storage/<new_store>.go
+  cmd/main.go
+
+Нужно поменять формат логов:
+  internal/logger/logger.go
+
+Нужно поменять Docker build:
+  Dockerfile
+  docker-compose.yml
+
+
+30. ЧЕКЛИСТ ПЕРЕД DEPLOY
+------------------------
+
+1. .env заполнен:
+   - APP_PORT
+   - ENV=production
+   - META_API_BASE_URL
+   - META_ACCESS_TOKEN
+   - META_PHONE_NUMBER_ID
+   - META_BUSINESS_ACCOUNT_ID
+   - META_WEBHOOK_VERIFY_TOKEN
+   - META_APP_SECRET
+   - PORTFOLIO_TEST_URL
+   - PORTFOLIO_BASIC_URL
+   - PORTFOLIO_STANDARD_URL
+
+2. Домен доступен по HTTPS.
+
+3. В Meta webhook callback URL указан:
+
+https://your-domain.com/webhook
+
+4. Verify token в Meta совпадает с META_WEBHOOK_VERIFY_TOKEN.
+
+5. Если задан META_APP_SECRET, Meta реально отправляет X-Hub-Signature-256.
+
+6. Health endpoint работает:
+
+curl https://your-domain.com/health
+
+7. Tests проходят:
+
+go test ./...
+
+8. Portfolio URLs открываются.
+
+9. В production лучше заменить MemoryStore на Redis/PostgreSQL, если важно
+   сохранять диалог после рестарта.
+
+
+31. БЫСТРЫЙ MENTAL MODEL
+------------------------
+
+Думай о проекте так:
+
+HTTP layer:
+  принимает запросы, проверяет webhook, отдает JSON.
+
+Meta layer:
+  знает формат WhatsApp Cloud API.
+
+Bot layer:
+  решает, что ответить клиенту.
+
+Storage layer:
+  помнит, на каком шаге находится клиент.
+
+Config layer:
+  берет настройки из env.
+
+Main:
+  склеивает все части вместе и запускает сервер.
+
+
+32. САМЫЕ ВАЖНЫЕ ФАЙЛЫ ДЛЯ РАБОТЫ
+---------------------------------
+
+Если нужно понять проект за 5 минут, читать в таком порядке:
+
+1. README.md
+2. cmd/main.go
+3. internal/http/handler/webhook.go
+4. internal/bot/manager.go
+5. internal/bot/flow.go
+6. internal/meta/client.go
+7. internal/config/config.go
+
+
+33. КОМАНДЫ
+-----------
+
+Форматировать код:
+
+gofmt -w ./cmd ./internal
+
+Запустить тесты:
+
+go test ./...
+
+Запустить локально:
+
+export $(grep -v '^#' .env | xargs)
+go run ./cmd
+
+Запустить в Docker:
+
+docker compose up --build
+
+Проверить health:
+
+curl http://localhost:8080/health
+
+Проверить webhook verification:
+
+curl "http://localhost:8080/webhook?hub.mode=subscribe&hub.verify_token=change-me&hub.challenge=123"
+
+
+34. КОРОТКИЙ ШАБЛОН НОВОЙ ФИЧИ
+------------------------------
+
+Когда добавляешь новую feature, держи порядок:
+
+1. Config:
+   Если нужны новые настройки, добавь их в .env.example и internal/config.
+
+2. Domain/Bot:
+   Если меняется логика диалога, добавь step/message в internal/bot.
+
+3. Integration:
+   Если нужно отправлять новый тип сообщения, добавь метод в internal/meta.
+
+4. HTTP:
+   Если feature вызывается через API, добавь handler и route.
+
+5. Tests:
+   Добавь или обнови тесты.
+
+6. Run:
+   gofmt -w ./cmd ./internal
+   go test ./...
+
+
+35. КЛЮЧЕВОЙ ПРИНЦИП ПРОЕКТА
+----------------------------
+
+Проект держится на простом разделении:
+
+WebhookHandler не должен становиться большим "комбайном".
+Он только принимает webhook, достает text messages, вызывает bot manager и
+отправляет replies через sender.
+
+Bot Manager не должен знать детали Meta API.
+Он получает userID + text и возвращает []Reply.
+
+Meta Client не должен знать бизнес-логику.
+Он только отправляет payload в WhatsApp Cloud API.
+
+Storage не должен знать про HTTP или Meta.
+Он только сохраняет и достает bot.State.
+
+Если соблюдать это разделение, проект легко расширять.

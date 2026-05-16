@@ -3,87 +3,317 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/yereke99/stone/internal/bot"
 	"github.com/yereke99/stone/internal/config"
-	httpserver "github.com/yereke99/stone/internal/http"
-	httpHandler "github.com/yereke99/stone/internal/http/handler"
+	"github.com/yereke99/stone/internal/greenapi"
 	"github.com/yereke99/stone/internal/logger"
-	"github.com/yereke99/stone/internal/meta"
-	"github.com/yereke99/stone/internal/storage"
+	"github.com/yereke99/stone/internal/openai"
 	"go.uber.org/zap"
 )
+
+const (
+	initialReceiveBackoff = time.Second
+	maxReceiveBackoff     = 10 * time.Second
+	deleteTimeout         = 10 * time.Second
+	startupGracePeriod    = 2 * time.Minute
+)
+
+type notificationClient interface {
+	ReceiveNotification(ctx context.Context) (*greenapi.Notification, bool, error)
+	DeleteNotification(ctx context.Context, receiptID int) error
+}
+
+type incomingMessageHandler interface {
+	HandleIncomingMessage(ctx context.Context, msg bot.IncomingMessage) error
+}
 
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		panic(err)
+		log.Fatalf("config error: %v", err)
 	}
 
-	zapLogger, err := logger.New(cfg.Env)
+	zapLogger, err := logger.New(cfg.AppEnv)
 	if err != nil {
-		panic(err)
+		log.Fatalf("logger error: %v", err)
 	}
 	defer func() {
 		_ = zapLogger.Sync()
 	}()
 
-	stateStore := storage.NewMemoryStore()
-	botManager := bot.NewManager(
-		stateStore,
+	httpClient := &http.Client{Timeout: cfg.HTTPClientTimeout}
+	greenClient := greenapi.NewClient(
+		cfg.GreenAPI.APIURL,
+		cfg.GreenAPI.MediaAPIURL,
+		cfg.GreenAPI.IDInstance,
+		cfg.GreenAPI.APIToken,
+		cfg.ReceiveTimeoutSeconds,
+		httpClient,
+	)
+	openAIClient := openai.NewClient(
+		cfg.OpenAI.APIKey,
+		cfg.OpenAI.Model,
+		cfg.MaxOpenAIOutputTokens,
+		cfg.OpenAI.Temperature,
+		httpClient,
+	)
+	conversationStore := bot.NewConversationStore()
+	botService := bot.NewService(
+		greenClient,
+		openAIClient,
+		conversationStore,
+		cfg.PortfolioVideoDir,
 		bot.PortfolioLinks{
 			TestURL:     cfg.Portfolio.TestURL,
 			BasicURL:    cfg.Portfolio.BasicURL,
 			StandardURL: cfg.Portfolio.StandardURL,
 		},
+		cfg.BotReplyLanguageMode,
 		zapLogger,
 	)
 
-	metaClient := meta.NewClient(cfg.Meta, zapLogger)
-	healthHandler := httpHandler.NewHealthHandler(cfg.Env)
-	webhookHandler := httpHandler.NewWebhookHandler(cfg.Meta, botManager, metaClient, zapLogger)
-
-	server := &http.Server{
-		Addr:              cfg.HTTPAddress(),
-		Handler:           httpserver.NewRouter(healthHandler, webhookHandler, zapLogger),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+	checkPortfolioVideos(cfg.PortfolioVideoDir, zapLogger)
+	if !cfg.BotAutoReplyEnabled {
+		zapLogger.Warn("bot auto reply is disabled; set BOT_AUTO_REPLY_ENABLED=true to start GreenAPI polling")
+		return
 	}
 
-	serverErrors := make(chan error, 1)
-	go func() {
-		zapLogger.Info("http server started", zap.String("addr", server.Addr))
-		serverErrors <- server.ListenAndServe()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	serviceStartedAt := time.Now().UTC()
+	zapLogger.Info("stone greenapi bot started", zap.String("env", cfg.AppEnv))
+	runPolling(ctx, greenClient, botService, conversationStore, cfg.BotMaxMessageAge, cfg.BotAutoReplyEnabled, serviceStartedAt, zapLogger)
+	zapLogger.Info("application stopped")
+}
+
+func runPolling(
+	ctx context.Context,
+	greenClient notificationClient,
+	botService incomingMessageHandler,
+	conversationStore *bot.ConversationStore,
+	maxMessageAge time.Duration,
+	autoReplyEnabled bool,
+	serviceStartedAt time.Time,
+	zapLogger *zap.Logger,
+) {
+	backoff := initialReceiveBackoff
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+
+		notification, ok, err := greenClient.ReceiveNotification(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return
+			}
+			zapLogger.Warn("receiveNotification failed", zap.Error(err), zap.Duration("backoff", backoff))
+			if sleepErr := sleepWithContext(ctx, backoff); sleepErr != nil {
+				return
+			}
+			backoff *= 2
+			if backoff > maxReceiveBackoff {
+				backoff = maxReceiveBackoff
+			}
+			continue
+		}
+		backoff = initialReceiveBackoff
+
+		if !ok {
+			continue
+		}
+
+		processNotification(ctx, greenClient, botService, conversationStore, maxMessageAge, autoReplyEnabled, serviceStartedAt, notification, zapLogger)
+	}
+}
+
+func processNotification(
+	ctx context.Context,
+	greenClient notificationClient,
+	botService incomingMessageHandler,
+	conversationStore *bot.ConversationStore,
+	maxMessageAge time.Duration,
+	autoReplyEnabled bool,
+	serviceStartedAt time.Time,
+	notification *greenapi.Notification,
+	zapLogger *zap.Logger,
+) {
+	if notification == nil {
+		return
+	}
+
+	receiptID := notification.ReceiptID
+	messageID := notification.IDMessage()
+	dedupeMessageID := messageID
+	processingStarted := false
+	processingSucceeded := false
+	shouldDelete := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			zapLogger.Error("panic recovered while processing notification", zap.Any("panic", recovered))
+		}
+		if processingStarted {
+			if err := conversationStore.FinishMessageProcessing(context.Background(), dedupeMessageID, processingSucceeded); err != nil {
+				zapLogger.Warn("message processing finish failed",
+					zap.String("message_id", messageID),
+					zap.Error(err),
+				)
+			}
+		}
+		if !shouldDelete {
+			return
+		}
+		if receiptID <= 0 {
+			return
+		}
+		deleteCtx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
+		defer cancel()
+		if err := greenClient.DeleteNotification(deleteCtx, receiptID); err != nil {
+			zapLogger.Warn("deleteNotification failed", zap.Error(err))
+		}
 	}()
 
-	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	chatID, text, ok, reason := shouldProcessNotification(notification, time.Now(), maxMessageAge, serviceStartedAt, autoReplyEnabled)
+	if !ok {
+		zapLogger.Debug("greenapi notification skipped",
+			zap.String("reason", reason),
+			zap.String("type_webhook", notification.Body.TypeWebhook),
+			zap.String("message_type", notification.TypeMessage()),
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(notification.ChatID())),
+		)
+		shouldDelete = true
+		return
+	}
+	dedupeMessageID = chatID + "|" + messageID
+
+	zapLogger.Info("incoming notification accepted",
+		zap.String("message_type", notification.TypeMessage()),
+		zap.String("message_id", messageID),
+		zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+	)
+
+	dedupeDecision, err := conversationStore.BeginMessageProcessing(ctx, dedupeMessageID)
+	if err != nil {
+		zapLogger.Warn("message dedupe failed", zap.Error(err))
+		return
+	}
+	zapLogger.Info("incoming message dedupe decision",
+		zap.String("message_id", messageID),
+		zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+		zap.String("decision", string(dedupeDecision)),
+	)
+	if dedupeDecision == bot.MessageDedupeDuplicate || dedupeDecision == bot.MessageDedupeInFlight {
+		zapLogger.Debug("duplicate message skipped",
+			zap.String("message_id", messageID),
+			zap.String("decision", string(dedupeDecision)),
+		)
+		shouldDelete = true
+		return
+	}
+	processingStarted = dedupeDecision == bot.MessageDedupeNew
+
+	msg := bot.IncomingMessage{
+		IDMessage:   messageID,
+		ChatID:      chatID,
+		SenderName:  notification.SenderName(),
+		TypeMessage: notification.TypeMessage(),
+		Text:        text,
+	}
+	if err := botService.HandleIncomingMessage(ctx, msg); err != nil {
+		zapLogger.Warn("incoming message handling failed",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+			zap.Error(err),
+		)
+		return
+	}
+	processingSucceeded = true
+	conversationStore.MarkProcessedMessage(chatID, messageID)
+	shouldDelete = true
+}
+
+func shouldProcessNotification(notification *greenapi.Notification, now time.Time, maxMessageAge time.Duration, serviceStartedAt time.Time, autoReplyEnabled bool) (chatID string, text string, ok bool, reason string) {
+	if !autoReplyEnabled {
+		return "", "", false, "auto_reply_disabled"
+	}
+	if notification == nil {
+		return "", "", false, "nil_notification"
+	}
+	if notification.Body.TypeWebhook != greenapi.TypeWebhookIncomingMessage {
+		return "", "", false, "unsupported_webhook"
+	}
+	messageID := notification.IDMessage()
+	if messageID == "" {
+		return "", "", false, "empty_message_id"
+	}
+	if notification.Body.Timestamp <= 0 {
+		return "", "", false, "empty_timestamp"
+	}
+	if isStartupStaleNotification(notification, serviceStartedAt) {
+		return "", "", false, "older_than_startup_grace"
+	}
+	if isStaleNotification(notification, maxMessageAge, now) {
+		return "", "", false, "older_than_max_age"
+	}
+	if !notification.IsTextMessage() {
+		return "", "", false, "unsupported_message_type"
+	}
+	chatID = notification.ChatID()
+	if chatID == "" {
+		return "", "", false, "empty_chat_id"
+	}
+	text = strings.TrimSpace(notification.Text())
+	if text == "" {
+		return "", "", false, "empty_text"
+	}
+	return chatID, text, true, "accepted"
+}
+
+func isStaleNotification(notification *greenapi.Notification, maxAge time.Duration, now time.Time) bool {
+	if notification == nil || maxAge <= 0 || notification.Body.Timestamp <= 0 {
+		return false
+	}
+	sentAt := time.Unix(notification.Body.Timestamp, 0)
+	return now.Sub(sentAt) > maxAge
+}
+
+func isStartupStaleNotification(notification *greenapi.Notification, serviceStartedAt time.Time) bool {
+	if notification == nil || serviceStartedAt.IsZero() || notification.Body.Timestamp <= 0 {
+		return false
+	}
+	sentAt := time.Unix(notification.Body.Timestamp, 0)
+	return sentAt.Before(serviceStartedAt.Add(-startupGracePeriod))
+}
+
+func checkPortfolioVideos(videoDir string, zapLogger *zap.Logger) {
+	for _, fileName := range bot.ExpectedVideoFiles {
+		path := filepath.Join(videoDir, fileName)
+		if _, err := os.Stat(path); err != nil {
+			zapLogger.Warn("portfolio video file is missing", zap.String("file_name", fileName), zap.Error(err))
+		}
+	}
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 
 	select {
-	case err := <-serverErrors:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			zapLogger.Fatal("http server failed", zap.Error(err))
-		}
-	case sig := <-shutdown:
-		zapLogger.Info("shutdown signal received", zap.String("signal", sig.String()))
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		zapLogger.Error("graceful shutdown failed", zap.Error(err))
-		if closeErr := server.Close(); closeErr != nil {
-			zapLogger.Error("server close failed", zap.Error(closeErr))
-		}
-	}
-
-	zapLogger.Info("application stopped")
 }

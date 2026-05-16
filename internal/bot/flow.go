@@ -20,11 +20,11 @@ type PortfolioLinks struct {
 func welcomeMessage(language Language) string {
 	switch language {
 	case LanguageKZ:
-		return "Өтінішіңізге рақмет 🙌 48 сағатта түсірілімсіз жарнамалық AI ролик жасаймыз. Жарнамаға дайын. Баға 35 000 тг бастап. Нишаңыз, мақсатыңыз, мерзіміңіз қандай?"
+		return "48 сағатта түсірілімсіз AI жарнамалық ролик жасаймыз. Баға 35 000 тг бастап. Ниша, платформа және мерзімді жазыңыз."
 	case LanguageEN:
-		return "Thanks for reaching out 🙌 We create AI ad videos in 48 hours without filming, ready for launch. Pricing starts from 35,000 KZT. Please share your niche, goal, and timeline."
+		return "We create AI ad videos in 48 hours without filming. From 35,000 KZT. Share niche, platform, and timeline."
 	default:
-		return "Спасибо за обращение 🙌 Делаем ИИ рекламные ролики за 48 часов без съёмки, под запуск рекламы. Стоимость от 35 000 тг. Чтобы понять, подойдём ли мы вам, подскажите: 1) В какой нише работаете? 2) Какая цель? 3) Сроки?"
+		return "Делаем AI-рекламные ролики за 48 часов без съёмки. Стоимость от 35 000 тг. Подскажите нишу, площадку и сроки запуска."
 	}
 }
 
@@ -42,11 +42,11 @@ func askGoalMessage(language Language) string {
 func askPlatformMessage(language Language) string {
 	switch language {
 	case LanguageKZ:
-		return "Жарнаманы қай платформада іске қосуды жоспарлайсыз: Instagram, TikTok, YouTube немесе басқа ма?"
+		return "Роликті қай жерде қолданасыз: Instagram, TikTok, Facebook, WhatsApp, сайт немесе басқа платформа?"
 	case LanguageEN:
-		return "Which platform will you advertise on: Instagram, TikTok, YouTube, or another channel?"
+		return "Where will you use the video: Instagram, TikTok, Facebook, WhatsApp, website, or another platform?"
 	default:
-		return "Где планируете запускать рекламу: Instagram, TikTok, YouTube или другая площадка?"
+		return "Где планируете запускать ролик: Instagram, TikTok, Facebook, WhatsApp, сайт или другая площадка?"
 	}
 }
 
@@ -80,17 +80,17 @@ func offerMessage(language Language, usedBefore bool) string {
 		case LanguageEN:
 			return "Then we choose by goal: Test 35,000 KZT, Basic 50,000 KZT, or Standard 75,000 KZT."
 		default:
-			return "Тогда подберём формат под задачу: Test 35 000 тг, Basic 50 000 тг или Standard 75 000 тг."
+			return "Тогда подберём формат под цель: тестовый 35 000 тг, базовый 50 000 тг или стандарт 75 000 тг."
 		}
 	}
 
 	switch language {
 	case LanguageKZ:
-		return "Бұрын қолданбасаңыз, Test format 35 000 тг ұсынамыз. Креативті Basic 50 000 тг немесе Standard 75 000 тг алдында тексереміз."
+		return "Бұрын қолданбасаңыз, 35 000 тг тестілік формат ұсынамыз. Basic немесе Standard алдында креативті тексереміз."
 	case LanguageEN:
-		return "If not, start with Test format for 35,000 KZT. We validate the creative before Basic 50,000 KZT or Standard 75,000 KZT."
+		return "If not, start with Test format for 35,000 KZT. We validate the creative before Basic or Standard."
 	default:
-		return "Если ранее не тестировали ИИ-ролики, начните с Test format за 35 000 тг. Проверим креатив перед Basic 50 000 тг или Standard 75 000 тг."
+		return "Тогда рекомендую тестовый формат за 35 000 тг — проверить креатив перед Базовым или Стандартом."
 	}
 }
 
@@ -108,11 +108,11 @@ func portfolioPromptMessage(language Language) string {
 func questionnaireMessage(language Language) string {
 	switch language {
 	case LanguageKZ:
-		return "Қысқа бриф: 1) өнім және құндылық; 2) аудитория ауырсынуы; 3) оффер. Сайт немесе Instagram жіберіңіз."
+		return "Қысқа бриф: 1) не сатасыз; 2) мақсат; 3) аудитория; 4) сайт немесе Instagram."
 	case LanguageEN:
-		return "Brief questionnaire: 1) product and value; 2) audience pains; 3) offer. Please send website or Instagram too."
+		return "Short brief: 1) what you sell; 2) goal; 3) audience; 4) website or Instagram."
 	default:
-		return "Заполните коротко: 1) продукт и ценность; 2) боли аудитории; 3) оффер. Также пришлите сайт или Instagram."
+		return "Отлично. Короткий бриф: 1) что продаёте; 2) цель ролика; 3) аудитория; 4) сайт или Instagram."
 	}
 }
 
@@ -123,16 +123,12 @@ func objectionMessage(language Language) string {
 	case LanguageEN:
 		return "Yes, that is why we use AI: you get a result in 48 hours with a minimal budget."
 	default:
-		return "Да, и именно поэтому мы внедрили ИИ — чтобы вы получали результат за 48 часов с минимальным бюджетом"
+		return "Да, и именно поэтому мы внедрили ИИ — чтобы вы получали результат за 48 часов с минимальным бюджетом."
 	}
 }
 
 func portfolioMessages(language Language, links PortfolioLinks) []string {
-	return []string{
-		portfolioMessage(language, "Test format", links.TestURL),
-		portfolioMessage(language, "Basic format", links.BasicURL),
-		portfolioMessage(language, "Standard format", links.StandardURL),
-	}
+	return []string{portfolioLinksMessage(string(language), links, 0)}
 }
 
 func portfolioMessage(language Language, label string, url string) string {

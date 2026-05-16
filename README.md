@@ -1,80 +1,120 @@
-# Stone Production WhatsApp AI Sales Manager
+# Stone Production WhatsApp Sales Bot
 
-Premium Go backend template for an AI sales manager chatbot prepared for the official Meta WhatsApp Cloud API.
+Go-бот для WhatsApp на базе GreenAPI long polling. Бот консультирует клиентов Stone production по ИИ-рекламным роликам, показывает три формата портфолио и закрывает на короткий бриф.
 
-## Business Rules
+## Возможности
 
-- Offer: AI advertising videos in 48 hours without filming.
-- Ready for ad launch.
-- Prices: 35,000 KZT, 50,000 KZT, 75,000 KZT.
-- Languages: RU, KZ, EN with Russian fallback.
-- Every bot message is validated to stay between 5 and 35 words.
-- The bot uses only configured portfolio links and the business context above.
+- Принимает входящие сообщения через `receiveNotification`.
+- Удаляет обработанные уведомления через `deleteNotification`.
+- Отвечает через OpenAI Responses API строго в JSON-формате.
+- Обрабатывает частые запросы локально: цена, портфолио, форматы, анкета, возражение.
+- Отправляет видео из локальной папки `./video` через GreenAPI `sendFileByUpload`.
+- Хранит последние сообщения и дедупликацию `idMessage` в памяти.
 
-## Endpoints
+## Настройка env
 
-- `GET /health` - health check.
-- `GET /webhook` - Meta webhook verification.
-- `POST /webhook` - Meta webhook receiver.
-
-## Configuration
-
-Copy `.env.example` to `.env` and fill values:
+Создайте `.env` из примера:
 
 ```bash
 cp .env.example .env
 ```
 
-Required runtime variables:
+Заполните значения:
 
-- `APP_PORT`
-- `ENV`
-- `META_API_BASE_URL`
-- `META_WEBHOOK_VERIFY_TOKEN`
+```env
+GREEN_API_URL=https://7107.api.greenapi.com
+GREEN_MEDIA_API_URL=https://media.green-api.com
+GREEN_ID_INSTANCE=your_instance_id
+GREEN_API_TOKEN=your_green_api_token
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_MODEL=gpt-5.5
+OPENAI_TEMPERATURE=0.3
+PORTFOLIO_VIDEO_DIR=./video
+PORTFOLIO_TEST_URL=
+PORTFOLIO_BASIC_URL=
+PORTFOLIO_STANDARD_URL=
+RECEIVE_TIMEOUT_SECONDS=60
+HTTP_CLIENT_TIMEOUT_SECONDS=75
+BOT_REPLY_LANGUAGE_MODE=auto
+BOT_AUTO_REPLY_ENABLED=false
+BOT_MAX_MESSAGE_AGE_SECONDS=120
+MAX_OPENAI_OUTPUT_TOKENS=350
+APP_ENV=local
+```
 
-Meta credentials are intentionally empty in the example file. Set these when Meta provides real values:
+`BOT_AUTO_REPLY_ENABLED=false` держит бота в безопасном режиме: приложение не начнёт polling и не отправит сообщения клиентам. Для боевого запуска явно поставьте `BOT_AUTO_REPLY_ENABLED=true`. `BOT_MAX_MESSAGE_AGE_SECONDS` защищает от старой очереди GreenAPI: уведомления старше этого возраста будут удалены без ответа.
 
-- `META_ACCESS_TOKEN`
-- `META_PHONE_NUMBER_ID`
-- `META_BUSINESS_ACCOUNT_ID`
-- `META_APP_SECRET`
+`ADMIN_CHAT_IDS` опционален и сейчас зарезервирован под будущую эскалацию на менеджера.
 
-Portfolio URLs are configurable:
+## Видео
 
-- `PORTFOLIO_TEST_URL`
-- `PORTFOLIO_BASIC_URL`
-- `PORTFOLIO_STANDARD_URL`
+Положите файлы в папку `./video`:
 
-## Local Run
+```text
+video/video_level_1.mp4
+video/video_level_2.mp4
+video/video_level_3.mp4
+```
+
+Если файл отсутствует, приложение продолжит работать, покажет warning в логах и отправит клиенту текстовый fallback.
+
+## Локальный запуск
 
 ```bash
-export $(grep -v '^#' .env | xargs)
+set -a
+source .env
+set +a
+
 go run ./cmd
 ```
 
-## Docker
+Проверка сборки:
 
 ```bash
-docker compose up --build
+go build ./...
 ```
 
-## Meta Webhook Setup
+## Проверка GreenAPI
 
-Use this callback URL:
+1. Убедитесь, что инстанс GreenAPI авторизован в WhatsApp.
+2. Проверьте, что `GREEN_API_URL`, `GREEN_MEDIA_API_URL`, `GREEN_ID_INSTANCE` и `GREEN_API_TOKEN` заполнены.
+3. Включите входящие уведомления для инстанса: `incomingWebhook=yes`.
+4. Запустите бота и отправьте текстовое сообщение на подключенный WhatsApp с другого номера.
+5. В логах не должно быть регулярных `receiveNotification failed`.
 
-```text
-https://your-domain.com/webhook
+Настроить входящие уведомления можно через кабинет GreenAPI или API:
+
+```bash
+set -a
+source .env
+set +a
+
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"incomingWebhook":"yes"}' \
+  "$GREEN_API_URL/waInstance$GREEN_ID_INSTANCE/setSettings/$GREEN_API_TOKEN"
 ```
 
-Use the exact value from `META_WEBHOOK_VERIFY_TOKEN` as the Meta verify token.
+Бот удаляет входящие уведомления после успешной обработки или безопасного skip. Если отправка ответа не удалась, receipt не удаляется, чтобы GreenAPI мог повторить доставку.
 
-If `META_APP_SECRET` is configured, incoming webhook requests must include a valid `X-Hub-Signature-256` header.
+## Если видео не отправляется
 
-## Architecture
+- Проверьте, что `PORTFOLIO_VIDEO_DIR=./video`.
+- Проверьте имена файлов: `video_level_1.mp4`, `video_level_2.mp4`, `video_level_3.mp4`.
+- Убедитесь, что GreenAPI media endpoint доступен: `GREEN_MEDIA_API_URL=https://media.green-api.com`.
+- Посмотрите warning в логах: там будет только имя файла и ошибка, без токенов и приватных данных клиента.
 
-- `internal/bot` - conversation flow, language detection, message policy.
-- `internal/meta` - WhatsApp Cloud API client and webhook payload types.
-- `internal/storage` - in-memory state store, replaceable with PostgreSQL or Redis.
-- `internal/http` - router and HTTP middleware.
-- `internal/config` - environment-based configuration.
-- `internal/logger` - structured Zap logging.
+## Если OpenAI не отвечает
+
+- Проверьте `OPENAI_API_KEY`, `OPENAI_MODEL` и сетевой доступ.
+- Увеличьте `HTTP_CLIENT_TIMEOUT_SECONDS`, если запросы регулярно не успевают завершиться.
+- При временной ошибке OpenAI бот отправит короткий fallback и удалит notification, чтобы не зациклить очередь.
+
+## Архитектура
+
+- `cmd/main.go` — long polling loop, graceful shutdown, backoff, дедупликация.
+- `internal/config` — env-конфигурация.
+- `internal/greenapi` — receive/delete/send GreenAPI client.
+- `internal/openai` — OpenAI Responses API client.
+- `internal/bot` — sales service, офферы, prompt, in-memory conversation store.
+- `internal/logger` — structured zap logger.

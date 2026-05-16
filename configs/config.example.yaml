@@ -1,17 +1,26 @@
-app:
-  port: "8080"
-  env: "development"
+greenapi:
+  api_url: "https://7107.api.greenapi.com"
+  media_api_url: "https://media.green-api.com"
+  id_instance: "your_instance_id"
+  api_token: "your_green_api_token"
 
-meta:
-  api_base_url: "https://graph.facebook.com/v23.0"
-  access_token: ""
-  phone_number_id: ""
-  business_account_id: ""
-  webhook_verify_token: "change-me"
-  app_secret: ""
-  request_timeout: "10s"
+openai:
+  api_key: "your_openai_api_key"
+  model: "gpt-5.5"
+  temperature: 0.3
+  max_output_tokens: 350
 
 portfolio:
-  test_url: "https://example.com/portfolio/test-format"
-  basic_url: "https://example.com/portfolio/basic-format"
-  standard_url: "https://example.com/portfolio/standard-format"
+  video_dir: "./video"
+
+polling:
+  receive_timeout_seconds: 60
+  http_client_timeout_seconds: 75
+
+bot:
+  reply_language_mode: "auto"
+  auto_reply_enabled: false
+  max_message_age_seconds: 120
+
+app:
+  env: "local"

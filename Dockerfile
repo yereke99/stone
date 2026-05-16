@@ -14,8 +14,8 @@ RUN adduser -D -g "" appuser
 
 WORKDIR /app
 COPY --from=builder /bin/stone /app/stone
+COPY --from=builder /app/video /app/video
 
 USER appuser
-EXPOSE 8080
 
 ENTRYPOINT ["/app/stone"]

@@ -50,6 +50,7 @@ type Conversation struct {
 	SentPortfolio       bool
 	BriefAsked          bool
 	BriefCollected      bool
+	AdminNotifiedAt     time.Time
 	SelectedLevel       int
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
@@ -253,6 +254,45 @@ func (s *ConversationStore) MarkAskedFields(ctx context.Context, chatID string, 
 			conversation.AskedFields[field] = true
 		}
 	}
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return nil
+}
+
+func (s *ConversationStore) AdminNotificationSent(ctx context.Context, chatID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false, nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	return !conversation.AdminNotifiedAt.IsZero(), nil
+}
+
+func (s *ConversationStore) MarkAdminNotified(ctx context.Context, chatID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.AdminNotifiedAt = now
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return nil

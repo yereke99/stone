@@ -79,6 +79,7 @@ func main() {
 		},
 		cfg.BotReplyLanguageMode,
 		zapLogger,
+		cfg.AdminChatIDs...,
 	)
 
 	checkPortfolioVideos(cfg.PortfolioVideoDir, zapLogger)

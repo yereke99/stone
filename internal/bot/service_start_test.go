@@ -10,10 +10,12 @@ import (
 
 type fakeSender struct {
 	messages []string
+	chatIDs  []string
 	files    []string
 }
 
 func (s *fakeSender) SendMessage(ctx context.Context, chatID string, message string) error {
+	s.chatIDs = append(s.chatIDs, chatID)
 	s.messages = append(s.messages, message)
 	return nil
 }

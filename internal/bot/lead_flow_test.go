@@ -489,6 +489,39 @@ func TestBriefAnswerIsCollectedAfterPackageSelection(t *testing.T) {
 	}
 }
 
+func TestAdminNotificationSentOnceAfterBriefCollected(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := NewService(sender, &fakeAI{}, store, "./video", PortfolioLinks{}, "auto", nil, "+7 701 951 9013")
+	chatID := "77010000000@c.us"
+
+	sendText(t, service, chatID, "Стандарт")
+	sendText(t, service, chatID, "Продаём мебель, цель заявки, аудитория семьи, instagram @stone")
+
+	if len(sender.messages) != 3 {
+		t.Fatalf("sent messages = %d, want client brief + client confirmation + admin summary: %#v", len(sender.messages), sender.messages)
+	}
+	if got := sender.chatIDs[2]; got != "77019519013@c.us" {
+		t.Fatalf("admin chat id = %q, want normalized admin chat id", got)
+	}
+	adminMessage := sender.messages[2]
+	if !strings.Contains(adminMessage, "Новая заявка Stone production") ||
+		!strings.Contains(adminMessage, "Клиент: "+chatID) ||
+		!strings.Contains(adminMessage, "Пакет: standard") ||
+		!strings.Contains(adminMessage, "Последнее сообщение: Продаём мебель") {
+		t.Fatalf("unexpected admin message:\n%s", adminMessage)
+	}
+
+	sendText(t, service, chatID, "ок")
+
+	if len(sender.messages) != 4 {
+		t.Fatalf("admin notification repeated, messages = %#v", sender.messages)
+	}
+	if sender.chatIDs[len(sender.chatIDs)-1] != chatID {
+		t.Fatalf("last message chat id = %q, want client chat", sender.chatIDs[len(sender.chatIDs)-1])
+	}
+}
+
 func TestCanceledContextDoesNotSend(t *testing.T) {
 	sender := &fakeSender{}
 	service := newTestService(sender, NewConversationStore(), PortfolioLinks{})

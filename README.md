@@ -39,12 +39,13 @@ BOT_REPLY_LANGUAGE_MODE=auto
 BOT_AUTO_REPLY_ENABLED=false
 BOT_MAX_MESSAGE_AGE_SECONDS=120
 MAX_OPENAI_OUTPUT_TOKENS=350
+ADMIN_CHAT_IDS=77000000000@c.us
 APP_ENV=local
 ```
 
 `BOT_AUTO_REPLY_ENABLED=false` держит бота в безопасном режиме: приложение не начнёт polling и не отправит сообщения клиентам. Для боевого запуска явно поставьте `BOT_AUTO_REPLY_ENABLED=true`. `BOT_MAX_MESSAGE_AGE_SECONDS` защищает от старой очереди GreenAPI: уведомления старше этого возраста будут удалены без ответа.
 
-`ADMIN_CHAT_IDS` опционален и сейчас зарезервирован под будущую эскалацию на менеджера.
+`ADMIN_CHAT_IDS` опционален. Укажите один или несколько WhatsApp chatID через запятую, например `77000000000@c.us`. Когда бот соберёт бриф и переведёт лида в `handoff_required`, он один раз отправит менеджеру текстовое резюме заявки.
 
 ## Видео
 

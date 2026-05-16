@@ -50,11 +50,12 @@ type Service struct {
 	videoDir     string
 	portfolio    PortfolioLinks
 	languageMode string
+	adminChatIDs []string
 	logger       *zap.Logger
 	chatLocks    sync.Map
 }
 
-func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoDir string, portfolio PortfolioLinks, languageMode string, logger *zap.Logger) *Service {
+func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoDir string, portfolio PortfolioLinks, languageMode string, logger *zap.Logger, adminChatIDs ...string) *Service {
 	return &Service{
 		sender:       sender,
 		ai:           ai,
@@ -62,6 +63,7 @@ func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoD
 		videoDir:     videoDir,
 		portfolio:    portfolio,
 		languageMode: languageMode,
+		adminChatIDs: normalizeAdminChatIDs(adminChatIDs),
 		logger:       logger,
 	}
 }
@@ -432,7 +434,11 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		if err := s.store.MarkAskedFields(context.WithoutCancel(ctx), chatID, append(askedFields, fieldsAskedByMessage(message, stage)...)); err != nil {
 			return err
 		}
-		return s.store.UpdateState(context.WithoutCancel(ctx), chatID, stage, selectedLevel)
+		if err := s.store.UpdateState(context.WithoutCancel(ctx), chatID, stage, selectedLevel); err != nil {
+			return err
+		}
+		s.notifyAdminsIfNeeded(context.WithoutCancel(ctx), chatID, stage)
+		return nil
 	}
 
 	if err := s.sender.SendMessage(ctx, chatID, message); err != nil {
@@ -454,7 +460,11 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	if err := s.store.MarkAskedFields(persistCtx, chatID, append(askedFields, fieldsAskedByMessage(message, stage)...)); err != nil {
 		return err
 	}
-	return s.store.UpdateState(persistCtx, chatID, stage, selectedLevel)
+	if err := s.store.UpdateState(persistCtx, chatID, stage, selectedLevel); err != nil {
+		return err
+	}
+	s.notifyAdminsIfNeeded(persistCtx, chatID, stage)
+	return nil
 }
 
 func (s *Service) sendVideos(ctx context.Context, chatID string, files []string, language string, allowRepeat bool) error {
@@ -502,6 +512,164 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 		}
 	}
 	return nil
+}
+
+func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage string) {
+	if len(s.adminChatIDs) == 0 {
+		return
+	}
+	if stage != StageHandoffRequired && stage != StageBriefCollected {
+		return
+	}
+
+	sent, err := s.store.AdminNotificationSent(ctx, chatID)
+	if err != nil {
+		s.warn("admin notification state check failed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Error(err),
+		)
+		return
+	}
+	if sent {
+		return
+	}
+
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		s.warn("admin notification snapshot failed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Error(err),
+		)
+		return
+	}
+	if normalizeLeadStatus(conversation.LeadStatus) != LeadStatusHandoffRequired &&
+		normalizeLeadStatus(conversation.Lead.LeadStatus) != LeadStatusHandoffRequired {
+		return
+	}
+
+	message := adminLeadNotificationText(conversation)
+	for _, adminChatID := range s.adminChatIDs {
+		if err := s.sender.SendMessage(ctx, adminChatID, message); err != nil {
+			s.warn("admin notification send failed",
+				zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
+				zap.String("client_chat_hash", chatFingerprint(chatID)),
+				zap.Error(err),
+			)
+			return
+		}
+		incrementOutgoingCount(ctx)
+		s.info("admin notification sent",
+			zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
+			zap.String("client_chat_hash", chatFingerprint(chatID)),
+		)
+	}
+
+	if err := s.store.MarkAdminNotified(ctx, chatID); err != nil {
+		s.warn("admin notification mark failed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Error(err),
+		)
+	}
+}
+
+func adminLeadNotificationText(conversation Conversation) string {
+	lead := conversation.Lead
+	lines := []string{
+		"Новая заявка Stone production",
+		"Клиент: " + conversation.ChatID,
+	}
+	if link := whatsappLink(conversation.ChatID); link != "" {
+		lines = append(lines, "WhatsApp: "+link)
+	}
+	lines = append(lines,
+		"Статус: "+valueOrDash(conversation.LeadStatus),
+		"Этап: "+valueOrDash(conversation.Stage),
+	)
+	if lead.SelectedPackage != "" {
+		lines = append(lines, "Пакет: "+lead.SelectedPackage)
+	}
+	if lead.Niche != "" {
+		lines = append(lines, "Ниша: "+lead.Niche)
+	}
+	if lead.Goal != "" {
+		lines = append(lines, "Цель: "+lead.Goal)
+	}
+	if platform := lead.platformSummary(); platform != "" {
+		lines = append(lines, "Площадка: "+platform)
+	}
+	if lead.Deadline != "" {
+		lines = append(lines, "Срок: "+lead.Deadline)
+	}
+	if lead.Budget != "" {
+		lines = append(lines, "Бюджет/интерес: "+lead.Budget)
+	}
+	if lead.TargetAudience != "" {
+		lines = append(lines, "Аудитория: "+lead.TargetAudience)
+	}
+	if lead.AIExperience != "" {
+		lines = append(lines, "AI-опыт: "+lead.AIExperience)
+	}
+	if text := strings.TrimSpace(conversation.LastIncomingText); text != "" {
+		lines = append(lines, "Последнее сообщение: "+text)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeAdminChatIDs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		chatID := normalizeWhatsAppChatID(value)
+		if chatID == "" {
+			continue
+		}
+		if _, exists := seen[chatID]; exists {
+			continue
+		}
+		seen[chatID] = struct{}{}
+		result = append(result, chatID)
+	}
+	return result
+}
+
+func normalizeWhatsAppChatID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "@") {
+		return value
+	}
+	var digits strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	phone := digits.String()
+	if len(phone) == 11 && strings.HasPrefix(phone, "8") {
+		phone = "7" + phone[1:]
+	}
+	if phone == "" {
+		return ""
+	}
+	return phone + "@c.us"
+}
+
+func whatsappLink(chatID string) string {
+	phone, _, ok := strings.Cut(strings.TrimSpace(chatID), "@")
+	if !ok || phone == "" {
+		return ""
+	}
+	return "https://wa.me/" + phone
+}
+
+func valueOrDash(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func (s *Service) detectLanguage(text string) string {

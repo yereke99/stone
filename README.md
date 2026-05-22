@@ -6,10 +6,10 @@ Go-бот для WhatsApp на базе GreenAPI long polling. Бот консу
 
 - Принимает входящие сообщения через `receiveNotification`.
 - Удаляет обработанные уведомления через `deleteNotification`.
-- Отвечает через OpenAI Responses API строго в JSON-формате.
+- Ведёт диалог по сохранённой state machine и не начинает воронку заново после рестарта.
 - Обрабатывает частые запросы локально: цена, портфолио, форматы, анкета, возражение.
 - Отправляет видео из локальной папки `./video` через GreenAPI `sendFileByUpload`.
-- Хранит последние сообщения и дедупликацию `idMessage` в памяти.
+- Хранит состояние клиентов, сообщения и дедупликацию в SQLite.
 
 ## Настройка env
 
@@ -29,6 +29,7 @@ GREEN_API_TOKEN=your_green_api_token
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-5.5
 OPENAI_TEMPERATURE=0.3
+DATABASE_PATH=./data/stone.sqlite3
 PORTFOLIO_VIDEO_DIR=./video
 PORTFOLIO_TEST_URL=
 PORTFOLIO_BASIC_URL=
@@ -39,13 +40,16 @@ BOT_REPLY_LANGUAGE_MODE=auto
 BOT_AUTO_REPLY_ENABLED=false
 BOT_MAX_MESSAGE_AGE_SECONDS=120
 MAX_OPENAI_OUTPUT_TOKENS=350
+OWNER_WA_CHAT_ID=
 ADMIN_CHAT_IDS=77000000000@c.us
 APP_ENV=local
 ```
 
 `BOT_AUTO_REPLY_ENABLED=false` держит бота в безопасном режиме: приложение не начнёт polling и не отправит сообщения клиентам. Для боевого запуска явно поставьте `BOT_AUTO_REPLY_ENABLED=true`. `BOT_MAX_MESSAGE_AGE_SECONDS` защищает от старой очереди GreenAPI: уведомления старше этого возраста будут удалены без ответа.
 
-`ADMIN_CHAT_IDS` опционален. Укажите один или несколько WhatsApp chatID через запятую, например `77000000000@c.us`. Когда бот соберёт бриф и передаст лида менеджеру, он один раз отправит менеджеру красивое текстовое резюме заявки.
+`DATABASE_PATH` задаёт SQLite-файл для состояния клиентов и журналов сообщений. На старте приложение только открывает хранилище, применяет миграции и начинает принимать новые GreenAPI notifications; оно не обходит контакты WhatsApp и не отправляет скрипт старым чатам.
+
+`OWNER_WA_CHAT_ID` и `ADMIN_CHAT_IDS` опциональны. Укажите один или несколько WhatsApp chatID через запятую, например `77000000000@c.us`. Когда клиент соглашается на анкету или просит менеджера, бот один раз отправит менеджеру резюме лида.
 
 ## Видео
 
@@ -117,5 +121,5 @@ curl -sS -X POST \
 - `internal/config` — env-конфигурация.
 - `internal/greenapi` — receive/delete/send GreenAPI client.
 - `internal/openai` — OpenAI Responses API client.
-- `internal/bot` — sales service, офферы, prompt, in-memory conversation store.
+- `internal/bot` — sales service, офферы, prompt, SQLite-backed conversation store.
 - `internal/logger` — structured zap logger.

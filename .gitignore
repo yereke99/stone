@@ -2,5 +2,6 @@
 .DS_Store
 bin/
 dist/
+data/
 tmp/
 *.log

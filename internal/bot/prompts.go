@@ -89,11 +89,11 @@ func LanguageChoiceText() string {
 func QualificationGreetingText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Сәлеметсіз бе! 48 сағатта түсірілімсіз AI жарнамалық ролик жасаймыз. Баға 35 000 тг бастап. Нишаңыз, роликті қай жерде қолданатыныңыз — Instagram/TikTok/Facebook/WhatsApp/сайт — және мерзім қандай?"
+		return "Сәлеметсіз бе! Хабарласқаныңызға рахмет 🙌\n\n48 сағатта түсірілімсіз ИИ жарнамалық ролик жасаймыз, жарнамаға дайын.\n\nБаға 35 000 тг бастап.\n\nТүсіну үшін айтыңыз:\n1) Қай нишада жұмыс істейсіз?\n2) Мақсат — өтінім / сату / танымалдық?\n3) Қашан іске қосу керек?"
 	case "en":
-		return "Hello! We create AI ad videos in 48 hours without filming. From 35,000 KZT. Please share your niche, where you will use it — Instagram/TikTok/Facebook/WhatsApp/website — and the timeline."
+		return "Hello! Thanks for reaching out 🙌\n\nWe create AI ad videos in 48 hours without filming, ready to launch ads.\n\nPricing starts from 35,000 KZT.\n\nTo see if this fits, please share:\n1) What niche are you in?\n2) Goal — leads / sales / awareness?\n3) When do you need to launch?"
 	default:
-		return "Здравствуйте! Делаем AI-рекламные ролики за 48 часов без съёмки. Стоимость от 35 000 тг. Подскажите, пожалуйста: какая у вас ниша, где планируете запускать ролик — Instagram/TikTok/Facebook/WhatsApp/сайт — и какие сроки?"
+		return "Здравствуйте! Спасибо за обращение 🙌\n\nДелаем ИИ рекламные ролики за 48 часов без съёмки, под запуск рекламы.\n\nСтоимость от 35 000 тг.\n\nЧтобы понять, подойдём ли мы вам, подскажите:\n1) В какой нише работаете?\n2) Какая цель — заявки / продажи / узнаваемость?\n3) В какие сроки нужно запустить?"
 	}
 }
 
@@ -189,11 +189,66 @@ func HumanHandoffText(language string) string {
 func ObjectionText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Иә, сондықтан біз ИИ қолданамыз — жарнамалық роликті 48 сағатта, минималды бюджетпен алу үшін."
+		return "Түсінемін. Сондықтан 35 000 тг тестілік формат ұсынамыз — алдымен үлкен бюджетсіз креативті тексеру үшін."
 	case "en":
-		return "Yes, that is why we use AI: you get an ad video in 48 hours with a minimal budget."
+		return "I understand. That is why we offer the Test format for 35,000 KZT: first validate the creative without a large budget."
 	default:
-		return "Да, и именно поэтому мы внедрили ИИ — чтобы вы получали результат за 48 часов с минимальным бюджетом."
+		return "Понимаю. Поэтому мы и предлагаем тестовый формат за 35 000 тг, чтобы сначала проверить креатив без большого бюджета."
+	}
+}
+
+func QuestionnaireOfferText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Анкетаны толтырсаңыз, біз тегін сценарий жазып, концепт дайындаймыз. Содан кейін қай формат ыңғайлы екенін таңдайсыз.\n\n1 минут алады.\n\nАнкетаны жіберейін бе?"
+	case "en":
+		return "You can fill in a short questionnaire, we will write a free script and prepare the concept. Then you choose the format that fits.\n\nIt takes 1 minute.\n\nShould I send it?"
+	default:
+		return "Вы можете заполнить анкету, мы пропишем вам бесплатный сценарий, далее подготовим концепт, и уже выберете, какой формат вам подходит.\n\nЭто займет 1 минуту.\n\nОтправить анкету?"
+	}
+}
+
+func packageOptionsText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Форматтар:\nTest — 35 000 тг\nBasic — 50 000 тг\nStandard — 75 000 тг"
+	case "en":
+		return "Packages:\nTest — 35,000 KZT\nBasic — 50,000 KZT\nStandard — 75,000 KZT"
+	default:
+		return "Пакеты:\nTest — 35 000 тг\nBasic — 50 000 тг\nStandard — 75 000 тг"
+	}
+}
+
+func testPackageRecommendationText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Егер алғаш рет іске қосып, форматты тексергіңіз келсе, “Тестовый” пакетін ұсынамын."
+	case "en":
+		return "If you want to launch for the first time and test the format, I recommend the “Test” package."
+	default:
+		return "Если вы хотите запустить впервые и протестировать, предлагаю пакет “Тестовый”."
+	}
+}
+
+func packagesPresentedFallbackText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім. Егер формат ұнаса, қысқа анкетаны жіберемін де, сізге тегін сценарий дайындаймыз."
+	case "en":
+		return "Got it. If the format works for you, I can send a short questionnaire and we will prepare a free script."
+	default:
+		return "Понял вас. Если формат подходит, отправлю короткую анкету — по ней бесплатно подготовим сценарий."
+	}
+}
+
+func questionnaireConfirmationFallbackText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Жақсы. Анкетаны жіберейін бе?"
+	case "en":
+		return "Good. Should I send the questionnaire?"
+	default:
+		return "Хорошо. Отправить анкету?"
 	}
 }
 

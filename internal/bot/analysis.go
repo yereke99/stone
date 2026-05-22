@@ -439,7 +439,7 @@ func extractPreviousAIAds(text string, current LeadState) *bool {
 
 	expectsAnswer := current.HasCoreFields() && current.PreviousAIAds == nil
 	mentionsUse := containsAny(normalized, []string{
-		"использ", "тест", "пробовал", "пробовали", "қолдан", "сына", "used", "tried",
+		"использ", "тест", "попроб", "пробовал", "пробовали", "қолдан", "сына", "used", "tried", "try",
 	})
 	negative := containsAny(normalized, []string{
 		"нет", "не использ", "не проб", "никогда", "первый раз", "впервые", "жоқ", "қолданба", "бірінші рет", "алғаш", "no", "never", "not yet", "not used", "first time",

@@ -40,6 +40,16 @@ const (
 )
 
 const (
+	ClientStateNeutralNew                   = "neutral_new"
+	ClientStateAwaitingQualification        = "awaiting_qualification"
+	ClientStatePackagesPresented            = "packages_presented"
+	ClientStateAwaitingQuestionnaireConfirm = "awaiting_questionnaire_confirmation"
+	ClientStateHandedOff                    = "handed_off"
+	ClientStateStopped                      = "stopped"
+	ClientStateOptOut                       = "opt_out"
+)
+
+const (
 	LeadStatusNeutral         = "neutral"
 	LeadStatusNew             = "new"
 	LeadStatusWarm            = "warm"

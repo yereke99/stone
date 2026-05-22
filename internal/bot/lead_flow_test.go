@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -12,8 +13,8 @@ func newTestService(sender *fakeSender, store *ConversationStore, links Portfoli
 	return NewService(sender, &fakeAI{}, store, "./video", links, "auto", nil)
 }
 
-func newTestServiceWithVideoDir(sender *fakeSender, store *ConversationStore, links PortfolioLinks, videoDir string) *Service {
-	return NewService(sender, &fakeAI{}, store, videoDir, links, "auto", nil)
+func newTestServiceWithVideoDir(sender *fakeSender, store *ConversationStore, links PortfolioLinks, videoDir string, admins ...string) *Service {
+	return NewService(sender, &fakeAI{}, store, videoDir, links, "auto", nil, admins...)
 }
 
 func testVideoDir(t *testing.T) string {
@@ -34,573 +35,276 @@ func sendText(t *testing.T, service *Service, chatID string, text string) {
 	}
 }
 
-func snapshotLead(t *testing.T, store *ConversationStore, chatID string) LeadState {
+func snapshotConversation(t *testing.T, store *ConversationStore, chatID string) Conversation {
 	t.Helper()
 	conversation, err := store.Snapshot(context.Background(), chatID)
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
 	}
-	return conversation.Lead
+	return conversation
 }
 
-func TestPlatformsOnlyAreStoredAsPlatforms(t *testing.T) {
+func TestServiceConstructionSendsNothing(t *testing.T) {
+	sender := &fakeSender{}
+	_ = newTestService(sender, NewConversationStore(), PortfolioLinks{})
+
+	if len(sender.messages) != 0 || len(sender.files) != 0 {
+		t.Fatalf("service construction sent outbound content: messages=%#v files=%#v", sender.messages, sender.files)
+	}
+}
+
+func TestNewClientFirstIncomingSendsOpeningOnce(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestService(sender, store, PortfolioLinks{})
 
-	sendText(t, service, "chat-platforms", "Инстаграм таргет тикток и тд")
-
-	lead := snapshotLead(t, store, "chat-platforms")
-	if lead.Niche != "" {
-		t.Fatalf("niche = %q, want empty", lead.Niche)
-	}
-	if got := strings.Join(lead.Platforms, ","); !strings.Contains(got, "Instagram") || !strings.Contains(got, "TikTok") {
-		t.Fatalf("platforms = %#v, want Instagram and TikTok", lead.Platforms)
-	}
-	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "нишу") || strings.Contains(sender.messages[0], "площад") {
-		t.Fatalf("unexpected reply: %#v", sender.messages)
-	}
-}
-
-func TestGoalAndDeadlineAreStoredWithoutRepeatingGeneralQuestion(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-goal", "Цель продажа больше и срок за неделю")
-
-	lead := snapshotLead(t, store, "chat-goal")
-	if lead.Goal != "рост продаж" {
-		t.Fatalf("goal = %q, want рост продаж", lead.Goal)
-	}
-	if lead.Deadline != "через неделю" {
-		t.Fatalf("deadline = %q, want через неделю", lead.Deadline)
-	}
-	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "В какой нише") || !strings.Contains(sender.messages[0], "где планируете рекламу") {
-		t.Fatalf("unexpected reply: %#v", sender.messages)
-	}
-}
-
-func TestInstagramAndDeadlineDoNotAskPlatformAgain(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-instagram-deadline", "Нужен ролик для Instagram, срок до пятницы")
-
-	lead := snapshotLead(t, store, "chat-instagram-deadline")
-	if got := strings.Join(lead.Platforms, ","); !strings.Contains(got, "Instagram") {
-		t.Fatalf("platforms = %#v, want Instagram", lead.Platforms)
-	}
-	if lead.Deadline != "до пятницы" {
-		t.Fatalf("deadline = %q, want до пятницы", lead.Deadline)
-	}
-	if len(sender.messages) != 1 {
-		t.Fatalf("sent messages = %d, want 1: %#v", len(sender.messages), sender.messages)
-	}
-	reply := strings.ToLower(sender.messages[0])
-	if strings.Contains(reply, "где планируете") || strings.Contains(reply, "instagram/tiktok") || strings.Contains(reply, "площад") {
-		t.Fatalf("bot asked platform again: %q", sender.messages[0])
-	}
-}
-
-func TestNicheGoalDeadlineDoNotTriggerGeneralRepeat(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-core", "Инстаграм таргет тикток")
-	sendText(t, service, "chat-core", "Ниша спорт, цель удвоение продажи, сроки за неделя")
-
-	lead := snapshotLead(t, store, "chat-core")
-	if lead.Niche != "спорт" || lead.Goal != "удвоить продажи" || lead.Deadline != "через неделю" {
-		t.Fatalf("lead = %#v, want core fields collected", lead)
-	}
-	last := sender.messages[len(sender.messages)-1]
-	if strings.Contains(last, "Подскажите нишу, цель") {
-		t.Fatalf("bot repeated general question: %q", last)
-	}
-	if !strings.Contains(last, "Ранее использовали ИИ-ролики") {
-		t.Fatalf("unexpected reply: %q", last)
-	}
-}
-
-func TestPartialAnswersAccumulateIntoState(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-parts", "Инстаграм и тикток")
-	sendText(t, service, "chat-parts", "Цель продажа больше и срок за неделю")
-	sendText(t, service, "chat-parts", "Ниша спорт")
-
-	lead := snapshotLead(t, store, "chat-parts")
-	if lead.Niche != "спорт" || lead.Goal != "рост продаж" || lead.Deadline != "через неделю" || len(lead.Platforms) == 0 {
-		t.Fatalf("lead = %#v, want accumulated state", lead)
-	}
-	last := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(last, "Ранее использовали ИИ-ролики") {
-		t.Fatalf("unexpected reply after completed state: %q", last)
-	}
-}
-
-func TestNegativeReactionAsksOnlyMissingField(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-negative", "ой иди ты надоел")
-
-	if len(sender.messages) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(sender.messages))
-	}
-	got := sender.messages[0]
-	if !strings.Contains(got, "Не буду повторяться") || !strings.Contains(got, "для какой ниши") {
-		t.Fatalf("unexpected negative reaction reply: %q", got)
-	}
-}
-
-func TestPortfolioRequestUsesConfiguredLinksOrAsksFormat(t *testing.T) {
-	t.Run("configured links", func(t *testing.T) {
-		sender := &fakeSender{}
-		store := NewConversationStore()
-		service := newTestService(sender, store, PortfolioLinks{TestURL: "https://example.com/test"})
-
-		sendText(t, service, "chat-portfolio-links", "покажите портфолио")
-
-		if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "https://example.com/test") {
-			t.Fatalf("unexpected portfolio links reply: %#v", sender.messages)
-		}
-	})
-
-	t.Run("missing links", func(t *testing.T) {
-		sender := &fakeSender{}
-		store := NewConversationStore()
-		service := newTestService(sender, store, PortfolioLinks{})
-
-		sendText(t, service, "chat-portfolio-missing", "портфолио")
-
-		if len(sender.messages) != 1 || sender.messages[0] != PortfolioIntroText("ru") {
-			t.Fatalf("unexpected missing portfolio reply: %#v", sender.messages)
-		}
-	})
-}
-
-func TestReadyToOrderSendsBrief(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-ready", "давайте")
-
-	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "Что рекламируем") {
-		t.Fatalf("unexpected ready reply: %#v", sender.messages)
-	}
-}
-
-func TestPreviousAIAnswerOffersTestThenReadySendsBrief(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-offer", "Инстаграм и тикток")
-	sendText(t, service, "chat-offer", "Ниша спорт, цель удвоение продажи, сроки за неделя")
-	sendText(t, service, "chat-offer", "нет не использовал")
-
-	lead := snapshotLead(t, store, "chat-offer")
-	if lead.PreviousAIAds == nil || *lead.PreviousAIAds {
-		t.Fatalf("previous_ai_ads = %#v, want false", lead.PreviousAIAds)
-	}
-	if last := sender.messages[len(sender.messages)-1]; !strings.Contains(last, "тестовый формат за 35 000 тг") {
-		t.Fatalf("unexpected offer reply: %q", last)
-	}
-
-	sendText(t, service, "chat-offer", "давайте")
-
-	if last := sender.messages[len(sender.messages)-1]; !strings.Contains(last, "Что рекламируем") {
-		t.Fatalf("unexpected brief reply: %q", last)
-	}
-}
-
-func TestPackageSelectionIntentStandard(t *testing.T) {
-	analysis := AnalyzeCustomerMessage("Ок стандарт нам надо", LeadState{}, "ru")
-
-	if analysis.Intent != IntentPackageSelection {
-		t.Fatalf("intent = %q, want %q", analysis.Intent, IntentPackageSelection)
-	}
-	if analysis.SelectedLevel != 3 {
-		t.Fatalf("selected level = %d, want 3", analysis.SelectedLevel)
-	}
-}
-
-func TestStandardSelectionMovesToBriefRequested(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-standard", "Ок стандарт нам надо")
+	sendText(t, service, "chat-new", "Здравствуйте")
 
 	if len(sender.messages) != 1 {
 		t.Fatalf("sent messages = %d, want 1: %#v", len(sender.messages), sender.messages)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("sent files = %d, want 0", len(sender.files))
+	if got := sender.messages[0]; got != QualificationGreetingText("ru") {
+		t.Fatalf("unexpected opening:\n%s", got)
 	}
-	got := sender.messages[0]
-	if !strings.Contains(got, "берём стандарт / премиум формат") || !strings.Contains(got, "Что рекламируем") {
-		t.Fatalf("unexpected package brief: %q", got)
-	}
-
-	conversation, err := store.Snapshot(context.Background(), "chat-standard")
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v", err)
-	}
-	if conversation.Stage != StageBriefRequested {
-		t.Fatalf("stage = %q, want %q", conversation.Stage, StageBriefRequested)
-	}
-	if conversation.SelectedLevel != 3 || conversation.Lead.SelectedPackage != "standard" {
-		t.Fatalf("package state = level %d package %q, want standard", conversation.SelectedLevel, conversation.Lead.SelectedPackage)
-	}
-	if !conversation.Lead.BriefRequested {
-		t.Fatal("brief requested flag = false, want true")
+	conversation := snapshotConversation(t, store, "chat-new")
+	if conversation.Stage != ClientStateAwaitingQualification || !conversation.InitialMessageSent {
+		t.Fatalf("state = %q initial=%v, want awaiting qualification with opening sent", conversation.Stage, conversation.InitialMessageSent)
 	}
 }
 
-func TestTestPackageSelectionSendsBriefAndSelectedVideo(t *testing.T) {
+func TestQualificationReplySendsPortfolioAndPackagesOnce(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-qualified"
 
-	sendText(t, service, "chat-test-package", "Берём test")
+	sendText(t, service, chatID, "Здравствуйте")
+	sendText(t, service, chatID, "у меня салон красоты, надо заявки в инсту на этой неделе")
 
-	conversation, err := store.Snapshot(context.Background(), "chat-test-package")
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v", err)
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStatePackagesPresented {
+		t.Fatalf("state = %q, want packages_presented", conversation.Stage)
 	}
-	if conversation.SelectedLevel != 1 || conversation.Lead.SelectedPackage != "test" {
-		t.Fatalf("package state = level %d package %q, want test", conversation.SelectedLevel, conversation.Lead.SelectedPackage)
+	if !conversation.SentPortfolio || !conversation.PackagesSent || !conversation.Lead.PortfolioSent || !conversation.Lead.OfferSent {
+		t.Fatalf("portfolio/packages flags not set: %#v", conversation)
 	}
-	if conversation.Lead.LeadStatus != LeadStatusHot {
-		t.Fatalf("lead status = %q, want %q", conversation.Lead.LeadStatus, LeadStatusHot)
+	if conversation.Lead.Niche != "салон красоты" || conversation.Lead.Goal != "получать заявки" || conversation.Lead.Deadline != "на этой неделе" {
+		t.Fatalf("lead = %#v, want extracted niche/goal/deadline", conversation.Lead)
 	}
-	if conversation.Stage != StageBriefRequested {
-		t.Fatalf("stage = %q, want %q", conversation.Stage, StageBriefRequested)
+	if countMessagesContaining(sender.messages, "Пакеты:") != 1 {
+		t.Fatalf("package options were not sent exactly once: %#v", sender.messages)
 	}
-	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "Короткий бриф") {
-		t.Fatalf("unexpected brief message: %#v", sender.messages)
-	}
-	if len(sender.files) != 1 || filepath.Base(sender.files[0]) != VideoLevel1 {
-		t.Fatalf("sent files = %#v, want %s", sender.files, VideoLevel1)
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want all package examples", sender.files)
 	}
 }
 
-func TestSelectedPackageDoesNotTriggerPackageOptionsAgain(t *testing.T) {
+func TestDuplicateExamplesAreNotSpammed(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-examples"
+
+	sendText(t, service, chatID, "Здравствуйте")
+	sendText(t, service, chatID, "салон красоты, цель заявки, сроки на этой неделе")
+	initialFiles := len(sender.files)
+
+	sendText(t, service, chatID, "скиньте примеры")
+	sendText(t, service, chatID, "можно еще примеры?")
+
+	if len(sender.files) != initialFiles {
+		t.Fatalf("examples repeated: files before=%d after=%d %#v", initialFiles, len(sender.files), sender.files)
+	}
+	if last := sender.messages[len(sender.messages)-1]; !strings.Contains(last, "Пример уже отправлял") {
+		t.Fatalf("unexpected repeat examples reply: %q", last)
+	}
+}
+
+func TestDavaiteSendsQuestionnaireNotifiesAdminAndStops(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77010000000@c.us"
+
+	sendText(t, service, chatID, "Здравствуйте")
+	sendText(t, service, chatID, "салон красоты, цель заявки, сроки на этой неделе")
+	sendText(t, service, chatID, "давайте")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || !conversation.QuestionnaireSent {
+		t.Fatalf("handoff state not set: stage=%q stopped=%v handed=%v questionnaire=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.QuestionnaireSent)
+	}
+	if len(sender.chatIDs) == 0 || sender.chatIDs[len(sender.chatIDs)-1] != "77019519013@c.us" {
+		t.Fatalf("last outbound chat = %q, want admin notification", sender.chatIDs[len(sender.chatIDs)-1])
+	}
+	adminMessage := sender.messages[len(sender.messages)-1]
+	if !strings.Contains(adminMessage, "Новый горячий лид из WhatsApp") ||
+		!strings.Contains(adminMessage, "ChatID: "+chatID) ||
+		!strings.Contains(adminMessage, "Статус: передан менеджеру") {
+		t.Fatalf("unexpected admin summary:\n%s", adminMessage)
+	}
+
+	before := len(sender.messages)
+	sendText(t, service, chatID, "и еще вопрос")
+	if len(sender.messages) != before {
+		t.Fatalf("bot replied after handoff: %#v", sender.messages[before:])
+	}
+}
+
+func TestSQLiteRestartContinuesSavedState(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "stone.sqlite3")
+	chatID := "77020000000@c.us"
+
+	store1, err := NewSQLiteConversationStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteConversationStore() error = %v", err)
+	}
+	sender1 := &fakeSender{}
+	service1 := newTestServiceWithVideoDir(sender1, store1, PortfolioLinks{}, testVideoDir(t))
+	sendText(t, service1, chatID, "Здравствуйте")
+	sendText(t, service1, chatID, "мебель, цель продажи, срок через неделю")
+	if err := store1.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	store2, err := NewSQLiteConversationStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteConversationStore() after restart error = %v", err)
+	}
+	defer func() {
+		_ = store2.Close()
+	}()
+	sender2 := &fakeSender{}
+	service2 := newTestServiceWithVideoDir(sender2, store2, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+
+	sendText(t, service2, chatID, "давайте")
+
+	if countMessagesContaining(sender2.messages, "Спасибо за обращение") != 0 {
+		t.Fatalf("opening was resent after restart: %#v", sender2.messages)
+	}
+	conversation := snapshotConversation(t, store2, chatID)
+	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped {
+		t.Fatalf("state after restart = %q stopped=%v, want handed_off/stopped", conversation.Stage, conversation.Stopped)
+	}
+}
+
+func TestSQLiteMessageDedupeSurvivesRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "stone.sqlite3")
+	log := WhatsAppMessageLog{
+		ChatID:            "77025500000@c.us",
+		GreenAPIMessageID: "green-msg-1",
+		DedupeKey:         "77025500000@c.us|green-msg-1",
+		Direction:         "incoming",
+		MessageType:       "textMessage",
+		Text:              "Здравствуйте",
+	}
+
+	store1, err := NewSQLiteConversationStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteConversationStore() error = %v", err)
+	}
+	decision, err := store1.BeginIncomingMessageProcessing(context.Background(), log)
+	if err != nil {
+		t.Fatalf("BeginIncomingMessageProcessing() error = %v", err)
+	}
+	if decision != MessageDedupeNew {
+		t.Fatalf("decision = %q, want new", decision)
+	}
+	if err := store1.FinishMessageProcessing(context.Background(), log.DedupeKey, true); err != nil {
+		t.Fatalf("FinishMessageProcessing() error = %v", err)
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	store2, err := NewSQLiteConversationStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteConversationStore() after restart error = %v", err)
+	}
+	defer func() {
+		_ = store2.Close()
+	}()
+	decision, err = store2.BeginIncomingMessageProcessing(context.Background(), log)
+	if err != nil {
+		t.Fatalf("BeginIncomingMessageProcessing() after restart error = %v", err)
+	}
+	if decision != MessageDedupeDuplicate {
+		t.Fatalf("decision after restart = %q, want duplicate", decision)
+	}
+}
+
+func TestExistingProcessedClientContinuesFromSavedState(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestService(sender, store, PortfolioLinks{})
+	chatID := "chat-existing"
 
-	sendText(t, service, "chat-no-repeat", "Ок стандарт нам надо")
-	sendText(t, service, "chat-no-repeat", "Ок")
+	sendText(t, service, chatID, "Здравствуйте")
+	sendText(t, service, chatID, "мебель, цель продажи, срок через неделю")
+	sendText(t, service, chatID, "сколько стоит стандарт?")
 
-	if len(sender.messages) != 2 {
-		t.Fatalf("sent messages = %d, want 2: %#v", len(sender.messages), sender.messages)
+	if countMessagesContaining(sender.messages, "Спасибо за обращение") != 1 {
+		t.Fatalf("opening count = %d, want 1: %#v", countMessagesContaining(sender.messages, "Спасибо за обращение"), sender.messages)
 	}
 	last := sender.messages[len(sender.messages)-1]
-	if strings.Contains(last, "35 000") || strings.Contains(last, "50 000") || strings.Contains(last, "75 000") {
-		t.Fatalf("bot repeated package options after selection: %q", last)
-	}
-	if !strings.Contains(last, "короткий бриф") {
-		t.Fatalf("unexpected follow-up after brief request: %q", last)
+	if strings.Contains(last, "Спасибо за обращение") || !strings.Contains(last, "75 000") {
+		t.Fatalf("existing client did not continue from packages state: %q", last)
 	}
 }
 
-func TestReturningClientWithSelectedPackageGetsBriefContinuation(t *testing.T) {
+func TestOptOutStopsMarketingReplies(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestService(sender, store, PortfolioLinks{})
-	chatID := "chat-returning-brief"
+	chatID := "chat-optout"
 
-	if err := store.UpdateLanguage(context.Background(), chatID, "ru"); err != nil {
-		t.Fatalf("UpdateLanguage() error = %v", err)
+	sendText(t, service, chatID, "Здравствуйте")
+	sendText(t, service, chatID, "не интересно")
+	sendText(t, service, chatID, "алло")
+
+	if len(sender.messages) != 1 {
+		t.Fatalf("sent messages after opt-out = %#v, want only opening", sender.messages)
 	}
-	if err := store.UpdateLead(context.Background(), chatID, LeadState{
-		HasBeenGreeted:  true,
-		SelectedPackage: "standard",
-		PortfolioSent:   true,
-		OfferSent:       true,
-		BriefRequested:  true,
-		LeadStatus:      LeadStatusHot,
-	}); err != nil {
-		t.Fatalf("UpdateLead() error = %v", err)
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.Stopped {
+		t.Fatalf("opt-out state = stage=%q optout=%v stopped=%v", conversation.Stage, conversation.OptOut, conversation.Stopped)
 	}
-	if err := store.UpdateState(context.Background(), chatID, StageBriefRequested, 3); err != nil {
-		t.Fatalf("UpdateState() error = %v", err)
-	}
+}
+
+func TestMultipleQuickMessagesDoNotDuplicateBotResponses(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-quick"
 
 	sendText(t, service, chatID, "Здравствуйте")
 
-	if len(sender.messages) != 1 {
-		t.Fatalf("sent messages = %d, want 1: %#v", len(sender.messages), sender.messages)
+	var wg sync.WaitGroup
+	for _, text := range []string{
+		"салон красоты, цель заявки, срок на этой неделе",
+		"салон красоты, цель заявки, срок на этой неделе",
+	} {
+		wg.Add(1)
+		go func(value string) {
+			defer wg.Done()
+			if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{ChatID: chatID, Text: value}); err != nil {
+				t.Errorf("HandleIncomingMessage() error = %v", err)
+			}
+		}(text)
 	}
-	got := sender.messages[0]
-	if !strings.Contains(got, "продолжить по стандарт") || !strings.Contains(got, "короткий бриф") {
-		t.Fatalf("unexpected returning reply: %q", got)
-	}
-	if strings.Contains(got, "35 000") || strings.Contains(got, "нишу") || strings.Contains(got, "Портфолио") {
-		t.Fatalf("returning reply repeated sales script: %q", got)
+	wg.Wait()
+
+	if countMessagesContaining(sender.messages, "Пакеты:") != 1 {
+		t.Fatalf("package responses duplicated: %#v", sender.messages)
 	}
 }
 
-func TestOfferSentStandardPriceQuestionAnswersOnlyStandard(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-	chatID := "chat-standard-price"
-
-	if err := store.UpdateLanguage(context.Background(), chatID, "ru"); err != nil {
-		t.Fatalf("UpdateLanguage() error = %v", err)
+func countMessagesContaining(messages []string, needle string) int {
+	count := 0
+	for _, message := range messages {
+		if strings.Contains(message, needle) {
+			count++
+		}
 	}
-	if err := store.UpdateLead(context.Background(), chatID, LeadState{
-		HasBeenGreeted: true,
-		PortfolioSent:  true,
-		OfferSent:      true,
-		LeadStatus:     LeadStatusWarm,
-	}); err != nil {
-		t.Fatalf("UpdateLead() error = %v", err)
-	}
-	if err := store.UpdateState(context.Background(), chatID, StagePackageSuggested, 0); err != nil {
-		t.Fatalf("UpdateState() error = %v", err)
-	}
-
-	sendText(t, service, chatID, "А стандарт сколько стоит?")
-
-	if len(sender.messages) != 1 {
-		t.Fatalf("sent messages = %d, want 1: %#v", len(sender.messages), sender.messages)
-	}
-	got := sender.messages[0]
-	if got != "Стандарт / премиум формат — от 75 000 тг. Он подходит, если нужен сильный ролик под рекламу и масштабирование." {
-		t.Fatalf("unexpected standard price reply: %q", got)
-	}
-	if strings.Contains(got, "тестовый") || strings.Contains(got, "базовый") || strings.Contains(got, "Портфолио") {
-		t.Fatalf("price reply repeated full offer: %q", got)
-	}
-}
-
-func TestPackageQuestionDoesNotSelectPackageOrRestartFunnel(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-	chatID := "chat-basic-question"
-
-	if err := store.UpdateLanguage(context.Background(), chatID, "ru"); err != nil {
-		t.Fatalf("UpdateLanguage() error = %v", err)
-	}
-	if err := store.UpdateLead(context.Background(), chatID, LeadState{
-		HasBeenGreeted: true,
-		PortfolioSent:  true,
-		OfferSent:      true,
-		LeadStatus:     LeadStatusWarm,
-	}); err != nil {
-		t.Fatalf("UpdateLead() error = %v", err)
-	}
-	if err := store.UpdateState(context.Background(), chatID, StagePackageSuggested, 0); err != nil {
-		t.Fatalf("UpdateState() error = %v", err)
-	}
-
-	sendText(t, service, chatID, "А basic чем отличается?")
-
-	conversation, err := store.Snapshot(context.Background(), chatID)
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v", err)
-	}
-	if conversation.SelectedLevel != 0 || conversation.Lead.SelectedPackage != "" {
-		t.Fatalf("package was selected: level=%d package=%q", conversation.SelectedLevel, conversation.Lead.SelectedPackage)
-	}
-	got := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(got, "Basic за 50 000 тг") || strings.Contains(got, "какая у вас ниша") {
-		t.Fatalf("unexpected package question reply: %q", got)
-	}
-}
-
-func TestPortfolioRequestDoesNotSelectPackage(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{StandardURL: "https://example.com/standard"})
-
-	sendText(t, service, "chat-portfolio-not-selected", "покажите стандарт портфолио")
-
-	conversation, err := store.Snapshot(context.Background(), "chat-portfolio-not-selected")
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v", err)
-	}
-	if !conversation.Lead.PortfolioSent {
-		t.Fatal("portfolio sent flag = false, want true")
-	}
-	if conversation.SelectedLevel != 0 || conversation.Lead.SelectedPackage != "" {
-		t.Fatalf("portfolio request selected package: level=%d package=%q", conversation.SelectedLevel, conversation.Lead.SelectedPackage)
-	}
-	if conversation.Lead.LeadStatus != LeadStatusWarm {
-		t.Fatalf("lead status = %q, want %q", conversation.Lead.LeadStatus, LeadStatusWarm)
-	}
-}
-
-func TestPortfolioRequestTwiceDoesNotRepeatVideo(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
-
-	sendText(t, service, "chat-portfolio-repeat", "Можно примеры?")
-	sendText(t, service, "chat-portfolio-repeat", "Пришлите примеры")
-
-	if len(sender.files) != 1 {
-		t.Fatalf("sent files = %#v, want one video", sender.files)
-	}
-	if last := sender.messages[len(sender.messages)-1]; !strings.Contains(last, "Пример уже отправлял") {
-		t.Fatalf("unexpected repeat portfolio reply: %q", last)
-	}
-}
-
-func TestBriefAnswerIsCollectedAfterPackageSelection(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
-
-	sendText(t, service, "chat-brief", "Стандарт")
-	sendText(t, service, "chat-brief", "Продаём мебель, цель заявки, аудитория семьи, instagram @stone")
-
-	conversation, err := store.Snapshot(context.Background(), "chat-brief")
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v", err)
-	}
-	if conversation.Stage != StageHandoffRequired {
-		t.Fatalf("stage = %q, want %q", conversation.Stage, StageHandoffRequired)
-	}
-	if !conversation.Lead.ContactBriefReady {
-		t.Fatal("contact brief ready = false, want true")
-	}
-	if !conversation.Lead.BriefCompleted {
-		t.Fatal("brief completed = false, want true")
-	}
-	if conversation.Lead.LeadStatus != LeadStatusHandoffRequired {
-		t.Fatalf("lead status = %q, want %q", conversation.Lead.LeadStatus, LeadStatusHandoffRequired)
-	}
-	if last := sender.messages[len(sender.messages)-1]; strings.Contains(last, "35 000") || !strings.Contains(last, "Принял") {
-		t.Fatalf("unexpected brief collected reply: %q", last)
-	}
-}
-
-func TestAdminNotificationSentOnceAfterBriefCollected(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := NewService(sender, &fakeAI{}, store, "./video", PortfolioLinks{}, "auto", nil, "+7 701 951 9013")
-	chatID := "77010000000@c.us"
-
-	sendText(t, service, chatID, "Стандарт")
-	sendText(t, service, chatID, "Продаём мебель, цель заявки, аудитория семьи, instagram @stone")
-
-	if len(sender.messages) != 3 {
-		t.Fatalf("sent messages = %d, want client brief + client confirmation + admin summary: %#v", len(sender.messages), sender.messages)
-	}
-	if got := sender.chatIDs[2]; got != "77019519013@c.us" {
-		t.Fatalf("admin chat id = %q, want normalized admin chat id", got)
-	}
-	adminMessage := sender.messages[2]
-	if !strings.Contains(adminMessage, "🔥 Новая заявка Stone production") ||
-		!strings.Contains(adminMessage, "📞 Телефон клиента: +7 701 000 00 00") ||
-		!strings.Contains(adminMessage, "📌 Статус: Передать менеджеру") ||
-		!strings.Contains(adminMessage, "🧭 Этап: Бриф принят, нужен менеджер") ||
-		!strings.Contains(adminMessage, "📦 Пакет: Standard / Стандарт") ||
-		!strings.Contains(adminMessage, "📝 Последнее сообщение: Продаём мебель") {
-		t.Fatalf("unexpected admin message:\n%s", adminMessage)
-	}
-	if strings.Contains(adminMessage, "handoff_required") || strings.Contains(adminMessage, "AI-опыт") {
-		t.Fatalf("admin message contains technical fields:\n%s", adminMessage)
-	}
-
-	sendText(t, service, chatID, "ок")
-
-	if len(sender.messages) != 4 {
-		t.Fatalf("admin notification repeated, messages = %#v", sender.messages)
-	}
-	if sender.chatIDs[len(sender.chatIDs)-1] != chatID {
-		t.Fatalf("last message chat id = %q, want client chat", sender.chatIDs[len(sender.chatIDs)-1])
-	}
-}
-
-func TestOperatorRequestSendsUrgentAdminNotification(t *testing.T) {
-	sender := &fakeSender{}
-	store := NewConversationStore()
-	service := NewService(sender, &fakeAI{}, store, "./video", PortfolioLinks{}, "auto", nil, "+7 701 951 9013")
-	chatID := "77471850499@c.us"
-
-	if err := store.UpdateLanguage(context.Background(), chatID, "ru"); err != nil {
-		t.Fatalf("UpdateLanguage() error = %v", err)
-	}
-	if err := store.UpdateLead(context.Background(), chatID, LeadState{
-		Niche:         "продажи спортивной беговой обуви",
-		Goal:          "рост продаж",
-		Platforms:     []string{"Instagram", "TikTok", "сайт"},
-		Platform:      "Instagram, TikTok, сайт",
-		Deadline:      "за 3 дня",
-		PortfolioSent: true,
-		LeadStatus:    LeadStatusWarm,
-	}); err != nil {
-		t.Fatalf("UpdateLead() error = %v", err)
-	}
-	if err := store.UpdateState(context.Background(), chatID, StagePortfolioSent, 0); err != nil {
-		t.Fatalf("UpdateState() error = %v", err)
-	}
-
-	sendText(t, service, chatID, "ну пишите к админу срочно! мне видео надо стандарт пакет хочу купить! пример отправьте срочно")
-
-	if len(sender.messages) != 2 {
-		t.Fatalf("sent messages = %d, want client handoff + urgent admin summary: %#v", len(sender.messages), sender.messages)
-	}
-	if sender.chatIDs[0] != chatID {
-		t.Fatalf("client reply chat id = %q, want %q", sender.chatIDs[0], chatID)
-	}
-	if !strings.Contains(sender.messages[0], "подключаю менеджера") {
-		t.Fatalf("unexpected client reply: %q", sender.messages[0])
-	}
-	if sender.chatIDs[1] != "77019519013@c.us" {
-		t.Fatalf("admin chat id = %q, want normalized admin chat id", sender.chatIDs[1])
-	}
-	adminMessage := sender.messages[1]
-	if !strings.Contains(adminMessage, "🚨 Срочно: клиент просит оператора") ||
-		!strings.Contains(adminMessage, "📞 Телефон клиента: +7 747 185 04 99") ||
-		!strings.Contains(adminMessage, "📌 Статус: Срочно нужен оператор") ||
-		!strings.Contains(adminMessage, "🧭 Этап: Клиент просит живого менеджера") ||
-		!strings.Contains(adminMessage, "📦 Пакет: Standard / Стандарт") ||
-		!strings.Contains(adminMessage, "🏷 Ниша: продажи спортивной беговой обуви") {
-		t.Fatalf("unexpected urgent admin message:\n%s", adminMessage)
-	}
-	if strings.Contains(adminMessage, "handoff_required") || strings.Contains(adminMessage, "AI-опыт") {
-		t.Fatalf("urgent admin message contains technical fields:\n%s", adminMessage)
-	}
-
-	conversation, err := store.Snapshot(context.Background(), chatID)
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v", err)
-	}
-	if conversation.Stage != StageHandoffRequired || conversation.Lead.LeadStatus != LeadStatusHandoffRequired {
-		t.Fatalf("handoff state = stage %q status %q, want handoff_required", conversation.Stage, conversation.Lead.LeadStatus)
-	}
-	if conversation.Lead.SelectedPackage != "standard" {
-		t.Fatalf("selected package = %q, want standard", conversation.Lead.SelectedPackage)
-	}
-}
-
-func TestCanceledContextDoesNotSend(t *testing.T) {
-	sender := &fakeSender{}
-	service := newTestService(sender, NewConversationStore(), PortfolioLinks{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := service.HandleIncomingMessage(ctx, IncomingMessage{ChatID: "chat-cancel", Text: "Здравствуйте"})
-	if err == nil {
-		t.Fatal("HandleIncomingMessage() error = nil, want context cancellation")
-	}
-	if len(sender.messages) != 0 || len(sender.files) != 0 {
-		t.Fatalf("sent after cancellation: messages=%#v files=%#v", sender.messages, sender.files)
-	}
+	return count
 }

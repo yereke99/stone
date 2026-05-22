@@ -138,6 +138,27 @@ func TestRepeatedSameIDMessageDoesNotSendAgain(t *testing.T) {
 	}
 }
 
+func TestMissingIDMessageUsesFallbackDedupe(t *testing.T) {
+	client := &fakeNotificationClient{}
+	handler := &fakeIncomingHandler{}
+	store := bot.NewConversationStore()
+	logger := zap.NewNop()
+
+	first := incomingTextNotification(251, "", "77025000000@c.us", "Здравствуйте")
+	second := incomingTextNotification(252, "", "77025000000@c.us", "Здравствуйте")
+	second.Body.Timestamp = first.Body.Timestamp
+
+	processNotification(context.Background(), client, handler, store, time.Hour, true, time.Time{}, first, logger)
+	processNotification(context.Background(), client, handler, store, time.Hour, true, time.Time{}, second, logger)
+
+	if handler.calls != 1 {
+		t.Fatalf("handler calls = %d, want 1", handler.calls)
+	}
+	if len(client.deleted) != 2 {
+		t.Fatalf("deleted receipts = %#v, want two acknowledgements", client.deleted)
+	}
+}
+
 func TestOutgoingAndStatusNotificationsAreSkipped(t *testing.T) {
 	tests := []struct {
 		name        string

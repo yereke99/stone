@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,7 +70,15 @@ func main() {
 		cfg.OpenAI.Temperature,
 		httpClient,
 	)
-	conversationStore := bot.NewConversationStore()
+	conversationStore, err := bot.NewSQLiteConversationStore(context.Background(), cfg.Database.Path)
+	if err != nil {
+		log.Fatalf("storage error: %v", err)
+	}
+	defer func() {
+		if err := conversationStore.Close(); err != nil {
+			zapLogger.Warn("storage close failed", zap.Error(err))
+		}
+	}()
 	botService := bot.NewService(
 		greenClient,
 		openAIClient,
@@ -197,7 +209,7 @@ func processNotification(
 		shouldDelete = true
 		return
 	}
-	dedupeMessageID = chatID + "|" + messageID
+	messageID, dedupeMessageID = notificationMessageKeys(notification, chatID, text)
 
 	zapLogger.Info("incoming notification accepted",
 		zap.String("message_type", notification.TypeMessage()),
@@ -205,7 +217,16 @@ func processNotification(
 		zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
 	)
 
-	dedupeDecision, err := conversationStore.BeginMessageProcessing(ctx, dedupeMessageID)
+	dedupeDecision, err := conversationStore.BeginIncomingMessageProcessing(ctx, bot.WhatsAppMessageLog{
+		ChatID:            chatID,
+		DisplayName:       notification.SenderName(),
+		GreenAPIMessageID: messageID,
+		DedupeKey:         dedupeMessageID,
+		Direction:         "incoming",
+		MessageType:       notification.TypeMessage(),
+		Text:              text,
+		RawPayloadJSON:    notificationRawJSON(notification),
+	})
 	if err != nil {
 		zapLogger.Warn("message dedupe failed", zap.Error(err))
 		return
@@ -227,10 +248,12 @@ func processNotification(
 
 	msg := bot.IncomingMessage{
 		IDMessage:   messageID,
+		DedupeKey:   dedupeMessageID,
 		ChatID:      chatID,
 		SenderName:  notification.SenderName(),
 		TypeMessage: notification.TypeMessage(),
 		Text:        text,
+		Timestamp:   time.Unix(notification.Body.Timestamp, 0).UTC(),
 	}
 	if err := botService.HandleIncomingMessage(ctx, msg); err != nil {
 		zapLogger.Warn("incoming message handling failed",
@@ -241,7 +264,7 @@ func processNotification(
 		return
 	}
 	processingSucceeded = true
-	conversationStore.MarkProcessedMessage(chatID, messageID)
+	conversationStore.MarkProcessedMessage(chatID, dedupeMessageID)
 	shouldDelete = true
 }
 
@@ -254,10 +277,6 @@ func shouldProcessNotification(notification *greenapi.Notification, now time.Tim
 	}
 	if notification.Body.TypeWebhook != greenapi.TypeWebhookIncomingMessage {
 		return "", "", false, "unsupported_webhook"
-	}
-	messageID := notification.IDMessage()
-	if messageID == "" {
-		return "", "", false, "empty_message_id"
 	}
 	if notification.Body.Timestamp <= 0 {
 		return "", "", false, "empty_timestamp"
@@ -280,6 +299,28 @@ func shouldProcessNotification(notification *greenapi.Notification, now time.Tim
 		return "", "", false, "empty_text"
 	}
 	return chatID, text, true, "accepted"
+}
+
+func notificationMessageKeys(notification *greenapi.Notification, chatID string, text string) (messageID string, dedupeKey string) {
+	messageID = notification.IDMessage()
+	if messageID != "" {
+		return messageID, chatID + "|" + messageID
+	}
+	normalizedText := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(text))), " ")
+	timestamp := strconv.FormatInt(notification.Body.Timestamp, 10)
+	sum := sha256.Sum256([]byte(chatID + "|" + timestamp + "|" + normalizedText))
+	return "", chatID + "|fallback|" + timestamp + "|" + hex.EncodeToString(sum[:])[:16]
+}
+
+func notificationRawJSON(notification *greenapi.Notification) string {
+	if notification == nil {
+		return ""
+	}
+	data, err := json.Marshal(notification)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func isStaleNotification(notification *greenapi.Notification, maxAge time.Duration, now time.Time) bool {

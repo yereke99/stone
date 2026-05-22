@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ type LeadData = LeadState
 
 type Conversation struct {
 	ChatID                  string
+	Phone                   string
+	DisplayName             string
 	Language                string
 	Stage                   string
 	LeadStatus              string
@@ -50,6 +53,14 @@ type Conversation struct {
 	SentPortfolio           bool
 	BriefAsked              bool
 	BriefCollected          bool
+	InitialMessageSent      bool
+	PackagesSent            bool
+	QuestionnaireOfferSent  bool
+	QuestionnaireSent       bool
+	HandedOffToOwner        bool
+	Stopped                 bool
+	OptOut                  bool
+	LastProcessedMessageID  string
 	AdminNotifiedAt         time.Time
 	AdminOperatorNotifiedAt time.Time
 	SelectedLevel           int
@@ -60,6 +71,7 @@ type Conversation struct {
 
 type ConversationStore struct {
 	mu              sync.RWMutex
+	db              *sql.DB
 	conversations   map[string]*Conversation
 	processed       map[string]time.Time
 	processing      map[string]time.Time
@@ -119,6 +131,9 @@ func (s *ConversationStore) FinishMessageProcessing(ctx context.Context, message
 	delete(s.processing, messageID)
 	if success {
 		s.processed[messageID] = now
+		if err := s.markMessageProcessedLocked(ctx, messageID, now); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -181,6 +196,7 @@ func (s *ConversationStore) Update(chatID string, fn func(*Conversation)) {
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
+	_ = s.persistConversationLocked(context.Background(), conversation)
 }
 
 func (s *ConversationStore) MarkProcessedMessage(chatID, messageID string) bool {
@@ -201,8 +217,10 @@ func (s *ConversationStore) MarkProcessedMessage(chatID, messageID string) bool 
 	}
 	conversation.ProcessedMessageIDs[messageID] = now
 	s.processed[messageID] = now
+	conversation.LastProcessedMessageID = messageID
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
+	_ = s.persistConversationLocked(context.Background(), conversation)
 	return true
 }
 
@@ -229,9 +247,10 @@ func (s *ConversationStore) MarkIncoming(ctx context.Context, chatID string, tex
 	conversation := s.getOrCreateLocked(chatID, now)
 	conversation.LastIncomingText = text
 	conversation.LastIncomingAt = now
+	conversation.Stopped = conversation.Stopped || conversation.Stage == ClientStateStopped || conversation.Stage == ClientStateOptOut
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) MarkAskedFields(ctx context.Context, chatID string, fields []string) error {
@@ -257,7 +276,7 @@ func (s *ConversationStore) MarkAskedFields(ctx context.Context, chatID string, 
 	}
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) AdminNotificationSent(ctx context.Context, chatID string) (bool, error) {
@@ -294,9 +313,10 @@ func (s *ConversationStore) MarkAdminNotified(ctx context.Context, chatID string
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
 	conversation.AdminNotifiedAt = now
+	conversation.HandedOffToOwner = true
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) AdminOperatorNotificationSent(ctx context.Context, chatID string) (bool, error) {
@@ -333,9 +353,10 @@ func (s *ConversationStore) MarkAdminOperatorNotified(ctx context.Context, chatI
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
 	conversation.AdminOperatorNotifiedAt = now
+	conversation.HandedOffToOwner = true
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) AppendMessage(ctx context.Context, chatID string, role string, content string) error {
@@ -362,7 +383,7 @@ func (s *ConversationStore) AppendMessage(ctx context.Context, chatID string, ro
 	}
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) Snapshot(ctx context.Context, chatID string) (Conversation, error) {
@@ -398,6 +419,7 @@ func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stag
 		conversation.Lead.SelectedPackage = packageKey(selectedLevel)
 	}
 	conversation.Lead = updateLeadFlagsForStage(conversation.Lead, stage)
+	updateConversationFlagsForStage(conversation, stage)
 	switch stage {
 	case StagePortfolioSent, StagePortfolio:
 		conversation.Lead.PortfolioSent = true
@@ -418,7 +440,7 @@ func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stag
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) UpdateLead(ctx context.Context, chatID string, lead LeadState) error {
@@ -443,7 +465,7 @@ func (s *ConversationStore) UpdateLead(ctx context.Context, chatID string, lead 
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) UpdateLanguage(ctx context.Context, chatID string, language string) error {
@@ -466,7 +488,7 @@ func (s *ConversationStore) UpdateLanguage(ctx context.Context, chatID string, l
 	conversation.Language = language
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) RecentlySentReply(ctx context.Context, chatID string, message string, window time.Duration) (bool, error) {
@@ -504,7 +526,7 @@ func (s *ConversationStore) MarkReplySent(ctx context.Context, chatID string, me
 	conversation.LastReplyAt = now
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) ShouldSendVideo(ctx context.Context, chatID string, fileName string, allowRepeat bool) (bool, error) {
@@ -552,7 +574,7 @@ func (s *ConversationStore) MarkVideoSent(ctx context.Context, chatID string, fi
 	conversation.CompletedFields = completedFieldsForLead(conversation.Lead)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
-	return nil
+	return s.persistConversationLocked(ctx, conversation)
 }
 
 func (s *ConversationStore) getOrCreateLocked(chatID string, now time.Time) *Conversation {
@@ -560,6 +582,8 @@ func (s *ConversationStore) getOrCreateLocked(chatID string, now time.Time) *Con
 	if !exists {
 		conversation = &Conversation{
 			ChatID:              chatID,
+			Phone:               phoneFromChatID(chatID),
+			Stage:               ClientStateNeutralNew,
 			LeadStatus:          LeadStatusNeutral,
 			ProcessedMessageIDs: make(map[string]time.Time),
 			AskedFields:         make(map[string]bool),
@@ -579,6 +603,12 @@ func (s *ConversationStore) getOrCreateLocked(chatID string, now time.Time) *Con
 	}
 	if conversation.UpdatedAt.IsZero() {
 		conversation.UpdatedAt = conversation.LastUpdated
+	}
+	if conversation.Phone == "" {
+		conversation.Phone = phoneFromChatID(chatID)
+	}
+	if conversation.Stage == "" {
+		conversation.Stage = ClientStateNeutralNew
 	}
 	return conversation
 }
@@ -794,9 +824,59 @@ func refreshLeadStatus(lead LeadState, stage string) LeadState {
 
 func stageSelectsPackage(stage string) bool {
 	switch stage {
-	case StagePackageSelected, StageBriefRequested, StageBriefCollected:
+	case StagePackageSelected, StageBriefRequested, StageBriefCollected, ClientStateAwaitingQuestionnaireConfirm, ClientStateHandedOff:
 		return true
 	default:
 		return false
 	}
+}
+
+func updateConversationFlagsForStage(conversation *Conversation, stage string) {
+	if conversation == nil {
+		return
+	}
+	switch stage {
+	case ClientStateAwaitingQualification:
+		conversation.InitialMessageSent = true
+		conversation.Lead.HasBeenGreeted = true
+	case ClientStatePackagesPresented:
+		conversation.InitialMessageSent = true
+		conversation.PackagesSent = true
+		conversation.SentPortfolio = true
+		conversation.Lead.PortfolioSent = true
+		conversation.Lead.OfferSent = true
+	case ClientStateAwaitingQuestionnaireConfirm:
+		conversation.QuestionnaireOfferSent = true
+		conversation.Lead.BriefRequested = true
+	case ClientStateHandedOff:
+		conversation.QuestionnaireOfferSent = true
+		conversation.HandedOffToOwner = true
+		conversation.Stopped = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+	case ClientStateStopped:
+		conversation.Stopped = true
+	case ClientStateOptOut:
+		conversation.OptOut = true
+		conversation.Stopped = true
+		conversation.Lead.LeadStatus = LeadStatusMuted
+	case StageQualification:
+		conversation.InitialMessageSent = true
+	case StagePortfolioSent, StagePortfolio:
+		conversation.SentPortfolio = true
+	case StageOffer, StagePackageSuggested, StageAIExperienceChecked:
+		conversation.PackagesSent = true
+	case StageBriefRequested:
+		conversation.QuestionnaireSent = true
+	case StageBriefCollected, StageHandoffRequired:
+		conversation.QuestionnaireSent = true
+		conversation.HandedOffToOwner = true
+		conversation.Stopped = true
+	}
+}
+
+func phoneFromChatID(chatID string) string {
+	phone, _, _ := strings.Cut(strings.TrimSpace(chatID), "@")
+	return strings.TrimSpace(phone)
 }

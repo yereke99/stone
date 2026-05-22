@@ -28,10 +28,12 @@ type outgoingCounter struct {
 
 type IncomingMessage struct {
 	IDMessage   string
+	DedupeKey   string
 	ChatID      string
 	SenderName  string
 	TypeMessage string
 	Text        string
+	Timestamp   time.Time
 }
 
 type GreenSender interface {
@@ -164,73 +166,205 @@ func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage
 		zap.Strings("missing_fields", analysis.MissingFields),
 	)
 
-	handled, err := s.handleLocalCommand(ctx, chatID, text, language, conversation, analysis)
-	if handled || err != nil {
-		return err
+	_ = hadLanguage
+	_ = lead
+	return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
+}
+
+func (s *Service) handleSalesState(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	state := clientStateForConversation(&conversation)
+	if isOptOutText(text) || analysis.Intent == IntentMute {
+		s.info("state machine opt out", zap.String("chat_hash", chatFingerprint(chatID)))
+		return s.stopClient(ctx, chatID, true)
+	}
+	if conversation.OptOut || conversation.Stopped || state == ClientStateOptOut || state == ClientStateStopped || state == ClientStateHandedOff {
+		s.info("state machine automatic reply stopped",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("state", state),
+		)
+		return nil
+	}
+	if shouldSuppressRapidFollowup(conversation, analysis) {
+		s.info("rapid follow-up suppressed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("state", state),
+		)
+		return nil
 	}
 
-	if !hadLanguage && !analysis.HasBusinessSignal() && (analysis.Intent == IntentOther || analysis.Intent == IntentGreeting) {
-		return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), StageQualification, 0)
+	switch state {
+	case ClientStateNeutralNew:
+		return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+	case ClientStateAwaitingQualification:
+		if !hasQualificationSignal(conversation, analysis) {
+			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
+		}
+		return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
+	case ClientStatePackagesPresented:
+		return s.handlePackagesPresented(ctx, chatID, text, language, conversation, analysis)
+	case ClientStateAwaitingQuestionnaireConfirm:
+		return s.handleQuestionnaireConfirmation(ctx, chatID, text, language, conversation, analysis)
+	default:
+		if !conversation.InitialMessageSent && !conversation.Lead.HasBeenGreeted {
+			return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+		}
+		if conversation.QuestionnaireOfferSent {
+			return s.handleQuestionnaireConfirmation(ctx, chatID, text, language, conversation, analysis)
+		}
+		if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+			return s.handlePackagesPresented(ctx, chatID, text, language, conversation, analysis)
+		}
+		return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
 	}
+}
 
-	if reply, ok := buildReturningLeadReply(language, conversation, analysis); ok {
-		return s.sendAndRemember(ctx, chatID, reply.text, reply.stage, reply.level)
+func (s *Service) presentPortfolioAndPackages(ctx context.Context, chatID string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	if conversation.PackagesSent || conversation.Lead.OfferSent {
+		return nil
 	}
-
-	if reply, ok := buildLeadReply(language, lead, analysis, conversation); ok {
-		return s.sendAndRemember(ctx, chatID, reply.text, reply.stage, reply.level, reply.askedFields...)
-	}
-
-	conversation, err = s.store.Snapshot(ctx, chatID)
-	if err != nil {
-		return err
-	}
-
-	s.info("openai called",
-		zap.String("chat_hash", chatFingerprint(chatID)),
-		zap.String("stage", conversation.Stage),
-		zap.String("lead_status", conversation.LeadStatus),
-	)
-	response, err := s.ai.GenerateSalesReply(ctx, systemPromptForLanguage(language, conversation), toOpenAIMessages(conversation.Messages, analysis))
-	if err != nil {
-		s.warn("openai response unavailable", zap.Error(err))
-		return s.sendAndRemember(ctx, chatID, fallbackForLead(language, conversation.Lead), StageDiagnosis, 0)
-	}
-
-	response = normalizeAIResponse(response, language)
-	if response.AskBrief {
-		response.Reply = BriefText(response.Language)
-		response.Stage = StageBriefRequested
-	}
-	if response.Reply == "" {
-		response.Reply = fallbackForLead(response.Language, conversation.Lead)
-	}
-
-	if err := s.applyAIState(ctx, chatID, response); err != nil {
-		return err
-	}
-
-	if err := s.sendAndRemember(ctx, chatID, response.Reply, response.Stage, response.RecommendedLevel, response.AskedFields...); err != nil {
-		return err
-	}
-
-	explicitVideoRequest := isExplicitVideoRequest(text)
-	allowVideoRepeat := isExplicitVideoRepeatRequest(text)
-	videoFiles := response.SendVideos
-	if explicitVideoRequest && response.RecommendedLevel > 0 && len(videoFiles) == 0 {
-		if offer, ok := OfferByLevel(response.RecommendedLevel); ok {
-			videoFiles = []string{offer.FileName}
+	if shouldRecommendTestPackage(conversation, analysis) {
+		if err := s.sendAndRemember(ctx, chatID, testPackageRecommendationText(language), ClientStatePackagesPresented, 0); err != nil {
+			return err
 		}
 	}
-	if !explicitVideoRequest && response.Stage != StagePortfolioSent && response.Stage != StagePortfolio {
-		videoFiles = nil
+
+	if !(conversation.SentPortfolio || conversation.Lead.PortfolioSent) {
+		portfolioText := portfolioLinksMessage(language, s.portfolio, 0)
+		if !s.portfolio.HasAny() {
+			portfolioText = PortfolioIntroText(language)
+		}
+		if err := s.sendAndRemember(ctx, chatID, portfolioText, ClientStatePackagesPresented, 0); err != nil {
+			return err
+		}
+		if !s.portfolio.HasAny() {
+			if err := s.sendVideos(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, false); err != nil {
+				return err
+			}
+		}
 	}
 
-	if err := s.sendVideos(ctx, chatID, videoFiles, response.Language, allowVideoRepeat); err != nil {
+	return s.sendAndRemember(ctx, chatID, packageOptionsText(language), ClientStatePackagesPresented, 0)
+}
+
+func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	normalized := normalizeText(text)
+	level := analysis.SelectedLevel
+	if level == 0 {
+		level = requestedLevelFromText(text)
+	}
+
+	if analysis.Intent == IntentHumanRequest {
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
+	}
+	if analysis.Intent == IntentReadyToOrder || containsReadySignal(text) {
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+	}
+	if analysis.Intent == IntentPackageSelection && level > 0 {
+		return s.sendQuestionnaireOffer(ctx, chatID, language, level)
+	}
+	if analysis.Intent == IntentPortfolioRequest || hasAny(normalized, []string{"портфолио", "видео", "пример", "примеры", "мысал", "көрсет", "portfolio", "example"}) {
+		if conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+			if isExplicitVideoRepeatRequest(text) {
+				return s.sendVideos(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, true)
+			}
+			return s.sendAndRemember(ctx, chatID, portfolioAlreadySentText(language), ClientStatePackagesPresented, level)
+		}
+		return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
+	}
+	if analysis.Intent == IntentPackageQuestion && level > 0 {
+		return s.sendAndRemember(ctx, chatID, packageDetailText(language, level), ClientStatePackagesPresented, 0)
+	}
+	if analysis.Intent == IntentPriceQuestion || hasAny(normalized, []string{"цена", "стоимость", "сколько", "прайс", "қанша", "баға", "price", "cost"}) {
+		if level > 0 {
+			return s.sendAndRemember(ctx, chatID, packagePriceText(language, level), ClientStatePackagesPresented, 0)
+		}
+		return s.sendAndRemember(ctx, chatID, shortPriceReminderText(language), ClientStatePackagesPresented, 0)
+	}
+	if analysis.Intent == IntentObjection || hasAny(normalized, []string{"дорого", "қымбат", "expensive"}) {
+		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStatePackagesPresented, 0)
+	}
+	if analysis.Intent == IntentAgreement {
+		return s.sendQuestionnaireOffer(ctx, chatID, language, selectedLevelFromConversation(conversation))
+	}
+	if isLocalOfftopic(normalized) {
+		return s.sendAndRemember(ctx, chatID, OfftopicText(language), ClientStatePackagesPresented, 0)
+	}
+	return s.sendAndRemember(ctx, chatID, packagesPresentedFallbackText(language), ClientStatePackagesPresented, selectedLevelFromConversation(conversation))
+}
+
+func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	normalized := normalizeText(text)
+	level := analysis.SelectedLevel
+	if level == 0 {
+		level = selectedLevelFromConversation(conversation)
+	}
+
+	if isPositiveConfirmation(text) || analysis.Intent == IntentReadyToOrder || analysis.Intent == IntentPackageSelection {
+		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+	}
+	if analysis.Intent == IntentHumanRequest {
+		return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
+	}
+	if analysis.Intent == IntentPriceQuestion {
+		if level > 0 {
+			return s.sendAndRemember(ctx, chatID, packagePriceText(language, level), ClientStateAwaitingQuestionnaireConfirm, 0)
+		}
+		return s.sendAndRemember(ctx, chatID, shortPriceReminderText(language), ClientStateAwaitingQuestionnaireConfirm, 0)
+	}
+	if analysis.Intent == IntentPortfolioRequest {
+		return s.sendAndRemember(ctx, chatID, portfolioAlreadySentText(language), ClientStateAwaitingQuestionnaireConfirm, level)
+	}
+	if analysis.Intent == IntentObjection || hasAny(normalized, []string{"дорого", "қымбат", "expensive"}) {
+		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStateAwaitingQuestionnaireConfirm, 0)
+	}
+	if looksLikeBriefDetails(text, analysis) {
+		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+	}
+	if isSoftNo(text) {
+		return s.stopClient(ctx, chatID, false)
+	}
+	return s.sendAndRemember(ctx, chatID, questionnaireConfirmationFallbackText(language), ClientStateAwaitingQuestionnaireConfirm, level)
+}
+
+func (s *Service) sendQuestionnaireOffer(ctx context.Context, chatID string, language string, level int) error {
+	return s.sendAndRemember(ctx, chatID, QuestionnaireOfferText(language), ClientStateAwaitingQuestionnaireConfirm, level)
+}
+
+func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string, language string, level int) error {
+	text := BriefText(language)
+	if level > 0 {
+		text = BriefTextForPackage(language, level)
+	}
+	if err := s.sendAndRemember(ctx, chatID, text, ClientStateHandedOff, level); err != nil {
 		return err
 	}
-
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.QuestionnaireSent = true
+		conversation.Lead.BriefRequested = true
+	})
 	return nil
+}
+
+func (s *Service) stopClient(ctx context.Context, chatID string, optOut bool) error {
+	stage := ClientStateStopped
+	if optOut {
+		stage = ClientStateOptOut
+	}
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stopped = true
+		conversation.OptOut = conversation.OptOut || optOut
+		if optOut {
+			conversation.Lead.LeadStatus = LeadStatusMuted
+			conversation.LeadStatus = LeadStatusMuted
+		}
+	})
+	return s.store.UpdateState(ctx, chatID, stage, 0)
 }
 
 func (s *Service) HandleNonTextMessage(ctx context.Context, chatID string, language string) error {
@@ -455,6 +589,9 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	}
 	incrementOutgoingCount(ctx)
 	persistCtx := context.WithoutCancel(ctx)
+	if err := s.store.LogOutgoingMessage(persistCtx, chatID, "text", message); err != nil {
+		return err
+	}
 	s.info("whatsapp reply sent",
 		zap.String("chat_hash", chatFingerprint(chatID)),
 		zap.String("stage", stage),
@@ -516,6 +653,9 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 			zap.String("file_name", fileName),
 		)
 		incrementOutgoingCount(ctx)
+		if err := s.store.LogOutgoingMessage(context.WithoutCancel(ctx), chatID, "file", caption); err != nil {
+			return err
+		}
 		if err := s.store.MarkVideoSent(context.WithoutCancel(ctx), chatID, fileName); err != nil {
 			return err
 		}
@@ -527,7 +667,7 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 	if len(s.adminChatIDs) == 0 {
 		return
 	}
-	if stage != StageHandoffRequired && stage != StageBriefCollected {
+	if stage != StageHandoffRequired && stage != StageBriefCollected && stage != ClientStateHandedOff {
 		return
 	}
 
@@ -575,6 +715,13 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 			return
 		}
 		incrementOutgoingCount(ctx)
+		if err := s.store.LogOutgoingMessage(ctx, adminChatID, "text", message); err != nil {
+			s.warn("admin notification log failed",
+				zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
+				zap.String("client_chat_hash", chatFingerprint(chatID)),
+				zap.Error(err),
+			)
+		}
 		s.info("admin notification sent",
 			zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
 			zap.String("client_chat_hash", chatFingerprint(chatID)),
@@ -597,55 +744,22 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
-	operatorRequest := isOperatorRequestText(conversation.LastIncomingText)
-	title := "🔥 Новая заявка Stone production"
-	if operatorRequest {
-		title = "🚨 Срочно: клиент просит оператора"
-	}
 	lines := []string{
-		title,
-	}
-	if phone := formatPhoneForAdmin(conversation.ChatID); phone != "" {
-		lines = append(lines, "📞 Телефон клиента: "+phone)
-	} else {
-		lines = append(lines, "📞 Клиент: "+conversation.ChatID)
+		"Новый горячий лид из WhatsApp:",
+		"",
+		"Имя: " + valueOrDash(conversation.DisplayName),
+		"Телефон: " + valueOrDash(formatPhoneForAdmin(conversation.ChatID)),
+		"ChatID: " + valueOrDash(conversation.ChatID),
+		"Ниша: " + valueOrDash(lead.Niche),
+		"Цель: " + valueOrDash(lead.Goal),
+		"Срок: " + valueOrDash(lead.Deadline),
+		"Интересующий пакет: " + adminPackageLabel(lead.SelectedPackage),
+		"Последнее сообщение клиента: " + valueOrDash(conversation.LastIncomingText),
+		"",
+		"Статус: передан менеджеру",
 	}
 	if link := whatsappLink(conversation.ChatID); link != "" {
-		lines = append(lines, "💬 WhatsApp: "+link)
-	}
-	statusLabel := adminStatusLabel(conversation.LeadStatus)
-	stageLabel := adminStageLabel(conversation.Stage)
-	if operatorRequest {
-		statusLabel = "Срочно нужен оператор"
-		stageLabel = "Клиент просит живого менеджера"
-	}
-	lines = append(lines,
-		"📌 Статус: "+statusLabel,
-		"🧭 Этап: "+stageLabel,
-	)
-	if lead.SelectedPackage != "" {
-		lines = append(lines, "📦 Пакет: "+adminPackageLabel(lead.SelectedPackage))
-	}
-	if lead.Niche != "" {
-		lines = append(lines, "🏷 Ниша: "+lead.Niche)
-	}
-	if lead.Goal != "" {
-		lines = append(lines, "🎯 Цель: "+lead.Goal)
-	}
-	if platform := lead.platformSummary(); platform != "" {
-		lines = append(lines, "📣 Площадка: "+platform)
-	}
-	if lead.Deadline != "" {
-		lines = append(lines, "⏰ Срок: "+lead.Deadline)
-	}
-	if lead.Budget != "" {
-		lines = append(lines, "💰 Бюджет/интерес: "+lead.Budget)
-	}
-	if lead.TargetAudience != "" {
-		lines = append(lines, "👥 Аудитория: "+lead.TargetAudience)
-	}
-	if text := strings.TrimSpace(conversation.LastIncomingText); text != "" {
-		lines = append(lines, "📝 Последнее сообщение: "+text)
+		lines = append(lines, "WhatsApp: "+link)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1205,6 +1319,130 @@ func isLocalOfftopic(normalized string) bool {
 		"погода", "ауа райы", "политик", "саясат", "религ", "дін", "личная жизнь", "жеке өмір",
 		"анекдот", "курс доллара", "футбол", "новости", "жаңалық",
 	})
+}
+
+func hasQualificationSignal(conversation Conversation, analysis CustomerAnalysis) bool {
+	lead := conversation.Lead
+	return strings.TrimSpace(lead.Niche) != "" ||
+		strings.TrimSpace(lead.Goal) != "" ||
+		strings.TrimSpace(lead.Deadline) != "" ||
+		analysis.HasBusinessSignal() ||
+		analysis.Intent == IntentPriceQuestion ||
+		analysis.Intent == IntentPortfolioRequest ||
+		analysis.Intent == IntentReadyToOrder ||
+		containsAny(normalizeForAnalysis(conversation.LastIncomingText), []string{"первый раз", "впервые", "попроб", "протест", "тест", "first time", "try", "test"})
+}
+
+func qualificationMissingFields(lead LeadState) []string {
+	missing := make([]string, 0, 3)
+	if strings.TrimSpace(lead.Niche) == "" {
+		missing = append(missing, fieldNiche)
+	}
+	if strings.TrimSpace(lead.Goal) == "" {
+		missing = append(missing, fieldGoal)
+	}
+	if strings.TrimSpace(lead.Deadline) == "" {
+		missing = append(missing, fieldDeadline)
+	}
+	return missing
+}
+
+func qualificationFollowupText(language string, conversation Conversation) string {
+	missing := qualificationMissingFields(conversation.Lead)
+	if len(missing) == 0 {
+		return packagesPresentedFallbackText(language)
+	}
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім. Нишаны және роликті қашан іске қосқыңыз келетінін қысқаша жазыңыз."
+	case "en":
+		return "Got it. Please share the niche and when you want to launch the video."
+	default:
+		if sameFields(missing, []string{fieldNiche, fieldDeadline}) {
+			return "Понял вас. Подскажите, пожалуйста, нишу и когда хотите запустить ролик?"
+		}
+		if sameFields(missing, []string{fieldNiche, fieldGoal}) {
+			return "Понял вас. Подскажите, пожалуйста, нишу и главную цель ролика?"
+		}
+		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
+			return "Понял вас. Подскажите, пожалуйста, цель и сроки запуска?"
+		}
+		return "Понял вас. Подскажите, пожалуйста, нишу, цель и сроки запуска одним сообщением."
+	}
+}
+
+func shouldRecommendTestPackage(conversation Conversation, analysis CustomerAnalysis) bool {
+	if analysis.SelectedLevel == 1 || conversation.SelectedLevel == 1 || conversation.Lead.SelectedPackage == "test" {
+		return true
+	}
+	if conversation.Lead.PreviousAIAds != nil && !*conversation.Lead.PreviousAIAds {
+		return true
+	}
+	if analysis.PreviousAIAds != nil && !*analysis.PreviousAIAds {
+		return true
+	}
+	return containsAny(normalizeForAnalysis(conversation.LastIncomingText), []string{
+		"первый раз", "впервые", "попроб", "протест", "тест", "first time", "try", "test",
+	})
+}
+
+func isOptOutText(text string) bool {
+	normalized := normalizeForAnalysis(text)
+	if normalized == "" {
+		return false
+	}
+	clean := strings.Trim(normalized, " .,!?:;")
+	if clean == "стоп" || clean == "stop" || clean == "unsubscribe" {
+		return true
+	}
+	return containsAny(normalized, []string{
+		"не пишите", "не надо", "не интересно", "отпиш", "unsubscribe", "stop messaging",
+		"жазбаңыз", "мазаламаңыз", "керек емес", "not interested", "do not message",
+	})
+}
+
+func isPositiveConfirmation(text string) bool {
+	normalized := normalizeForAnalysis(text)
+	clean := strings.Trim(normalized, " .,!?:;")
+	switch clean {
+	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "давайте", "иә", "иа", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
+		return true
+	default:
+		return containsAny(normalized, []string{"отправьте", "скиньте", "жибер", "жібер", "send it", "send me"})
+	}
+}
+
+func isSoftNo(text string) bool {
+	clean := strings.Trim(normalizeForAnalysis(text), " .,!?:;")
+	switch clean {
+	case "нет", "не сейчас", "позже", "жоқ", "кейін", "no", "not now", "later":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikeBriefDetails(text string, analysis CustomerAnalysis) bool {
+	normalized := normalizeForAnalysis(text)
+	if strings.Contains(normalized, "http") || strings.Contains(normalized, "www") || strings.Contains(normalized, "instagram") || strings.Contains(normalized, "@") {
+		return true
+	}
+	return analysis.HasBusinessSignal() && len(strings.Fields(normalized)) >= 3
+}
+
+func shouldSuppressRapidFollowup(conversation Conversation, analysis CustomerAnalysis) bool {
+	if conversation.LastReplyAt.IsZero() || time.Since(conversation.LastReplyAt) > 3*time.Second {
+		return false
+	}
+	if conversation.Stage != ClientStatePackagesPresented {
+		return false
+	}
+	switch analysis.Intent {
+	case IntentOther, IntentGreeting, IntentAnswer:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeText(text string) string {

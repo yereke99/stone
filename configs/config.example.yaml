@@ -10,6 +10,9 @@ openai:
   temperature: 0.3
   max_output_tokens: 350
 
+database:
+  path: "./data/stone.sqlite3"
+
 portfolio:
   video_dir: "./video"
 
@@ -21,6 +24,8 @@ bot:
   reply_language_mode: "auto"
   auto_reply_enabled: false
   max_message_age_seconds: 120
+  owner_wa_chat_id: ""
+  admin_chat_ids: ["77000000000@c.us"]
 
 app:
   env: "local"

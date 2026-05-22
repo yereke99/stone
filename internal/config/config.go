@@ -17,6 +17,7 @@ const (
 type Config struct {
 	GreenAPI              GreenAPIConfig
 	OpenAI                OpenAIConfig
+	Database              DatabaseConfig
 	PortfolioVideoDir     string
 	ReceiveTimeoutSeconds int
 	HTTPClientTimeout     time.Duration
@@ -43,6 +44,10 @@ type OpenAIConfig struct {
 	APIKey      string
 	Model       string
 	Temperature float64
+}
+
+type DatabaseConfig struct {
+	Path string
 }
 
 // MetaConfig is kept so the previous webhook packages continue to compile.
@@ -126,6 +131,9 @@ func Load() (*Config, error) {
 			Model:       envOrDefault("OPENAI_MODEL", defaultOpenAIModel),
 			Temperature: openAITemperature,
 		},
+		Database: DatabaseConfig{
+			Path: envOrDefault("DATABASE_PATH", "./data/stone.sqlite3"),
+		},
 		PortfolioVideoDir:     required("PORTFOLIO_VIDEO_DIR"),
 		ReceiveTimeoutSeconds: receiveTimeout,
 		HTTPClientTimeout:     time.Duration(httpTimeoutSeconds) * time.Second,
@@ -133,7 +141,7 @@ func Load() (*Config, error) {
 		BotAutoReplyEnabled:   autoReplyEnabled,
 		BotMaxMessageAge:      time.Duration(maxMessageAgeSeconds) * time.Second,
 		MaxOpenAIOutputTokens: maxOutputTokens,
-		AdminChatIDs:          splitCSV(os.Getenv("ADMIN_CHAT_IDS")),
+		AdminChatIDs:          append(splitCSV(os.Getenv("OWNER_WA_CHAT_ID")), splitCSV(os.Getenv("ADMIN_CHAT_IDS"))...),
 		AppEnv:                required("APP_ENV"),
 	}
 	cfg.Env = cfg.AppEnv

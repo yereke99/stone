@@ -120,6 +120,35 @@ func TestDuplicateExamplesAreNotSpammed(t *testing.T) {
 	}
 }
 
+func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{
+		TestURL:     "https://example.com/test",
+		BasicURL:    "https://example.com/basic",
+		StandardURL: "https://example.com/standard",
+	}, testVideoDir(t))
+	chatID := "chat-selected-video"
+
+	sendText(t, service, chatID, "Здравствуйте")
+	sendText(t, service, chatID, "мебель, цель продажи, срок через неделю")
+	if len(sender.files) != 0 {
+		t.Fatalf("portfolio links should not upload videos yet: %#v", sender.files)
+	}
+
+	sendText(t, service, chatID, "берём basic")
+
+	if len(sender.files) != 1 || filepath.Base(sender.files[0]) != VideoLevel2 {
+		t.Fatalf("sent files = %#v, want selected basic video", sender.files)
+	}
+	if len(sender.captions) != 1 || !strings.Contains(sender.captions[0], "Базовый формат") || !strings.Contains(sender.captions[0], "50 000 тг") {
+		t.Fatalf("unexpected selected video caption: %#v", sender.captions)
+	}
+	if last := sender.messages[len(sender.messages)-1]; !strings.Contains(last, "Отправить анкету") {
+		t.Fatalf("package selection did not send questionnaire offer: %q", last)
+	}
+}
+
 func TestDavaiteSendsQuestionnaireNotifiesAdminAndStops(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()

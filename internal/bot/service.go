@@ -259,14 +259,14 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		}
 		return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
 	}
+	if analysis.Intent == IntentPackageSelection && level > 0 {
+		return s.sendQuestionnaireOfferWithSelectedVideo(ctx, chatID, language, level)
+	}
 	if analysis.Intent == IntentReadyToOrder || containsReadySignal(text) {
 		if level == 0 {
 			level = selectedLevelFromConversation(conversation)
 		}
 		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
-	}
-	if analysis.Intent == IntentPackageSelection && level > 0 {
-		return s.sendQuestionnaireOffer(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentPortfolioRequest || hasAny(normalized, []string{"портфолио", "видео", "пример", "примеры", "мысал", "көрсет", "portfolio", "example"}) {
 		if conversation.SentPortfolio || conversation.Lead.PortfolioSent {
@@ -334,6 +334,21 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 
 func (s *Service) sendQuestionnaireOffer(ctx context.Context, chatID string, language string, level int) error {
 	return s.sendAndRemember(ctx, chatID, QuestionnaireOfferText(language), ClientStateAwaitingQuestionnaireConfirm, level)
+}
+
+func (s *Service) sendQuestionnaireOfferWithSelectedVideo(ctx context.Context, chatID string, language string, level int) error {
+	if err := s.sendQuestionnaireOffer(ctx, chatID, language, level); err != nil {
+		return err
+	}
+	return s.sendSelectedPackageVideo(ctx, chatID, language, level, false)
+}
+
+func (s *Service) sendSelectedPackageVideo(ctx context.Context, chatID string, language string, level int, allowRepeat bool) error {
+	offer, ok := OfferByLevel(level)
+	if !ok {
+		return nil
+	}
+	return s.sendVideos(ctx, chatID, []string{offer.FileName}, language, allowRepeat)
 }
 
 func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string, language string, level int) error {

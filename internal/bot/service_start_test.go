@@ -12,6 +12,7 @@ type fakeSender struct {
 	messages []string
 	chatIDs  []string
 	files    []string
+	captions []string
 }
 
 func (s *fakeSender) SendMessage(ctx context.Context, chatID string, message string) error {
@@ -22,6 +23,7 @@ func (s *fakeSender) SendMessage(ctx context.Context, chatID string, message str
 
 func (s *fakeSender) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) error {
 	s.files = append(s.files, filePath)
+	s.captions = append(s.captions, caption)
 	return nil
 }
 

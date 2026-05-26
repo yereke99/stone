@@ -58,11 +58,16 @@ type Conversation struct {
 	QuestionnaireOfferSent  bool
 	QuestionnaireSent       bool
 	HandedOffToOwner        bool
+	WantsQuestionnaire      bool
+	AutomationClosed        bool
 	Stopped                 bool
 	OptOut                  bool
 	LastProcessedMessageID  string
 	AdminNotifiedAt         time.Time
 	AdminOperatorNotifiedAt time.Time
+	TransferredAt           time.Time
+	ConversationSummary     string
+	MissingFields           []string
 	SelectedLevel           int
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
@@ -194,6 +199,7 @@ func (s *ConversationStore) Update(chatID string, fn func(*Conversation)) {
 	conversation.SentPortfolio = conversation.Lead.PortfolioSent
 	conversation.BriefAsked = conversation.Lead.BriefRequested
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	_ = s.persistConversationLocked(context.Background(), conversation)
@@ -248,6 +254,7 @@ func (s *ConversationStore) MarkIncoming(ctx context.Context, chatID string, tex
 	conversation.LastIncomingText = text
 	conversation.LastIncomingAt = now
 	conversation.Stopped = conversation.Stopped || conversation.Stage == ClientStateStopped || conversation.Stage == ClientStateOptOut
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)
@@ -314,6 +321,14 @@ func (s *ConversationStore) MarkAdminNotified(ctx context.Context, chatID string
 	conversation := s.getOrCreateLocked(chatID, now)
 	conversation.AdminNotifiedAt = now
 	conversation.HandedOffToOwner = true
+	conversation.TransferredAt = now
+	conversation.AutomationClosed = true
+	conversation.Stage = ClientStateHandedOff
+	conversation.Stopped = true
+	conversation.Lead.ContactBriefReady = true
+	conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+	conversation.LeadStatus = LeadStatusHandoffRequired
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)
@@ -354,6 +369,14 @@ func (s *ConversationStore) MarkAdminOperatorNotified(ctx context.Context, chatI
 	conversation := s.getOrCreateLocked(chatID, now)
 	conversation.AdminOperatorNotifiedAt = now
 	conversation.HandedOffToOwner = true
+	conversation.TransferredAt = now
+	conversation.AutomationClosed = true
+	conversation.Stage = ClientStateHandedOff
+	conversation.Stopped = true
+	conversation.Lead.ContactBriefReady = true
+	conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+	conversation.LeadStatus = LeadStatusHandoffRequired
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)
@@ -438,6 +461,7 @@ func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stag
 	conversation.SentPortfolio = conversation.Lead.PortfolioSent
 	conversation.BriefAsked = conversation.Lead.BriefRequested
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)
@@ -463,6 +487,7 @@ func (s *ConversationStore) UpdateLead(ctx context.Context, chatID string, lead 
 	conversation.SentPortfolio = conversation.Lead.PortfolioSent
 	conversation.BriefAsked = conversation.Lead.BriefRequested
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)
@@ -572,6 +597,7 @@ func (s *ConversationStore) MarkVideoSent(ctx context.Context, chatID string, fi
 	conversation.Lead.PortfolioSent = true
 	conversation.SentPortfolio = true
 	conversation.CompletedFields = completedFieldsForLead(conversation.Lead)
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)
@@ -664,6 +690,7 @@ func cloneConversation(conversation Conversation) Conversation {
 	for fileName, sentAt := range conversation.SentVideoFiles {
 		clone.SentVideoFiles[fileName] = sentAt
 	}
+	clone.MissingFields = append([]string(nil), conversation.MissingFields...)
 	return clone
 }
 
@@ -707,27 +734,28 @@ func ensureConversationMaps(conversation *Conversation) {
 	if conversation.LeadStatus == "" {
 		conversation.LeadStatus = LeadStatusNeutral
 	}
+	refreshConversationDerivedState(conversation)
 }
 
 func completedFieldsForLead(lead LeadState) map[string]bool {
 	completed := make(map[string]bool)
-	if strings.TrimSpace(lead.Niche) != "" {
+	if isValidNiche(lead.Niche) {
 		completed[fieldNiche] = true
 	}
-	if strings.TrimSpace(lead.Goal) != "" {
+	if isValidGoal(lead.Goal) {
 		completed[fieldGoal] = true
 	}
 	if strings.TrimSpace(lead.Platform) != "" || len(lead.Platforms) > 0 {
 		completed[fieldPlatform] = true
 	}
-	if strings.TrimSpace(lead.Deadline) != "" {
+	if isValidDeadline(lead.Deadline) {
 		completed[fieldDeadline] = true
 	}
 	if lead.PreviousAIAds != nil || strings.TrimSpace(lead.AIExperience) != "" {
 		completed[fieldPreviousAIAds] = true
 	}
-	if strings.TrimSpace(lead.SelectedPackage) != "" {
-		completed[fieldPackage] = true
+	if isValidPackageInterest(lead.SelectedPackage) {
+		completed[fieldPackageInterest] = true
 	}
 	if lead.BriefRequested {
 		completed[fieldBrief] = true
@@ -761,7 +789,9 @@ func normalizeFieldName(field string) string {
 		return fieldPlatform
 	case "previous_ai_ads":
 		return fieldPreviousAIAds
-	case fieldNiche, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds, fieldPackage, fieldBrief:
+	case fieldPackage:
+		return fieldPackageInterest
+	case fieldNiche, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds, fieldPackageInterest, fieldBrief:
 		return strings.TrimSpace(field)
 	default:
 		return ""
@@ -848,12 +878,16 @@ func updateConversationFlagsForStage(conversation *Conversation, stage string) {
 	case ClientStateAwaitingQuestionnaireConfirm:
 		conversation.QuestionnaireOfferSent = true
 		conversation.Lead.BriefRequested = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
 	case ClientStateHandedOff:
 		conversation.QuestionnaireOfferSent = true
 		conversation.HandedOffToOwner = true
+		conversation.AutomationClosed = true
 		conversation.Stopped = true
 		conversation.Lead.BriefRequested = true
 		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.WantsQuestionnaire = true
 		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
 	case ClientStateStopped:
 		conversation.Stopped = true
@@ -869,9 +903,12 @@ func updateConversationFlagsForStage(conversation *Conversation, stage string) {
 		conversation.PackagesSent = true
 	case StageBriefRequested:
 		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
 	case StageBriefCollected, StageHandoffRequired:
 		conversation.QuestionnaireSent = true
 		conversation.HandedOffToOwner = true
+		conversation.AutomationClosed = true
 		conversation.Stopped = true
 	}
 }

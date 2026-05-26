@@ -127,8 +127,8 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 		TestURL:     "https://example.com/test",
 		BasicURL:    "https://example.com/basic",
 		StandardURL: "https://example.com/standard",
-	}, testVideoDir(t))
-	chatID := "chat-selected-video"
+	}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77015550000@c.us"
 
 	sendText(t, service, chatID, "Здравствуйте")
 	sendText(t, service, chatID, "мебель, цель продажи, срок через неделю")
@@ -144,39 +144,158 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 	if len(sender.captions) != 1 || !strings.Contains(sender.captions[0], "Базовый формат") || !strings.Contains(sender.captions[0], "50 000 тг") {
 		t.Fatalf("unexpected selected video caption: %#v", sender.captions)
 	}
-	if last := sender.messages[len(sender.messages)-1]; !strings.Contains(last, "Отправить анкету") {
-		t.Fatalf("package selection did not send questionnaire offer: %q", last)
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || conversation.TransferredAt.IsZero() {
+		t.Fatalf("handoff state not set after package selection: stage=%q stopped=%v handed=%v transferred=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.TransferredAt)
+	}
+	adminMessage := sender.messages[len(sender.messages)-1]
+	if !strings.Contains(adminMessage, "New qualified WhatsApp lead") ||
+		!strings.Contains(adminMessage, "Interested package: Basic / Базовый") ||
+		strings.Contains(adminMessage, "\nNiche: -") ||
+		strings.Contains(adminMessage, "\nGoal: -") {
+		t.Fatalf("unexpected admin summary:\n%s", adminMessage)
 	}
 }
 
-func TestDavaiteSendsQuestionnaireNotifiesAdminAndStops(t *testing.T) {
+func TestDavaiteWithMissingFieldsAsksOnlyMissingFields(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
 	chatID := "77010000000@c.us"
 
-	sendText(t, service, chatID, "Здравствуйте")
-	sendText(t, service, chatID, "салон красоты, цель заявки, сроки на этой неделе")
-	sendText(t, service, chatID, "давайте")
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.DisplayName = "Yerek"
+		conversation.Stage = ClientStateAwaitingQualification
+		conversation.Lead.Deadline = "в течение месяца"
+	})
+
+	sendText(t, service, chatID, "да давайте открывайте анкету")
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || !conversation.QuestionnaireSent {
-		t.Fatalf("handoff state not set: stage=%q stopped=%v handed=%v questionnaire=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.QuestionnaireSent)
+	if conversation.HandedOffToOwner || conversation.Stopped || conversation.QuestionnaireSent {
+		t.Fatalf("lead was transferred too early: stage=%q stopped=%v handed=%v questionnaire=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.QuestionnaireSent)
 	}
-	if len(sender.chatIDs) == 0 || sender.chatIDs[len(sender.chatIDs)-1] != "77019519013@c.us" {
-		t.Fatalf("last outbound chat = %q, want admin notification", sender.chatIDs[len(sender.chatIDs)-1])
+	if !conversation.WantsQuestionnaire || !conversation.Lead.WantsQuestionnaire {
+		t.Fatalf("questionnaire intent was not saved: conversation=%v lead=%v", conversation.WantsQuestionnaire, conversation.Lead.WantsQuestionnaire)
+	}
+	if !sameFields(conversation.MissingFields, []string{fieldNiche, fieldGoal, fieldPackageInterest}) {
+		t.Fatalf("missing fields = %#v, want niche/goal/package_interest", conversation.MissingFields)
+	}
+	if len(sender.chatIDs) > 0 && sender.chatIDs[len(sender.chatIDs)-1] == "77019519013@c.us" {
+		t.Fatalf("admin was notified for incomplete lead: %#v", sender.messages)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	for _, want := range []string{"нишу", "цель", "пакет"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("missing-field reply %q does not mention %q", last, want)
+		}
+	}
+	if strings.Contains(last, "срок") {
+		t.Fatalf("reply asked for already saved deadline: %q", last)
+	}
+}
+
+func TestOneLetterNicheIsRejected(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77012220000@c.us"
+
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = ClientStateAwaitingQualification
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	sendText(t, service, chatID, "м")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "" {
+		t.Fatalf("one-letter niche was saved: %#v", conversation.Lead.Niche)
+	}
+	if conversation.HandedOffToOwner || conversation.Stopped {
+		t.Fatalf("invalid niche caused handoff: stage=%q stopped=%v handed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if !strings.Contains(last, "нишу") {
+		t.Fatalf("bot did not clarify invalid niche: %q", last)
+	}
+}
+
+func TestQualifiedLeadNotifiesAdminOnceAndClosesAutomation(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77013330000@c.us"
+	text := "У меня салон красоты, хочу ролики для инстаграма, клиентов көбейту керек, бір айдың ішінде керек, берем premium"
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:  "green-qualified-1",
+		ChatID:     chatID,
+		SenderName: "Yerek",
+		Text:       text,
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || !conversation.AutomationClosed || conversation.TransferredAt.IsZero() {
+		t.Fatalf("qualified lead was not closed: stage=%q stopped=%v handed=%v closed=%v transferred=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.TransferredAt)
+	}
+	if conversation.Lead.Niche != "салон красоты" || conversation.Lead.Goal != "привлечь клиентов" || conversation.Lead.Deadline != "в течение месяца" || conversation.Lead.SelectedPackage != "standard" {
+		t.Fatalf("lead fields = %#v", conversation.Lead)
+	}
+	if got := countMessagesContaining(sender.messages, "New qualified WhatsApp lead"); got != 1 {
+		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
 	}
 	adminMessage := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(adminMessage, "Новый горячий лид из WhatsApp") ||
-		!strings.Contains(adminMessage, "ChatID: "+chatID) ||
-		!strings.Contains(adminMessage, "Статус: передан менеджеру") {
-		t.Fatalf("unexpected admin summary:\n%s", adminMessage)
+	for _, want := range []string{
+		"Name: Yerek",
+		"Phone: +7 701 333 00 00",
+		"ChatID: " + chatID,
+		"Niche: салон красоты",
+		"Goal: привлечь клиентов",
+		"Deadline: в течение месяца",
+		"Interested package: Standard / Стандарт",
+		"Client intent: wants to open questionnaire / ready to proceed",
+		"Status: qualified, transferred to manager",
+	} {
+		if !strings.Contains(adminMessage, want) {
+			t.Fatalf("admin message missing %q:\n%s", want, adminMessage)
+		}
+	}
+	if strings.Contains(adminMessage, "-") && (strings.Contains(adminMessage, "Niche: -") || strings.Contains(adminMessage, "Goal: -") || strings.Contains(adminMessage, "Interested package: -")) {
+		t.Fatalf("admin message contains placeholder:\n%s", adminMessage)
 	}
 
 	before := len(sender.messages)
-	sendText(t, service, chatID, "и еще вопрос")
+	sendText(t, service, chatID, "а сколько будет стоить?")
 	if len(sender.messages) != before {
 		t.Fatalf("bot replied after handoff: %#v", sender.messages[before:])
+	}
+}
+
+func TestDuplicateIncomingMessageIsProcessedOnce(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77014440000@c.us"
+	msg := IncomingMessage{
+		IDMessage:  "green-duplicate-1",
+		ChatID:     chatID,
+		SenderName: "Yerek",
+		Text:       "салон красоты, цель заявки, срок через неделю, берем standard",
+	}
+
+	if err := service.HandleIncomingMessage(context.Background(), msg); err != nil {
+		t.Fatalf("first HandleIncomingMessage() error = %v", err)
+	}
+	if err := service.HandleIncomingMessage(context.Background(), msg); err != nil {
+		t.Fatalf("duplicate HandleIncomingMessage() error = %v", err)
+	}
+
+	if got := countMessagesContaining(sender.messages, "New qualified WhatsApp lead"); got != 1 {
+		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
 	}
 }
 
@@ -212,8 +331,11 @@ func TestSQLiteRestartContinuesSavedState(t *testing.T) {
 		t.Fatalf("opening was resent after restart: %#v", sender2.messages)
 	}
 	conversation := snapshotConversation(t, store2, chatID)
-	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped {
-		t.Fatalf("state after restart = %q stopped=%v, want handed_off/stopped", conversation.Stage, conversation.Stopped)
+	if conversation.HandedOffToOwner || conversation.Stopped {
+		t.Fatalf("state after restart = %q stopped=%v handed=%v, want collecting missing package", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner)
+	}
+	if !sameFields(conversation.MissingFields, []string{fieldPackageInterest}) {
+		t.Fatalf("missing fields after restart = %#v, want package_interest", conversation.MissingFields)
 	}
 }
 

@@ -7,14 +7,15 @@ import (
 )
 
 const (
-	fieldNiche         = "niche"
-	fieldGoal          = "goal"
-	fieldPlatform      = "platform"
-	fieldPlatforms     = fieldPlatform
-	fieldDeadline      = "deadline"
-	fieldPreviousAIAds = "ai_experience"
-	fieldPackage       = "package"
-	fieldBrief         = "brief"
+	fieldNiche           = "niche"
+	fieldGoal            = "goal"
+	fieldPlatform        = "platform"
+	fieldPlatforms       = fieldPlatform
+	fieldDeadline        = "deadline"
+	fieldPreviousAIAds   = "ai_experience"
+	fieldPackage         = "package"
+	fieldPackageInterest = "package_interest"
+	fieldBrief           = "brief"
 
 	IntentGreeting         = "greeting"
 	IntentAnswer           = "answer"
@@ -37,41 +38,44 @@ const (
 var prefixedValuePattern = regexp.MustCompile(`(?i)(?:^|\s)(%s)\s*[:=\-—]?\s*([^,.!?;]+)`)
 
 type LeadState struct {
-	HasBeenGreeted    bool     `json:"has_been_greeted,omitempty"`
-	Niche             string   `json:"niche,omitempty"`
-	Goal              string   `json:"goal,omitempty"`
-	Platform          string   `json:"platform,omitempty"`
-	Platforms         []string `json:"platforms,omitempty"`
-	Deadline          string   `json:"deadline,omitempty"`
-	PreviousAIAds     *bool    `json:"previous_ai_ads,omitempty"`
-	AIExperience      string   `json:"ai_experience,omitempty"`
-	Budget            string   `json:"budget,omitempty"`
-	PriceInterest     bool     `json:"price_interest,omitempty"`
-	SelectedPackage   string   `json:"selected_package,omitempty"`
-	ClientName        string   `json:"client_name,omitempty"`
-	TargetAudience    string   `json:"target_audience,omitempty"`
-	Notes             string   `json:"notes,omitempty"`
-	FreeText          string   `json:"free_text,omitempty"`
-	PortfolioSent     bool     `json:"portfolio_sent,omitempty"`
-	OfferSent         bool     `json:"offer_sent,omitempty"`
-	BriefRequested    bool     `json:"brief_requested,omitempty"`
-	BriefCompleted    bool     `json:"brief_completed,omitempty"`
-	ContactBriefReady bool     `json:"contact_brief_ready,omitempty"`
-	LeadStatus        string   `json:"lead_status,omitempty"`
+	HasBeenGreeted     bool     `json:"has_been_greeted,omitempty"`
+	Niche              string   `json:"niche,omitempty"`
+	Goal               string   `json:"goal,omitempty"`
+	Platform           string   `json:"platform,omitempty"`
+	Platforms          []string `json:"platforms,omitempty"`
+	Deadline           string   `json:"deadline,omitempty"`
+	PreviousAIAds      *bool    `json:"previous_ai_ads,omitempty"`
+	AIExperience       string   `json:"ai_experience,omitempty"`
+	Budget             string   `json:"budget,omitempty"`
+	PriceInterest      bool     `json:"price_interest,omitempty"`
+	SelectedPackage    string   `json:"selected_package,omitempty"`
+	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
+	ClientName         string   `json:"client_name,omitempty"`
+	TargetAudience     string   `json:"target_audience,omitempty"`
+	Notes              string   `json:"notes,omitempty"`
+	FreeText           string   `json:"free_text,omitempty"`
+	PortfolioSent      bool     `json:"portfolio_sent,omitempty"`
+	OfferSent          bool     `json:"offer_sent,omitempty"`
+	BriefRequested     bool     `json:"brief_requested,omitempty"`
+	BriefCompleted     bool     `json:"brief_completed,omitempty"`
+	ContactBriefReady  bool     `json:"contact_brief_ready,omitempty"`
+	LeadStatus         string   `json:"lead_status,omitempty"`
 }
 
 type CustomerAnalysis struct {
-	Niche          *string  `json:"niche"`
-	Goal           *string  `json:"goal"`
-	Platforms      []string `json:"platforms"`
-	Deadline       *string  `json:"deadline"`
-	PreviousAIAds  *bool    `json:"previous_ai_ads"`
-	AIExperience   *string  `json:"ai_experience,omitempty"`
-	Budget         *string  `json:"budget,omitempty"`
-	TargetAudience *string  `json:"target_audience,omitempty"`
-	Intent         string   `json:"intent"`
-	SelectedLevel  int      `json:"selected_level,omitempty"`
-	MissingFields  []string `json:"missing_fields"`
+	Niche              *string  `json:"niche"`
+	Goal               *string  `json:"goal"`
+	Platforms          []string `json:"platforms"`
+	Deadline           *string  `json:"deadline"`
+	PreviousAIAds      *bool    `json:"previous_ai_ads"`
+	AIExperience       *string  `json:"ai_experience,omitempty"`
+	Budget             *string  `json:"budget,omitempty"`
+	TargetAudience     *string  `json:"target_audience,omitempty"`
+	Intent             string   `json:"intent"`
+	SelectedLevel      int      `json:"selected_level,omitempty"`
+	PackageInterest    *string  `json:"package_interest,omitempty"`
+	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
+	MissingFields      []string `json:"missing_fields"`
 }
 
 func AnalyzeCustomerMessage(text string, current LeadState, language string) CustomerAnalysis {
@@ -106,12 +110,18 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.TargetAudience = stringPointer(audience)
 	}
 	analysis.SelectedLevel = extractSelectedLevel(text)
+	if packageInterest := extractPackageInterest(text, current, analysis.SelectedLevel); packageInterest != "" {
+		analysis.PackageInterest = stringPointer(packageInterest)
+	}
+	analysis.WantsQuestionnaire = containsQuestionnaireIntent(normalized) || containsReadySignal(text)
 
 	switch {
 	case isMuteRequest(normalized):
 		analysis.Intent = IntentMute
 	case isNegativeReaction(normalized):
 		analysis.Intent = IntentNegativeReaction
+	case analysis.PackageInterest != nil:
+		analysis.Intent = IntentPackageSelection
 	case containsHumanRequest(normalized):
 		analysis.Intent = IntentHumanRequest
 	case containsPortfolioRequest(text):
@@ -124,7 +134,7 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentPriceQuestion
 	case analysis.SelectedLevel > 0 && looksLikePackageSelection(normalized):
 		analysis.Intent = IntentPackageSelection
-	case containsReadySignal(text):
+	case containsReadySignal(text) || analysis.WantsQuestionnaire:
 		analysis.Intent = IntentReadyToOrder
 	case containsObjection(text):
 		analysis.Intent = IntentObjection
@@ -156,7 +166,9 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 		a.PreviousAIAds != nil ||
 		a.Budget != nil ||
 		a.TargetAudience != nil ||
-		a.SelectedLevel > 0
+		a.SelectedLevel > 0 ||
+		a.PackageInterest != nil ||
+		a.WantsQuestionnaire
 }
 
 func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
@@ -187,9 +199,16 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	if analysis.TargetAudience != nil && strings.TrimSpace(*analysis.TargetAudience) != "" {
 		s.TargetAudience = strings.TrimSpace(*analysis.TargetAudience)
 	}
+	if analysis.PackageInterest != nil && isValidPackageInterest(*analysis.PackageInterest) {
+		s.SelectedPackage = normalizePackageInterest(*analysis.PackageInterest)
+		s.LeadStatus = LeadStatusHot
+	}
 	if (analysis.Intent == IntentPackageSelection || analysis.Intent == IntentHumanRequest) && analysis.SelectedLevel > 0 {
 		s.SelectedPackage = packageKey(analysis.SelectedLevel)
 		s.LeadStatus = LeadStatusHot
+	}
+	if analysis.WantsQuestionnaire || analysis.Intent == IntentReadyToOrder {
+		s.WantsQuestionnaire = true
 	}
 	if analysis.Intent == IntentPriceQuestion {
 		s.PriceInterest = true
@@ -200,8 +219,10 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 		s.LeadStatus = LeadStatusHandoffRequired
 	}
 	if analysis.Intent == IntentHumanRequest {
-		s.ContactBriefReady = true
-		s.LeadStatus = LeadStatusHandoffRequired
+		s.WantsQuestionnaire = true
+		if strings.TrimSpace(s.LeadStatus) == "" || normalizeLeadStatus(s.LeadStatus) == LeadStatusNew {
+			s.LeadStatus = LeadStatusHot
+		}
 	}
 	if analysis.Intent == IntentRefusal {
 		s.LeadStatus = LeadStatusClosed
@@ -213,16 +234,13 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 
 func (s LeadState) MissingCoreFields() []string {
 	missing := make([]string, 0, 4)
-	if strings.TrimSpace(s.Niche) == "" {
+	if !isValidNiche(s.Niche) {
 		missing = append(missing, fieldNiche)
 	}
-	if strings.TrimSpace(s.Goal) == "" {
+	if !isValidGoal(s.Goal) {
 		missing = append(missing, fieldGoal)
 	}
-	if len(s.Platforms) == 0 && strings.TrimSpace(s.Platform) == "" {
-		missing = append(missing, fieldPlatforms)
-	}
-	if strings.TrimSpace(s.Deadline) == "" {
+	if !isValidDeadline(s.Deadline) {
 		missing = append(missing, fieldDeadline)
 	}
 	return missing
@@ -234,51 +252,53 @@ func (s LeadState) HasCoreFields() bool {
 
 func (s LeadState) PromptJSON(stage string) string {
 	summary := struct {
-		HasBeenGreeted    bool     `json:"has_been_greeted"`
-		Niche             *string  `json:"niche"`
-		Goal              *string  `json:"goal"`
-		Platform          *string  `json:"platform"`
-		Platforms         []string `json:"platforms"`
-		Deadline          *string  `json:"deadline"`
-		PreviousAIAds     *bool    `json:"previous_ai_ads"`
-		AIExperience      *string  `json:"ai_experience"`
-		Budget            *string  `json:"budget"`
-		PriceInterest     bool     `json:"price_interest"`
-		SelectedPackage   *string  `json:"selected_package"`
-		ClientName        *string  `json:"client_name"`
-		TargetAudience    *string  `json:"target_audience"`
-		Notes             *string  `json:"notes"`
-		FreeText          *string  `json:"free_text"`
-		PortfolioSent     bool     `json:"portfolio_sent"`
-		OfferSent         bool     `json:"offer_sent"`
-		BriefRequested    bool     `json:"brief_requested"`
-		BriefCompleted    bool     `json:"brief_completed"`
-		ContactBriefReady bool     `json:"contact_brief_ready"`
-		LeadStatus        string   `json:"lead_status"`
-		Stage             string   `json:"stage"`
+		HasBeenGreeted     bool     `json:"has_been_greeted"`
+		Niche              *string  `json:"niche"`
+		Goal               *string  `json:"goal"`
+		Platform           *string  `json:"platform"`
+		Platforms          []string `json:"platforms"`
+		Deadline           *string  `json:"deadline"`
+		PreviousAIAds      *bool    `json:"previous_ai_ads"`
+		AIExperience       *string  `json:"ai_experience"`
+		Budget             *string  `json:"budget"`
+		PriceInterest      bool     `json:"price_interest"`
+		SelectedPackage    *string  `json:"selected_package"`
+		WantsQuestionnaire bool     `json:"wants_questionnaire"`
+		ClientName         *string  `json:"client_name"`
+		TargetAudience     *string  `json:"target_audience"`
+		Notes              *string  `json:"notes"`
+		FreeText           *string  `json:"free_text"`
+		PortfolioSent      bool     `json:"portfolio_sent"`
+		OfferSent          bool     `json:"offer_sent"`
+		BriefRequested     bool     `json:"brief_requested"`
+		BriefCompleted     bool     `json:"brief_completed"`
+		ContactBriefReady  bool     `json:"contact_brief_ready"`
+		LeadStatus         string   `json:"lead_status"`
+		Stage              string   `json:"stage"`
 	}{
-		HasBeenGreeted:    s.HasBeenGreeted,
-		Niche:             nullableString(s.Niche),
-		Goal:              nullableString(s.Goal),
-		Platform:          nullableString(s.platformSummary()),
-		Platforms:         append([]string(nil), s.Platforms...),
-		Deadline:          nullableString(s.Deadline),
-		PreviousAIAds:     s.PreviousAIAds,
-		AIExperience:      nullableString(s.AIExperience),
-		Budget:            nullableString(s.Budget),
-		PriceInterest:     s.PriceInterest,
-		SelectedPackage:   nullableString(s.SelectedPackage),
-		ClientName:        nullableString(s.ClientName),
-		TargetAudience:    nullableString(s.TargetAudience),
-		Notes:             nullableString(s.Notes),
-		FreeText:          nullableString(s.FreeText),
-		PortfolioSent:     s.PortfolioSent,
-		OfferSent:         s.OfferSent,
-		BriefRequested:    s.BriefRequested,
-		BriefCompleted:    s.BriefCompleted,
-		ContactBriefReady: s.ContactBriefReady,
-		LeadStatus:        normalizeLeadStatus(s.LeadStatus),
-		Stage:             strings.TrimSpace(stage),
+		HasBeenGreeted:     s.HasBeenGreeted,
+		Niche:              nullableString(s.Niche),
+		Goal:               nullableString(s.Goal),
+		Platform:           nullableString(s.platformSummary()),
+		Platforms:          append([]string(nil), s.Platforms...),
+		Deadline:           nullableString(s.Deadline),
+		PreviousAIAds:      s.PreviousAIAds,
+		AIExperience:       nullableString(s.AIExperience),
+		Budget:             nullableString(s.Budget),
+		PriceInterest:      s.PriceInterest,
+		SelectedPackage:    nullableString(s.SelectedPackage),
+		WantsQuestionnaire: s.WantsQuestionnaire,
+		ClientName:         nullableString(s.ClientName),
+		TargetAudience:     nullableString(s.TargetAudience),
+		Notes:              nullableString(s.Notes),
+		FreeText:           nullableString(s.FreeText),
+		PortfolioSent:      s.PortfolioSent,
+		OfferSent:          s.OfferSent,
+		BriefRequested:     s.BriefRequested,
+		BriefCompleted:     s.BriefCompleted,
+		ContactBriefReady:  s.ContactBriefReady,
+		LeadStatus:         normalizeLeadStatus(s.LeadStatus),
+		Stage:              strings.TrimSpace(stage),
 	}
 	if summary.Platforms == nil {
 		summary.Platforms = []string{}
@@ -647,6 +667,10 @@ func normalizeGoal(value string) string {
 	switch {
 	case containsAny(value, []string{"удво", "2x", "x2"}) && containsAny(value, []string{"продаж", "сат", "sales"}):
 		return "удвоить продажи"
+	case containsAny(value, []string{"клиент", "client", "кобейт", "көбейт", "көбейту", "привлеч"}):
+		return "привлечь клиентов"
+	case containsAny(value, []string{"ролик", "reels", "рилс", "контент", "content", "tiktok", "тик ток", "instagram", "инстаграм"}):
+		return "контент для продвижения"
 	case containsAny(value, []string{"продаж", "продав", "выруч", "сбыт", "сатылым", "сату", "sales", "revenue"}):
 		return "рост продаж"
 	case containsAny(value, []string{"заяв", "лид", "лиды", "өтінім", "lead", "leads"}):
@@ -671,6 +695,8 @@ func normalizeDeadline(value string) string {
 	weekday := deadlineWeekday(value)
 	concreteDate := concreteDatePhrase(value)
 	switch {
+	case containsAny(value, []string{"без срока", "без строгого срока", "нет срока", "не срочно", "срок не важен", "no strict deadline", "no deadline"}):
+		return "без строгого срока"
 	case containsAny(value, []string{"48 час", "48 сағ"}):
 		return "за 48 часов"
 	case containsAny(value, []string{"сегодня", "бүгін", "today"}):
@@ -759,6 +785,9 @@ func knownNicheFromText(normalized string) string {
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
 		"недвижимость", "ремонт", "строительство", "образование", "курсы",
 		"мебель", "авто", "туризм", "отель", "барбершоп", "маркетинг",
+		"онлайн курс", "online course", "real estate", "beauty salon", "expert blog",
+		"clothing brand", "education", "fitness", "construction", "medical clinic",
+		"медицинская клиника", "клиника", "экспертный блог", "бренд одежды",
 	}
 	for _, candidate := range candidates {
 		if strings.Contains(normalized, candidate) {
@@ -823,7 +852,7 @@ func extractPrefixedValue(normalized string, prefixes []string, stopWords []stri
 func normalizeNiche(value string) string {
 	value = normalizeForAnalysis(value)
 	value = strings.Trim(value, " -—:;,.!?")
-	if value == "" || value == "и тд" || value == "и так далее" {
+	if !isValidNiche(value) || value == "и тд" || value == "и так далее" {
 		return ""
 	}
 	return value

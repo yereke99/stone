@@ -70,7 +70,11 @@ func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoD
 	}
 }
 
-func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage) (err error) {
+func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage) error {
+	return s.ProcessIncomingWhatsAppMessage(ctx, msg)
+}
+
+func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg IncomingMessage) (err error) {
 	chatID := strings.TrimSpace(msg.ChatID)
 	if chatID == "" {
 		return fmt.Errorf("chat id is required")
@@ -81,10 +85,41 @@ func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage
 	}
 	defer unlock()
 
+	standaloneDedupeKey := ""
+	if strings.TrimSpace(msg.DedupeKey) == "" && strings.TrimSpace(msg.IDMessage) != "" {
+		standaloneDedupeKey = chatID + "|" + strings.TrimSpace(msg.IDMessage)
+		decision, dedupeErr := s.store.BeginMessageProcessing(ctx, standaloneDedupeKey)
+		if dedupeErr != nil {
+			return dedupeErr
+		}
+		if decision == MessageDedupeDuplicate || decision == MessageDedupeInFlight {
+			s.info("duplicate standalone whatsapp message skipped",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+				zap.String("decision", string(decision)),
+			)
+			return nil
+		}
+		defer func() {
+			if finishErr := s.store.FinishMessageProcessing(context.Background(), standaloneDedupeKey, err == nil); finishErr != nil && err == nil {
+				err = finishErr
+			}
+		}()
+	}
+
 	counter := &outgoingCounter{}
 	ctx = context.WithValue(ctx, outgoingCounterKey{}, counter)
 
 	text := strings.TrimSpace(msg.Text)
+
+	if senderName := strings.TrimSpace(msg.SenderName); senderName != "" {
+		s.store.Update(chatID, func(conversation *Conversation) {
+			conversation.DisplayName = senderName
+			if strings.TrimSpace(conversation.Lead.ClientName) == "" {
+				conversation.Lead.ClientName = senderName
+			}
+		})
+	}
 
 	conversation, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
@@ -142,6 +177,12 @@ func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage
 	if err := s.store.MarkIncoming(ctx, chatID, text); err != nil {
 		return err
 	}
+	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.Stage == ClientStateHandedOff {
+		s.info("post-handoff incoming message saved without automation reply",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+		)
+		return nil
+	}
 
 	analysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
 	if isBriefAnswerForConversation(text, analysis, conversation) {
@@ -191,11 +232,26 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		)
 		return nil
 	}
+	if shouldTransferToManagerNow(conversation, analysis) {
+		level := analysis.SelectedLevel
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+	}
+	if wantsManagerFlow(conversation, analysis) {
+		if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
+			return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
+		}
+	}
 
 	switch state {
 	case ClientStateNeutralNew:
 		return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
 	case ClientStateAwaitingQualification:
+		if len(conversation.Lead.MissingCoreFields()) > 0 && shouldClarifyWeakQualificationAnswer(analysis) {
+			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
+		}
 		if !hasQualificationSignal(conversation, analysis) {
 			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
 		}
@@ -257,10 +313,10 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		if level == 0 {
 			level = selectedLevelFromConversation(conversation)
 		}
-		return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
+		return s.sendHumanHandoff(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentPackageSelection && level > 0 {
-		return s.sendQuestionnaireOfferWithSelectedVideo(ctx, chatID, language, level)
+		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentReadyToOrder || containsReadySignal(text) {
 		if level == 0 {
@@ -290,7 +346,7 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStatePackagesPresented, 0)
 	}
 	if analysis.Intent == IntentAgreement {
-		return s.sendQuestionnaireOffer(ctx, chatID, language, selectedLevelFromConversation(conversation))
+		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
 	}
 	if isLocalOfftopic(normalized) {
 		return s.sendAndRemember(ctx, chatID, OfftopicText(language), ClientStatePackagesPresented, 0)
@@ -309,7 +365,7 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentHumanRequest {
-		return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
+		return s.sendHumanHandoff(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentPriceQuestion {
 		if level > 0 {
@@ -352,9 +408,31 @@ func (s *Service) sendSelectedPackageVideo(ctx context.Context, chatID string, l
 }
 
 func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string, language string, level int) error {
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		if level > 0 {
+			conversation.SelectedLevel = level
+			conversation.Lead.SelectedPackage = packageKey(level)
+		}
+	})
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if level == 0 {
+		level = selectedLevelFromConversation(conversation)
+	}
+	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
+		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
+	}
+
 	text := BriefText(language)
 	if level > 0 {
 		text = BriefTextForPackage(language, level)
+		if err := s.sendSelectedPackageVideo(ctx, chatID, language, level, false); err != nil {
+			return err
+		}
 	}
 	if err := s.sendAndRemember(ctx, chatID, text, ClientStateHandedOff, level); err != nil {
 		return err
@@ -364,6 +442,45 @@ func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string
 		conversation.Lead.BriefRequested = true
 	})
 	return nil
+}
+
+func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language string, level int) error {
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		if level > 0 {
+			conversation.SelectedLevel = level
+			conversation.Lead.SelectedPackage = packageKey(level)
+		}
+	})
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if level == 0 {
+		level = selectedLevelFromConversation(conversation)
+	}
+	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
+		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
+	}
+	return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
+}
+
+func (s *Service) askMissingBeforeManager(ctx context.Context, chatID string, language string, conversation Conversation, missing []string) error {
+	if len(missing) == 0 {
+		missing = requiredLeadMissingFields(conversation)
+	}
+	s.store.Update(chatID, func(current *Conversation) {
+		current.MissingFields = normalizeFieldList(missing)
+		current.WantsQuestionnaire = current.WantsQuestionnaire || current.Lead.WantsQuestionnaire
+	})
+	stage := ClientStateAwaitingQualification
+	if conversation.QuestionnaireOfferSent {
+		stage = ClientStateAwaitingQuestionnaireConfirm
+	} else if conversation.PackagesSent || conversation.SentPortfolio || conversation.Lead.OfferSent || conversation.Lead.PortfolioSent {
+		stage = ClientStatePackagesPresented
+	}
+	return s.sendAndRemember(ctx, chatID, managerMissingFieldsReply(language, conversation.Lead, missing, conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire), stage, selectedLevelFromConversation(conversation), missing...)
 }
 
 func (s *Service) stopClient(ctx context.Context, chatID string, optOut bool) error {
@@ -428,7 +545,7 @@ func (s *Service) handleLocalCommand(ctx context.Context, chatID string, text st
 		if level == 0 {
 			level = selectedLevelFromConversation(conversation)
 		}
-		return true, s.sendAndRemember(ctx, chatID, HumanHandoffText(language), StageHandoffRequired, level)
+		return true, s.sendHumanHandoff(ctx, chatID, language, level)
 	}
 
 	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired || normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired || conversation.Stage == StageHandoffRequired {
@@ -578,6 +695,17 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if (latest.AutomationClosed || latest.HandedOffToOwner || !latest.TransferredAt.IsZero()) && stage != ClientStateHandedOff && stage != StageHandoffRequired {
+		s.info("outgoing whatsapp reply skipped because automation is closed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+		)
+		return nil
+	}
 
 	duplicate, err := s.store.RecentlySentReply(ctx, chatID, message, outgoingRepeatWindow)
 	if err != nil {
@@ -629,6 +757,16 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 }
 
 func (s *Service) sendVideos(ctx context.Context, chatID string, files []string, language string, allowRepeat bool) error {
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if latest.AutomationClosed || latest.HandedOffToOwner || !latest.TransferredAt.IsZero() {
+		s.info("portfolio video skipped because automation is closed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+		)
+		return nil
+	}
 	for index, fileName := range dedupeVideos(files) {
 		if index > 0 {
 			if err := sleepWithContext(ctx, videoSendDelay); err != nil {
@@ -714,6 +852,30 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 		return
 	}
 
+	qualification := managerQualificationForConversation(conversation)
+	if !qualification.Ready {
+		s.info("admin notification skipped because lead is incomplete",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Strings("missing_fields", qualification.Missing),
+		)
+		s.store.Update(chatID, func(current *Conversation) {
+			current.MissingFields = qualification.Missing
+			current.HandedOffToOwner = false
+			current.AutomationClosed = false
+			current.Stopped = false
+			if current.Stage == ClientStateHandedOff {
+				current.Stage = ClientStateAwaitingQuestionnaireConfirm
+			}
+			if normalizeLeadStatus(current.LeadStatus) == LeadStatusHandoffRequired {
+				current.LeadStatus = LeadStatusHot
+			}
+			if normalizeLeadStatus(current.Lead.LeadStatus) == LeadStatusHandoffRequired {
+				current.Lead.LeadStatus = LeadStatusHot
+			}
+		})
+		return
+	}
+
 	if normalizeLeadStatus(conversation.LeadStatus) != LeadStatusHandoffRequired &&
 		normalizeLeadStatus(conversation.Lead.LeadStatus) != LeadStatusHandoffRequired {
 		return
@@ -760,23 +922,50 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
 	lines := []string{
-		"Новый горячий лид из WhatsApp:",
+		"New qualified WhatsApp lead",
 		"",
-		"Имя: " + valueOrDash(conversation.DisplayName),
-		"Телефон: " + valueOrDash(formatPhoneForAdmin(conversation.ChatID)),
-		"ChatID: " + valueOrDash(conversation.ChatID),
-		"Ниша: " + valueOrDash(lead.Niche),
-		"Цель: " + valueOrDash(lead.Goal),
-		"Срок: " + valueOrDash(lead.Deadline),
-		"Интересующий пакет: " + adminPackageLabel(lead.SelectedPackage),
-		"Последнее сообщение клиента: " + valueOrDash(conversation.LastIncomingText),
-		"",
-		"Статус: передан менеджеру",
 	}
+	if name := adminClientName(conversation); name != "" {
+		lines = append(lines, "Name: "+name)
+	}
+	lines = append(lines,
+		"Phone: "+formatPhoneForAdmin(conversation.ChatID),
+		"ChatID: "+strings.TrimSpace(conversation.ChatID),
+		"",
+		"Niche: "+strings.TrimSpace(lead.Niche),
+		"Goal: "+strings.TrimSpace(lead.Goal),
+		"Deadline: "+strings.TrimSpace(lead.Deadline),
+		"Interested package: "+adminPackageLabel(lead.SelectedPackage),
+		"",
+		"Client intent: "+adminClientIntent(conversation),
+		"Last client message: "+strings.TrimSpace(conversation.LastIncomingText),
+		"",
+		"Conversation summary:",
+		strings.TrimSpace(conversation.ConversationSummary),
+		"",
+		"Status: qualified, transferred to manager",
+	)
 	if link := whatsappLink(conversation.ChatID); link != "" {
 		lines = append(lines, "WhatsApp: "+link)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func adminClientName(conversation Conversation) string {
+	if name := strings.TrimSpace(conversation.Lead.ClientName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(conversation.DisplayName)
+}
+
+func adminClientIntent(conversation Conversation) string {
+	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire {
+		return "wants to open questionnaire / ready to proceed"
+	}
+	if isValidPackageInterest(conversation.Lead.SelectedPackage) {
+		return "selected package / ready to discuss order"
+	}
+	return "qualified lead"
 }
 
 func adminStatusLabel(status string) string {
@@ -823,8 +1012,10 @@ func adminPackageLabel(packageKey string) string {
 		return "Basic / Базовый"
 	case "standard":
 		return "Standard / Стандарт"
+	case packageNeedsManagerRecommendation:
+		return "needs manager recommendation"
 	default:
-		return valueOrDash(packageKey)
+		return strings.TrimSpace(packageKey)
 	}
 }
 
@@ -1063,33 +1254,45 @@ func conversationPromptJSON(conversation Conversation) string {
 	sort.Ints(sentVideos)
 
 	payload := struct {
-		Stage            string              `json:"stage"`
-		LeadStatus       string              `json:"lead_status"`
-		Language         string              `json:"language"`
-		Lead             LeadState           `json:"lead"`
-		CompletedFields  []string            `json:"completed_fields"`
-		AskedFields      []string            `json:"asked_fields"`
-		SentVideos       []int               `json:"sent_videos"`
-		SentPortfolio    bool                `json:"sent_portfolio"`
-		BriefAsked       bool                `json:"brief_asked"`
-		BriefCollected   bool                `json:"brief_collected"`
-		LastIncomingText string              `json:"last_incoming_text"`
-		LastReplyText    string              `json:"last_reply_text"`
-		RecentMessages   []map[string]string `json:"recent_messages"`
+		Stage                string              `json:"stage"`
+		LeadStatus           string              `json:"lead_status"`
+		Language             string              `json:"language"`
+		Lead                 LeadState           `json:"lead"`
+		CompletedFields      []string            `json:"completed_fields"`
+		AskedFields          []string            `json:"asked_fields"`
+		SentVideos           []int               `json:"sent_videos"`
+		SentPortfolio        bool                `json:"sent_portfolio"`
+		PackagesSent         bool                `json:"packages_sent"`
+		WantsQuestionnaire   bool                `json:"wants_questionnaire"`
+		AutomationClosed     bool                `json:"automation_closed"`
+		TransferredToManager bool                `json:"transferred_to_manager"`
+		MissingFields        []string            `json:"missing_fields"`
+		ConversationSummary  string              `json:"conversation_summary"`
+		BriefAsked           bool                `json:"brief_asked"`
+		BriefCollected       bool                `json:"brief_collected"`
+		LastIncomingText     string              `json:"last_incoming_text"`
+		LastReplyText        string              `json:"last_reply_text"`
+		RecentMessages       []map[string]string `json:"recent_messages"`
 	}{
-		Stage:            conversation.Stage,
-		LeadStatus:       normalizeLeadStatus(conversation.LeadStatus),
-		Language:         normalizeLanguageCode(conversation.Language),
-		Lead:             conversation.Lead,
-		CompletedFields:  mapKeys(conversation.CompletedFields),
-		AskedFields:      mapKeys(conversation.AskedFields),
-		SentVideos:       sentVideos,
-		SentPortfolio:    conversation.SentPortfolio || conversation.Lead.PortfolioSent,
-		BriefAsked:       conversation.BriefAsked || conversation.Lead.BriefRequested,
-		BriefCollected:   conversation.BriefCollected || conversation.Lead.BriefCompleted,
-		LastIncomingText: strings.TrimSpace(conversation.LastIncomingText),
-		LastReplyText:    strings.TrimSpace(conversation.LastReplyText),
-		RecentMessages:   recent,
+		Stage:                conversation.Stage,
+		LeadStatus:           normalizeLeadStatus(conversation.LeadStatus),
+		Language:             normalizeLanguageCode(conversation.Language),
+		Lead:                 conversation.Lead,
+		CompletedFields:      mapKeys(conversation.CompletedFields),
+		AskedFields:          mapKeys(conversation.AskedFields),
+		SentVideos:           sentVideos,
+		SentPortfolio:        conversation.SentPortfolio || conversation.Lead.PortfolioSent,
+		PackagesSent:         conversation.PackagesSent || conversation.Lead.OfferSent,
+		WantsQuestionnaire:   conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire,
+		AutomationClosed:     conversation.AutomationClosed,
+		TransferredToManager: conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero(),
+		MissingFields:        append([]string(nil), conversation.MissingFields...),
+		ConversationSummary:  strings.TrimSpace(conversation.ConversationSummary),
+		BriefAsked:           conversation.BriefAsked || conversation.Lead.BriefRequested,
+		BriefCollected:       conversation.BriefCollected || conversation.Lead.BriefCompleted,
+		LastIncomingText:     strings.TrimSpace(conversation.LastIncomingText),
+		LastReplyText:        strings.TrimSpace(conversation.LastReplyText),
+		RecentMessages:       recent,
 	}
 	if payload.Stage == "" {
 		payload.Stage = StageNewLead
@@ -1230,6 +1433,9 @@ func fieldsAskedByMessage(message string, stage string) []string {
 	if containsAny(normalized, []string{"ии-ролик", "ai ролик", "ai video", "бұрын ai", "previously used"}) {
 		add(fieldPreviousAIAds)
 	}
+	if containsAny(normalized, []string{"пакет", "формат", "test", "basic", "standard", "тест", "базов", "стандарт", "premium", "премиум"}) {
+		add(fieldPackageInterest)
+	}
 	if stage == StageBriefRequested || containsAny(normalized, []string{"бриф", "brief"}) {
 		add(fieldBrief)
 	}
@@ -1338,9 +1544,9 @@ func isLocalOfftopic(normalized string) bool {
 
 func hasQualificationSignal(conversation Conversation, analysis CustomerAnalysis) bool {
 	lead := conversation.Lead
-	return strings.TrimSpace(lead.Niche) != "" ||
-		strings.TrimSpace(lead.Goal) != "" ||
-		strings.TrimSpace(lead.Deadline) != "" ||
+	return isValidNiche(lead.Niche) ||
+		isValidGoal(lead.Goal) ||
+		isValidDeadline(lead.Deadline) ||
 		analysis.HasBusinessSignal() ||
 		analysis.Intent == IntentPriceQuestion ||
 		analysis.Intent == IntentPortfolioRequest ||
@@ -1350,13 +1556,13 @@ func hasQualificationSignal(conversation Conversation, analysis CustomerAnalysis
 
 func qualificationMissingFields(lead LeadState) []string {
 	missing := make([]string, 0, 3)
-	if strings.TrimSpace(lead.Niche) == "" {
+	if !isValidNiche(lead.Niche) {
 		missing = append(missing, fieldNiche)
 	}
-	if strings.TrimSpace(lead.Goal) == "" {
+	if !isValidGoal(lead.Goal) {
 		missing = append(missing, fieldGoal)
 	}
-	if strings.TrimSpace(lead.Deadline) == "" {
+	if !isValidDeadline(lead.Deadline) {
 		missing = append(missing, fieldDeadline)
 	}
 	return missing
@@ -1399,6 +1605,50 @@ func shouldRecommendTestPackage(conversation Conversation, analysis CustomerAnal
 	return containsAny(normalizeForAnalysis(conversation.LastIncomingText), []string{
 		"первый раз", "впервые", "попроб", "протест", "тест", "first time", "try", "test",
 	})
+}
+
+func shouldTransferToManagerNow(conversation Conversation, analysis CustomerAnalysis) bool {
+	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() {
+		return false
+	}
+	if !managerQualificationForConversation(conversation).Ready {
+		return false
+	}
+	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire || analysis.WantsQuestionnaire {
+		return true
+	}
+	switch analysis.Intent {
+	case IntentReadyToOrder, IntentHumanRequest, IntentBriefAnswer:
+		return true
+	case IntentPackageSelection:
+		return isValidPackageInterest(conversation.Lead.SelectedPackage)
+	default:
+		return false
+	}
+}
+
+func wantsManagerFlow(conversation Conversation, analysis CustomerAnalysis) bool {
+	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire || analysis.WantsQuestionnaire {
+		return true
+	}
+	switch analysis.Intent {
+	case IntentReadyToOrder, IntentHumanRequest, IntentBriefAnswer, IntentPackageSelection:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {
+	if analysis.HasBusinessSignal() {
+		return false
+	}
+	switch analysis.Intent {
+	case IntentOther, IntentGreeting, IntentAgreement:
+		return true
+	default:
+		return false
+	}
 }
 
 func isOptOutText(text string) bool {

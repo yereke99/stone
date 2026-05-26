@@ -185,8 +185,53 @@ func singleMissingQuestion(language string, field string, lead LeadState) string
 		}
 	case fieldPreviousAIAds:
 		return askPreviousAIWithDiagnosis(language, lead)
+	case fieldPackage, fieldPackageInterest:
+		switch language {
+		case "kk":
+			return "Қай пакет қызықты: Test, Basic немесе Standard? Егер білмесеңіз, менеджер ыңғайлысын ұсына алады."
+		case "en":
+			return "Which package is interesting: Test, Basic, or Standard? If you are not sure, the manager can recommend one."
+		default:
+			return "Какой пакет интересен: Test, Basic или Standard? Если не уверены, менеджер подскажет подходящий."
+		}
 	}
 	return askMissingFieldsReply(language, lead, lead.MissingCoreFields())
+}
+
+func managerMissingFieldsReply(language string, lead LeadState, missing []string, wantsQuestionnaire bool) string {
+	language = normalizeLanguageCode(language)
+	missing = normalizeFieldList(missing)
+	if len(missing) == 1 {
+		if wantsQuestionnaire {
+			switch language {
+			case "kk":
+				return "Жақсы, анкетаны ашып беремін. Тек нақтылау үшін: " + lowerFirst(singleMissingQuestion(language, missing[0], lead))
+			case "en":
+				return "Good, I will open the questionnaire. One detail first: " + lowerFirst(singleMissingQuestion(language, missing[0], lead))
+			default:
+				return "Хорошо, анкету откроем. Только уточню: " + lowerFirst(singleMissingQuestion(language, missing[0], lead))
+			}
+		}
+		return singleMissingQuestion(language, missing[0], lead)
+	}
+
+	switch language {
+	case "kk":
+		if wantsQuestionnaire {
+			return "Жақсы, анкетаны ашып беремін. Дұрыс толтыру үшін нақтылап алайын: " + missingFieldsLabel(language, missing) + "."
+		}
+		return "Түсіндім. Дұрыс жіберу үшін нақтылаңыз: " + missingFieldsLabel(language, missing) + "."
+	case "en":
+		if wantsQuestionnaire {
+			return "Good, I will open the questionnaire. To send it correctly, please clarify: " + missingFieldsLabel(language, missing) + "."
+		}
+		return "Got it. To prepare this correctly, please clarify: " + missingFieldsLabel(language, missing) + "."
+	default:
+		if wantsQuestionnaire {
+			return "Хорошо, анкету откроем. Чтобы передать задачу правильно, уточните: " + missingFieldsLabel(language, missing) + "."
+		}
+		return "Понял. Чтобы передать задачу правильно, уточните: " + missingFieldsLabel(language, missing) + "."
+	}
 }
 
 func negativeMissingReply(language string, lead LeadState, field string) string {
@@ -587,6 +632,8 @@ func missingFieldsLabel(language string, fields []string) string {
 				labels = append(labels, "алаң")
 			case fieldDeadline:
 				labels = append(labels, "мерзім")
+			case fieldPackage, fieldPackageInterest:
+				labels = append(labels, "пакет")
 			}
 		case "en":
 			switch field {
@@ -598,6 +645,8 @@ func missingFieldsLabel(language string, fields []string) string {
 				labels = append(labels, "platform")
 			case fieldDeadline:
 				labels = append(labels, "timeline")
+			case fieldPackage, fieldPackageInterest:
+				labels = append(labels, "package")
 			}
 		default:
 			switch field {
@@ -609,6 +658,8 @@ func missingFieldsLabel(language string, fields []string) string {
 				labels = append(labels, "площадку")
 			case fieldDeadline:
 				labels = append(labels, "сроки")
+			case fieldPackage, fieldPackageInterest:
+				labels = append(labels, "пакет")
 			}
 		}
 	}

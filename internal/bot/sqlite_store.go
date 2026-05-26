@@ -105,9 +105,14 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			questionnaire_offer_sent INTEGER NOT NULL DEFAULT 0,
 			questionnaire_sent INTEGER NOT NULL DEFAULT 0,
 			handed_off_to_owner INTEGER NOT NULL DEFAULT 0,
+			wants_questionnaire INTEGER NOT NULL DEFAULT 0,
+			automation_closed INTEGER NOT NULL DEFAULT 0,
 			stopped INTEGER NOT NULL DEFAULT 0,
 			opt_out INTEGER NOT NULL DEFAULT 0,
 			last_processed_message_id TEXT,
+			conversation_summary TEXT,
+			missing_fields_json TEXT,
+			transferred_at TEXT,
 			conversation_json TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -133,6 +138,54 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("run sqlite migration: %w", err)
+		}
+	}
+	if err := s.ensureWhatsAppClientColumns(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *ConversationStore) ensureWhatsAppClientColumns(ctx context.Context) error {
+	columns := map[string]string{
+		"wants_questionnaire":  "INTEGER NOT NULL DEFAULT 0",
+		"automation_closed":    "INTEGER NOT NULL DEFAULT 0",
+		"conversation_summary": "TEXT",
+		"missing_fields_json":  "TEXT",
+		"transferred_at":       "TEXT",
+	}
+
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(whatsapp_clients)`)
+	if err != nil {
+		return fmt.Errorf("inspect whatsapp_clients columns: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	existing := make(map[string]bool, len(columns))
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan whatsapp_clients column: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate whatsapp_clients columns: %w", err)
+	}
+
+	for name, definition := range columns {
+		if existing[name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE whatsapp_clients ADD COLUMN `+name+` `+definition); err != nil {
+			return fmt.Errorf("add whatsapp_clients.%s column: %w", name, err)
 		}
 	}
 	return nil
@@ -234,8 +287,9 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 			chat_id, phone, display_name, first_seen_at, last_seen_at, last_incoming_at, last_outgoing_at,
 			state, lead_status, language, niche, goal, deadline, selected_package,
 			initial_message_sent, portfolio_sent, packages_sent, questionnaire_offer_sent, questionnaire_sent,
-			handed_off_to_owner, stopped, opt_out, last_processed_message_id, conversation_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			handed_off_to_owner, wants_questionnaire, automation_closed, stopped, opt_out, last_processed_message_id,
+			conversation_summary, missing_fields_json, transferred_at, conversation_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id) DO UPDATE SET
 			phone = excluded.phone,
 			display_name = excluded.display_name,
@@ -255,9 +309,14 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 			questionnaire_offer_sent = excluded.questionnaire_offer_sent,
 			questionnaire_sent = excluded.questionnaire_sent,
 			handed_off_to_owner = excluded.handed_off_to_owner,
+			wants_questionnaire = excluded.wants_questionnaire,
+			automation_closed = excluded.automation_closed,
 			stopped = excluded.stopped,
 			opt_out = excluded.opt_out,
 			last_processed_message_id = excluded.last_processed_message_id,
+			conversation_summary = excluded.conversation_summary,
+			missing_fields_json = excluded.missing_fields_json,
+			transferred_at = excluded.transferred_at,
 			conversation_json = excluded.conversation_json,
 			updated_at = excluded.updated_at`,
 		conversation.ChatID,
@@ -280,9 +339,14 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 		boolInt(conversation.QuestionnaireOfferSent),
 		boolInt(conversation.QuestionnaireSent),
 		boolInt(conversation.HandedOffToOwner || !conversation.AdminNotifiedAt.IsZero() || !conversation.AdminOperatorNotifiedAt.IsZero()),
+		boolInt(conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire),
+		boolInt(conversation.AutomationClosed),
 		boolInt(conversation.Stopped),
 		boolInt(conversation.OptOut),
 		strings.TrimSpace(conversation.LastProcessedMessageID),
+		strings.TrimSpace(conversation.ConversationSummary),
+		missingFieldsJSONString(conversation.MissingFields),
+		timeText(conversation.TransferredAt),
 		string(raw),
 		timeText(conversation.CreatedAt),
 		timeText(conversation.UpdatedAt),
@@ -449,11 +513,11 @@ func clientStateForConversation(conversation *Conversation) string {
 		ClientStateOptOut:
 		return state
 	}
+	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
+		return ClientStateHandedOff
+	}
 	if conversation.Stopped {
 		return ClientStateStopped
-	}
-	if conversation.HandedOffToOwner || normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
-		return ClientStateHandedOff
 	}
 	if conversation.QuestionnaireOfferSent {
 		return ClientStateAwaitingQuestionnaireConfirm

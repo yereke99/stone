@@ -125,6 +125,18 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if err != nil {
 		return err
 	}
+	if reopened, missing, err := s.store.ReopenIncompleteHandoff(ctx, chatID); err != nil {
+		return err
+	} else if reopened {
+		s.info("incomplete handoff conversation reopened for qualification",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Strings("missing_fields", missing),
+		)
+		conversation, err = s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return err
+		}
+	}
 	stateBefore := conversation.Stage
 	leadStatusBefore := conversation.LeadStatus
 	selectedBefore := conversation.SelectedLevel

@@ -260,6 +260,55 @@ func (s *ConversationStore) MarkIncoming(ctx context.Context, chatID string, tex
 	return s.persistConversationLocked(ctx, conversation)
 }
 
+func (s *ConversationStore) ReopenIncompleteHandoff(ctx context.Context, chatID string) (bool, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return false, nil, err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false, nil, nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	if conversation.OptOut {
+		return false, append([]string(nil), conversation.MissingFields...), nil
+	}
+	if !hasHandoffClosure(*conversation) {
+		return false, append([]string(nil), conversation.MissingFields...), nil
+	}
+	qualification := managerQualificationForConversation(*conversation)
+	if qualification.Ready {
+		return false, append([]string(nil), conversation.MissingFields...), nil
+	}
+
+	conversation.MissingFields = qualification.Missing
+	conversation.HandedOffToOwner = false
+	conversation.AutomationClosed = false
+	conversation.Stopped = false
+	conversation.TransferredAt = time.Time{}
+	conversation.Lead.BriefCompleted = false
+	conversation.Lead.ContactBriefReady = false
+	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
+		conversation.LeadStatus = LeadStatusHot
+	}
+	if normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired {
+		conversation.Lead.LeadStatus = LeadStatusHot
+	}
+	conversation.Stage = activeStageForIncompleteHandoff(*conversation)
+	refreshConversationDerivedState(conversation)
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	if err := s.persistConversationLocked(ctx, conversation); err != nil {
+		return false, nil, err
+	}
+	return true, append([]string(nil), qualification.Missing...), nil
+}
+
 func (s *ConversationStore) MarkAskedFields(ctx context.Context, chatID string, fields []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -915,6 +964,15 @@ func activeStageForIncompleteHandoff(conversation Conversation) string {
 		return ClientStatePackagesPresented
 	}
 	return ClientStateAwaitingQualification
+}
+
+func hasHandoffClosure(conversation Conversation) bool {
+	return conversation.Stage == ClientStateHandedOff ||
+		conversation.HandedOffToOwner ||
+		conversation.AutomationClosed ||
+		!conversation.TransferredAt.IsZero() ||
+		normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired ||
+		normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired
 }
 
 func updateConversationFlagsForStage(conversation *Conversation, stage string) {

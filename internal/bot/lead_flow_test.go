@@ -257,6 +257,48 @@ func TestIncompleteLeadCannotBeForcedIntoHandoffState(t *testing.T) {
 	}
 }
 
+func TestInvalidPersistedHandoffIsReopenedForQualification(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77011113333@c.us"
+
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = ClientStateHandedOff
+		conversation.HandedOffToOwner = true
+		conversation.AutomationClosed = true
+		conversation.Stopped = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.BriefCompleted = true
+		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.Niche = "салон красоты"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+		conversation.LeadStatus = LeadStatusHandoffRequired
+	})
+
+	sendText(t, service, chatID, "алло")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage == ClientStateHandedOff || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+		t.Fatalf("invalid handoff was not reopened: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+	if len(sender.messages) == 0 {
+		t.Fatal("reopened incomplete handoff did not produce a qualification reply")
+	}
+	if !sameFields(conversation.MissingFields, []string{fieldGoal, fieldPackageInterest}) {
+		t.Fatalf("missing fields = %#v, want goal/package_interest", conversation.MissingFields)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	for _, want := range []string{"цель", "пакет"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("missing-field reply %q does not mention %q", last, want)
+		}
+	}
+}
+
 func TestOneLetterNicheIsRejected(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()

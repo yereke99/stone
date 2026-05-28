@@ -325,8 +325,8 @@ presentPortfolioAndPackages():
 В packages_presented бот реагирует на:
 
 - запрос менеджера - sendHumanHandoff();
-- выбор пакета - sendQuestionnaireAndHandoff();
-- готовность заказать - sendQuestionnaireAndHandoff();
+- выбор пакета - sendQuestionnaireAndAwaitBrief();
+- готовность заказать - sendQuestionnaireAndAwaitBrief();
 - просьбу примеров - либо напоминает, что уже отправлял, либо отправляет видео;
 - вопрос цены - отвечает по конкретному пакету или общим reminder;
 - возражение дорого - ObjectionText();
@@ -352,11 +352,12 @@ presentPortfolioAndPackages():
 
 Когда всё готово:
 
-- sendQuestionnaireAndHandoff() отправляет выбранное видео при наличии пакета;
+- sendQuestionnaireAndAwaitBrief() отправляет выбранное видео при наличии пакета;
 - отправляет BriefText или BriefTextForPackage;
-- stage переводится в handed_off;
+- stage переводится в brief_requested;
 - QuestionnaireSent=true;
 - Lead.BriefRequested=true;
+- после ответа клиента на короткий бриф completeBriefAndHandoff() отправляет клиенту благодарность и переводит qualified lead в handed_off;
 - notifyAdminsIfNeeded() отправляет менеджеру резюме лида.
 
 6. После передачи менеджеру
@@ -877,9 +878,11 @@ Legacy Meta webhook
    - lead_status=warm.
 12. Клиент пишет: "Берём basic".
 13. Анализ определяет selected_package=basic.
-14. Если все обязательные поля есть, бот отправляет бриф и переводит в handed_off.
-15. Менеджеру уходит сообщение "New qualified WhatsApp lead".
-16. whatsapp_clients обновляется:
+14. Если все обязательные поля есть, бот отправляет короткий бриф и ждёт ответы клиента.
+15. Клиент заполняет бриф.
+16. Бот благодарит клиента и передаёт заявку менеджеру.
+17. Менеджеру уходит сообщение "Новый квалифицированный лид WhatsApp".
+18. whatsapp_clients обновляется:
    - state=handed_off;
    - lead_status=handoff_required;
    - selected_package=basic;

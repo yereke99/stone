@@ -172,17 +172,18 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 }
 
 func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
-	if analysis.Niche != nil && strings.TrimSpace(*analysis.Niche) != "" {
+	updateQualificationFields := analysis.Intent != IntentBriefAnswer
+	if updateQualificationFields && analysis.Niche != nil && strings.TrimSpace(*analysis.Niche) != "" {
 		s.Niche = strings.TrimSpace(*analysis.Niche)
 	}
-	if analysis.Goal != nil && strings.TrimSpace(*analysis.Goal) != "" {
+	if updateQualificationFields && analysis.Goal != nil && strings.TrimSpace(*analysis.Goal) != "" {
 		s.Goal = strings.TrimSpace(*analysis.Goal)
 	}
-	if len(analysis.Platforms) > 0 {
+	if updateQualificationFields && len(analysis.Platforms) > 0 {
 		s.Platforms = mergePlatforms(s.Platforms, analysis.Platforms)
 		s.Platform = strings.Join(s.Platforms, ", ")
 	}
-	if analysis.Deadline != nil && strings.TrimSpace(*analysis.Deadline) != "" {
+	if updateQualificationFields && analysis.Deadline != nil && strings.TrimSpace(*analysis.Deadline) != "" {
 		s.Deadline = strings.TrimSpace(*analysis.Deadline)
 	}
 	if analysis.PreviousAIAds != nil {
@@ -199,11 +200,11 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	if analysis.TargetAudience != nil && strings.TrimSpace(*analysis.TargetAudience) != "" {
 		s.TargetAudience = strings.TrimSpace(*analysis.TargetAudience)
 	}
-	if analysis.PackageInterest != nil && isValidPackageInterest(*analysis.PackageInterest) {
+	if updateQualificationFields && analysis.PackageInterest != nil && isValidPackageInterest(*analysis.PackageInterest) {
 		s.SelectedPackage = normalizePackageInterest(*analysis.PackageInterest)
 		s.LeadStatus = LeadStatusHot
 	}
-	if (analysis.Intent == IntentPackageSelection || analysis.Intent == IntentHumanRequest) && analysis.SelectedLevel > 0 {
+	if updateQualificationFields && (analysis.Intent == IntentPackageSelection || analysis.Intent == IntentHumanRequest) && analysis.SelectedLevel > 0 {
 		s.SelectedPackage = packageKey(analysis.SelectedLevel)
 		s.LeadStatus = LeadStatusHot
 	}

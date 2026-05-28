@@ -190,6 +190,15 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		return err
 	}
 	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.Stage == ClientStateHandedOff {
+		postHandoffAnalysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
+		if shouldAcknowledgePostHandoffBrief(text, language, conversation, postHandoffAnalysis) {
+			s.info("post-handoff brief answer acknowledged",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("state", conversation.Stage),
+				zap.String("lead_status", conversation.LeadStatus),
+			)
+			return s.completeBriefAndHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
+		}
 		s.info("post-handoff incoming message saved without automation reply",
 			automationSilenceFields(chatID, conversation, "intentional_post_handoff_silence")...,
 		)
@@ -248,7 +257,13 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		if level == 0 {
 			level = selectedLevelFromConversation(conversation)
 		}
-		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+		if analysis.Intent == IntentBriefAnswer {
+			return s.completeBriefAndHandoff(ctx, chatID, language, level)
+		}
+		if analysis.Intent == IntentHumanRequest {
+			return s.sendHumanHandoff(ctx, chatID, language, level)
+		}
+		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
 	if wantsManagerFlow(conversation, analysis) {
 		if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
@@ -333,13 +348,13 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		return s.sendHumanHandoff(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentPackageSelection && level > 0 {
-		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentReadyToOrder || containsReadySignal(text) {
 		if level == 0 {
 			level = selectedLevelFromConversation(conversation)
 		}
-		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentPortfolioRequest || hasAny(normalized, []string{"портфолио", "видео", "пример", "примеры", "мысал", "көрсет", "portfolio", "example"}) {
 		if conversation.SentPortfolio || conversation.Lead.PortfolioSent {
@@ -363,7 +378,7 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStatePackagesPresented, 0)
 	}
 	if analysis.Intent == IntentAgreement {
-		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
+		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, selectedLevelFromConversation(conversation))
 	}
 	if isLocalOfftopic(normalized) {
 		return s.sendAndRemember(ctx, chatID, OfftopicText(language), ClientStatePackagesPresented, 0)
@@ -379,7 +394,7 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 	}
 
 	if isPositiveConfirmation(text) || analysis.Intent == IntentReadyToOrder || analysis.Intent == IntentPackageSelection {
-		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentHumanRequest {
 		return s.sendHumanHandoff(ctx, chatID, language, level)
@@ -397,7 +412,7 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStateAwaitingQuestionnaireConfirm, 0)
 	}
 	if looksLikeBriefDetails(text, analysis) {
-		return s.sendQuestionnaireAndHandoff(ctx, chatID, language, level)
+		return s.completeBriefAndHandoff(ctx, chatID, language, level)
 	}
 	if isSoftNo(text) {
 		return s.stopClient(ctx, chatID, false)
@@ -424,7 +439,7 @@ func (s *Service) sendSelectedPackageVideo(ctx context.Context, chatID string, l
 	return s.sendVideos(ctx, chatID, []string{offer.FileName}, language, allowRepeat)
 }
 
-func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string, language string, level int) error {
+func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID string, language string, level int) error {
 	s.store.Update(chatID, func(conversation *Conversation) {
 		conversation.WantsQuestionnaire = true
 		conversation.Lead.WantsQuestionnaire = true
@@ -451,7 +466,7 @@ func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string
 			return err
 		}
 	}
-	if err := s.sendAndRemember(ctx, chatID, text, ClientStateHandedOff, level); err != nil {
+	if err := s.sendAndRemember(ctx, chatID, text, StageBriefRequested, level); err != nil {
 		return err
 	}
 	s.store.Update(chatID, func(conversation *Conversation) {
@@ -459,6 +474,30 @@ func (s *Service) sendQuestionnaireAndHandoff(ctx context.Context, chatID string
 		conversation.Lead.BriefRequested = true
 	})
 	return nil
+}
+
+func (s *Service) completeBriefAndHandoff(ctx context.Context, chatID string, language string, level int) error {
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.QuestionnaireSent = true
+		conversation.Lead.BriefRequested = true
+		if level > 0 {
+			conversation.SelectedLevel = level
+			conversation.Lead.SelectedPackage = packageKey(level)
+		}
+	})
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if level == 0 {
+		level = selectedLevelFromConversation(conversation)
+	}
+	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
+		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
+	}
+	return s.sendAndRemember(ctx, chatID, BriefCollectedText(language), StageHandoffRequired, level, fieldBrief)
 }
 
 func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language string, level int) error {
@@ -939,28 +978,28 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
 	lines := []string{
-		"New qualified WhatsApp lead",
+		"Новый квалифицированный лид WhatsApp",
 		"",
 	}
 	if name := adminClientName(conversation); name != "" {
-		lines = append(lines, "Name: "+name)
+		lines = append(lines, "Имя: "+name)
 	}
 	lines = append(lines,
-		"Phone: "+formatPhoneForAdmin(conversation.ChatID),
+		"Телефон: "+formatPhoneForAdmin(conversation.ChatID),
 		"ChatID: "+strings.TrimSpace(conversation.ChatID),
 		"",
-		"Niche: "+strings.TrimSpace(lead.Niche),
-		"Goal: "+strings.TrimSpace(lead.Goal),
-		"Deadline: "+strings.TrimSpace(lead.Deadline),
-		"Interested package: "+adminPackageLabel(lead.SelectedPackage),
+		"Ниша: "+strings.TrimSpace(lead.Niche),
+		"Цель: "+strings.TrimSpace(lead.Goal),
+		"Срок: "+strings.TrimSpace(lead.Deadline),
+		"Пакет: "+adminPackageLabel(lead.SelectedPackage),
 		"",
-		"Client intent: "+adminClientIntent(conversation),
-		"Last client message: "+strings.TrimSpace(conversation.LastIncomingText),
+		"Намерение клиента: "+adminClientIntent(conversation),
+		"Последнее сообщение клиента: "+strings.TrimSpace(conversation.LastIncomingText),
 		"",
-		"Conversation summary:",
+		"Резюме диалога:",
 		strings.TrimSpace(conversation.ConversationSummary),
 		"",
-		"Status: qualified, transferred to manager",
+		"Статус: квалифицирован, передан менеджеру",
 	)
 	if link := whatsappLink(conversation.ChatID); link != "" {
 		lines = append(lines, "WhatsApp: "+link)
@@ -977,12 +1016,12 @@ func adminClientName(conversation Conversation) string {
 
 func adminClientIntent(conversation Conversation) string {
 	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire {
-		return "wants to open questionnaire / ready to proceed"
+		return "хочет продолжить / готов к обработке заявки"
 	}
 	if isValidPackageInterest(conversation.Lead.SelectedPackage) {
-		return "selected package / ready to discuss order"
+		return "выбрал пакет / готов обсудить заказ"
 	}
-	return "qualified lead"
+	return "квалифицированный лид"
 }
 
 func adminStatusLabel(status string) string {
@@ -1030,7 +1069,7 @@ func adminPackageLabel(packageKey string) string {
 	case "standard":
 		return "Standard / Стандарт"
 	case packageNeedsManagerRecommendation:
-		return "needs manager recommendation"
+		return "нужна рекомендация менеджера"
 	default:
 		return strings.TrimSpace(packageKey)
 	}
@@ -1548,6 +1587,22 @@ func isBriefAnswerForConversation(text string, analysis CustomerAnalysis, conver
 		return true
 	}
 	return len(strings.Fields(normalized)) >= 3 || analysis.HasBusinessSignal()
+}
+
+func shouldAcknowledgePostHandoffBrief(text string, language string, conversation Conversation, analysis CustomerAnalysis) bool {
+	if conversation.OptOut {
+		return false
+	}
+	if strings.TrimSpace(conversation.LastReplyText) == BriefCollectedText(language) {
+		return false
+	}
+	if !conversation.QuestionnaireSent && !conversation.Lead.BriefRequested {
+		return false
+	}
+	if !managerQualificationForConversation(conversation).Ready {
+		return false
+	}
+	return isBriefAnswerForConversation(text, analysis, conversation)
 }
 
 func isExplicitVideoRequest(text string) bool {

@@ -257,23 +257,23 @@ func buildConversationSummary(conversation Conversation) string {
 	lead := conversation.Lead
 	parts := make([]string, 0, 4)
 	if isValidNiche(lead.Niche) {
-		parts = append(parts, "niche: "+strings.TrimSpace(lead.Niche))
+		parts = append(parts, "ниша: "+strings.TrimSpace(lead.Niche))
 	}
 	if isValidGoal(lead.Goal) {
-		parts = append(parts, "goal: "+strings.TrimSpace(lead.Goal))
+		parts = append(parts, "цель: "+strings.TrimSpace(lead.Goal))
 	}
 	if isValidDeadline(lead.Deadline) {
-		parts = append(parts, "deadline: "+strings.TrimSpace(lead.Deadline))
+		parts = append(parts, "срок: "+strings.TrimSpace(lead.Deadline))
 	}
 	if isValidPackageInterest(lead.SelectedPackage) {
-		parts = append(parts, "package: "+adminPackageLabel(lead.SelectedPackage))
+		parts = append(parts, "пакет: "+adminPackageLabel(lead.SelectedPackage))
 	}
 	if len(parts) == 0 {
 		return strings.TrimSpace(conversation.LastIncomingText)
 	}
-	summary := "Client details collected: " + strings.Join(parts, "; ") + "."
+	summary := "Собраны данные клиента: " + strings.Join(parts, "; ") + "."
 	if conversation.WantsQuestionnaire || lead.WantsQuestionnaire {
-		summary += " Client wants to proceed/open the questionnaire."
+		summary += " Клиент хочет продолжить / открыть анкету."
 	}
 	return summary
 }

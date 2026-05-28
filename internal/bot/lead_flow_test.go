@@ -145,14 +145,27 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 		t.Fatalf("unexpected selected video caption: %#v", sender.captions)
 	}
 	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
+		t.Fatalf("package selection should wait for brief: stage=%q stopped=%v handed=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed)
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
+		t.Fatalf("admin was notified before brief answer: %d messages=%#v", got, sender.messages)
+	}
+
+	sendText(t, service, chatID, "1) рекламируем мебель 2) хотят красивый интерьер 3) скидка на заказ")
+
+	conversation = snapshotConversation(t, store, chatID)
 	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || conversation.TransferredAt.IsZero() {
-		t.Fatalf("handoff state not set after package selection: stage=%q stopped=%v handed=%v transferred=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.TransferredAt)
+		t.Fatalf("handoff state not set after brief answer: stage=%q stopped=%v handed=%v transferred=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.TransferredAt)
+	}
+	if got := countMessagesContaining(sender.messages, BriefCollectedText("ru")); got != 1 {
+		t.Fatalf("brief acknowledgement count = %d, messages=%#v", got, sender.messages)
 	}
 	adminMessage := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(adminMessage, "New qualified WhatsApp lead") ||
-		!strings.Contains(adminMessage, "Interested package: Basic / Базовый") ||
-		strings.Contains(adminMessage, "\nNiche: -") ||
-		strings.Contains(adminMessage, "\nGoal: -") {
+	if !strings.Contains(adminMessage, "Новый квалифицированный лид WhatsApp") ||
+		!strings.Contains(adminMessage, "Пакет: Basic / Базовый") ||
+		strings.Contains(adminMessage, "\nНиша: -") ||
+		strings.Contains(adminMessage, "\nЦель: -") {
 		t.Fatalf("unexpected admin summary:\n%s", adminMessage)
 	}
 }
@@ -299,6 +312,39 @@ func TestInvalidPersistedHandoffIsReopenedForQualification(t *testing.T) {
 	}
 }
 
+func TestPrematurePersistedHandoffBriefAnswerGetsAcknowledgement(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "77011114444@c.us"
+
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = ClientStateHandedOff
+		conversation.HandedOffToOwner = true
+		conversation.AutomationClosed = true
+		conversation.Stopped = true
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "спорт"
+		conversation.Lead.Goal = "рост продаж"
+		conversation.Lead.Deadline = "в течение месяца"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.LastReplyText = BriefTextForPackage("ru", 3)
+	})
+
+	sendText(t, service, chatID, "1) оригинальные шиповки 2) сомневаются почему дешево 3) разные модели в наличии")
+
+	if len(sender.messages) != 1 || sender.messages[0] != BriefCollectedText("ru") {
+		t.Fatalf("post-handoff brief acknowledgement = %#v, want one thank-you", sender.messages)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {
+		t.Fatalf("valid handoff should remain closed after acknowledgement: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+}
+
 func TestOneLetterNicheIsRejected(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -343,32 +389,42 @@ func TestQualifiedLeadNotifiesAdminOnceAndClosesAutomation(t *testing.T) {
 	}
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || !conversation.AutomationClosed || conversation.TransferredAt.IsZero() {
-		t.Fatalf("qualified lead was not closed: stage=%q stopped=%v handed=%v closed=%v transferred=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.TransferredAt)
+	if conversation.Stage != StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
+		t.Fatalf("qualified package selection should wait for brief: stage=%q stopped=%v handed=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed)
 	}
 	if conversation.Lead.Niche != "салон красоты" || conversation.Lead.Goal != "привлечь клиентов" || conversation.Lead.Deadline != "в течение месяца" || conversation.Lead.SelectedPackage != "standard" {
 		t.Fatalf("lead fields = %#v", conversation.Lead)
 	}
-	if got := countMessagesContaining(sender.messages, "New qualified WhatsApp lead"); got != 1 {
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
+		t.Fatalf("admin notifications before brief = %d, want 0: %#v", got, sender.messages)
+	}
+
+	sendText(t, service, chatID, "1) рекламируем абонементы 2) хотят форму к лету 3) пробное занятие")
+
+	conversation = snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateHandedOff || !conversation.Stopped || !conversation.HandedOffToOwner || !conversation.AutomationClosed || conversation.TransferredAt.IsZero() {
+		t.Fatalf("qualified lead was not closed after brief: stage=%q stopped=%v handed=%v closed=%v transferred=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.TransferredAt)
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
 		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
 	}
 	adminMessage := sender.messages[len(sender.messages)-1]
 	for _, want := range []string{
-		"Name: Yerek",
-		"Phone: +7 701 333 00 00",
+		"Имя: Yerek",
+		"Телефон: +7 701 333 00 00",
 		"ChatID: " + chatID,
-		"Niche: салон красоты",
-		"Goal: привлечь клиентов",
-		"Deadline: в течение месяца",
-		"Interested package: Standard / Стандарт",
-		"Client intent: wants to open questionnaire / ready to proceed",
-		"Status: qualified, transferred to manager",
+		"Ниша: салон красоты",
+		"Цель: привлечь клиентов",
+		"Срок: в течение месяца",
+		"Пакет: Standard / Стандарт",
+		"Намерение клиента: хочет продолжить / готов к обработке заявки",
+		"Статус: квалифицирован, передан менеджеру",
 	} {
 		if !strings.Contains(adminMessage, want) {
 			t.Fatalf("admin message missing %q:\n%s", want, adminMessage)
 		}
 	}
-	if strings.Contains(adminMessage, "-") && (strings.Contains(adminMessage, "Niche: -") || strings.Contains(adminMessage, "Goal: -") || strings.Contains(adminMessage, "Interested package: -")) {
+	if strings.Contains(adminMessage, "-") && (strings.Contains(adminMessage, "Ниша: -") || strings.Contains(adminMessage, "Цель: -") || strings.Contains(adminMessage, "Пакет: -")) {
 		t.Fatalf("admin message contains placeholder:\n%s", adminMessage)
 	}
 
@@ -403,8 +459,11 @@ func TestDuplicateIncomingMessageIsProcessedOnce(t *testing.T) {
 		t.Fatalf("duplicate HandleIncomingMessage() error = %v", err)
 	}
 
-	if got := countMessagesContaining(sender.messages, "New qualified WhatsApp lead"); got != 1 {
-		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
+		t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
+		t.Fatalf("admin notifications before brief = %d, want 0: %#v", got, sender.messages)
 	}
 }
 

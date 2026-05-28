@@ -171,11 +171,11 @@ func BriefReminderText(language string) string {
 func BriefCollectedText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Қабылдадым, рақмет. Деректерді Stone production менеджеріне беремін — әрі қарай детальдарды нақтылап, роликті дайындаймыз."
+		return "Рақмет, брифті алдық. Stone production менеджеріне өңдеуге беремін — ол тапсырманы қарап, келесі қадамды осы чатта жазады."
 	case "en":
-		return "Received, thank you. I am passing the details to the Stone production manager — next we will clarify details and prepare the video."
+		return "Thank you, we received the brief. I am sending it to the Stone production manager for processing, and they will reply here with the next step."
 	default:
-		return "Принял, спасибо. Передаю данные менеджеру Stone production — дальше уточним детали и подготовим ролик."
+		return "Спасибо, бриф получили. Передаю менеджеру Stone production в обработку — он посмотрит задачу и ответит здесь по следующему шагу."
 	}
 }
 

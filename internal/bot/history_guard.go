@@ -120,6 +120,9 @@ func normalizeHistoryClassification(classification string) string {
 }
 
 func (s *Service) maybeApplyHistoryGuard(ctx context.Context, msg IncomingMessage, text string, language string, conversation Conversation) (bool, error) {
+	if !s.historyGuard.options.Enabled || s.historyGuard.source == nil {
+		return false, nil
+	}
 	if shouldSilenceForStoredHistory(conversation) {
 		if shouldReengageStoredLegacyConversation(conversation, text) {
 			decision := HistoryGuardDecision{
@@ -206,10 +209,6 @@ func shouldReengageStoredLegacyConversation(conversation Conversation, text stri
 }
 
 func (s *Service) shouldRunHistoryGuard(msg IncomingMessage, conversation Conversation) bool {
-	options := s.historyGuard.options
-	if !options.Enabled || s.historyGuard.source == nil {
-		return false
-	}
 	if msg.LocalChatKnown || !conversation.HistoryCheckedAt.IsZero() {
 		return false
 	}

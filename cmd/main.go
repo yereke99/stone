@@ -93,16 +93,6 @@ func main() {
 		zapLogger,
 		cfg.AdminChatIDs...,
 	)
-	botService.SetHistoryGuard(greenClient, bot.HistoryGuardOptions{
-		Enabled:              cfg.HistoryGuard.Enabled,
-		LookbackCount:        cfg.HistoryGuard.LookbackCount,
-		Timeout:              cfg.HistoryGuard.Timeout,
-		FailClosed:           cfg.HistoryGuard.FailClosed,
-		AIEnabled:            cfg.HistoryGuard.AIEnabled,
-		AIMessageLimit:       cfg.HistoryGuard.AIMessageLimit,
-		AIMaxCharsPerMessage: cfg.HistoryGuard.AIMaxCharsPerMessage,
-		AIMaxTotalChars:      cfg.HistoryGuard.AIMaxTotalChars,
-	})
 	botService.SetDelayedPackageOptions(bot.DelayedPackageOptions{
 		Enabled: cfg.NewLeadAutoPackages.Enabled,
 		After:   cfg.NewLeadAutoPackages.After,

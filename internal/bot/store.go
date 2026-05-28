@@ -319,6 +319,12 @@ func (s *ConversationStore) MarkAdminNotified(ctx context.Context, chatID string
 
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
+	if qualification := managerQualificationForConversation(*conversation); !qualification.Ready {
+		conversation.MissingFields = qualification.Missing
+		conversation.UpdatedAt = now
+		conversation.LastUpdated = now
+		return s.persistConversationLocked(ctx, conversation)
+	}
 	conversation.AdminNotifiedAt = now
 	conversation.HandedOffToOwner = true
 	conversation.TransferredAt = now
@@ -367,6 +373,12 @@ func (s *ConversationStore) MarkAdminOperatorNotified(ctx context.Context, chatI
 
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
+	if qualification := managerQualificationForConversation(*conversation); !qualification.Ready {
+		conversation.MissingFields = qualification.Missing
+		conversation.UpdatedAt = now
+		conversation.LastUpdated = now
+		return s.persistConversationLocked(ctx, conversation)
+	}
 	conversation.AdminOperatorNotifiedAt = now
 	conversation.HandedOffToOwner = true
 	conversation.TransferredAt = now
@@ -434,16 +446,35 @@ func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stag
 
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
-	if stage != "" {
-		conversation.Stage = stage
+	requestedStage := strings.TrimSpace(stage)
+	if requestedStage != "" {
+		conversation.Stage = requestedStage
 	}
-	if stageSelectsPackage(stage) && selectedLevel > 0 && selectedLevel <= 3 {
+	if stageSelectsPackage(requestedStage) && selectedLevel > 0 && selectedLevel <= 3 {
 		conversation.SelectedLevel = selectedLevel
 		conversation.Lead.SelectedPackage = packageKey(selectedLevel)
 	}
-	conversation.Lead = updateLeadFlagsForStage(conversation.Lead, stage)
-	updateConversationFlagsForStage(conversation, stage)
-	switch stage {
+	if isHandoffClosingStage(requestedStage) {
+		if qualification := managerQualificationForConversation(*conversation); !qualification.Ready {
+			conversation.MissingFields = qualification.Missing
+			conversation.HandedOffToOwner = false
+			conversation.AutomationClosed = false
+			conversation.Stopped = false
+			conversation.Lead.BriefCompleted = false
+			conversation.Lead.ContactBriefReady = false
+			if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
+				conversation.LeadStatus = LeadStatusHot
+			}
+			if normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired {
+				conversation.Lead.LeadStatus = LeadStatusHot
+			}
+			requestedStage = activeStageForIncompleteHandoff(*conversation)
+			conversation.Stage = requestedStage
+		}
+	}
+	conversation.Lead = updateLeadFlagsForStage(conversation.Lead, requestedStage)
+	updateConversationFlagsForStage(conversation, requestedStage)
+	switch requestedStage {
 	case StagePortfolioSent, StagePortfolio:
 		conversation.Lead.PortfolioSent = true
 	case StageOffer, StagePackageSuggested, StageAIExperienceChecked:
@@ -757,10 +788,7 @@ func completedFieldsForLead(lead LeadState) map[string]bool {
 	if isValidPackageInterest(lead.SelectedPackage) {
 		completed[fieldPackageInterest] = true
 	}
-	if lead.BriefRequested {
-		completed[fieldBrief] = true
-	}
-	if lead.BriefCompleted || lead.ContactBriefReady {
+	if (lead.BriefCompleted || lead.ContactBriefReady) && leadHasRequiredManagerFields(lead) {
 		completed[fieldBrief] = true
 	}
 	return completed
@@ -832,18 +860,27 @@ func refreshLeadStatus(lead LeadState, stage string) LeadState {
 		lead.LeadStatus = LeadStatusClosed
 		return lead
 	}
+	managerReady := leadHasRequiredManagerFields(lead)
+	if !managerReady {
+		lead.BriefCompleted = false
+		lead.ContactBriefReady = false
+		if currentStatus == LeadStatusHandoffRequired {
+			currentStatus = ""
+		}
+	}
+	handoffRequested := lead.BriefCompleted || lead.ContactBriefReady || stage == StageBriefCollected || stage == StageHandoffRequired
 	switch {
-	case lead.BriefCompleted || lead.ContactBriefReady || stage == StageBriefCollected || stage == StageHandoffRequired:
+	case managerReady && handoffRequested:
 		lead.BriefCompleted = true
 		lead.ContactBriefReady = true
 		lead.LeadStatus = LeadStatusHandoffRequired
-	case strings.TrimSpace(lead.SelectedPackage) != "" || stage == StageBriefRequested || stage == StagePackageSelected:
+	case strings.TrimSpace(lead.SelectedPackage) != "" || lead.WantsQuestionnaire || stage == StageBriefRequested || stage == StagePackageSelected:
 		lead.LeadStatus = LeadStatusHot
 	case lead.PortfolioSent || lead.OfferSent || lead.HasCoreFields() || lead.PreviousAIAds != nil ||
 		stage == StagePackageSuggested || stage == StageOffer || stage == StagePortfolio || stage == StagePortfolioSent:
 		lead.LeadStatus = LeadStatusWarm
 	default:
-		if currentStatus != "" {
+		if currentStatus != "" && currentStatus != LeadStatusHandoffRequired {
 			lead.LeadStatus = currentStatus
 		} else {
 			lead.LeadStatus = LeadStatusNew
@@ -859,6 +896,25 @@ func stageSelectsPackage(stage string) bool {
 	default:
 		return false
 	}
+}
+
+func isHandoffClosingStage(stage string) bool {
+	switch strings.TrimSpace(stage) {
+	case ClientStateHandedOff, StageHandoffRequired, StageBriefCollected:
+		return true
+	default:
+		return false
+	}
+}
+
+func activeStageForIncompleteHandoff(conversation Conversation) string {
+	if conversation.QuestionnaireOfferSent {
+		return ClientStateAwaitingQuestionnaireConfirm
+	}
+	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+		return ClientStatePackagesPresented
+	}
+	return ClientStateAwaitingQualification
 }
 
 func updateConversationFlagsForStage(conversation *Conversation, stage string) {

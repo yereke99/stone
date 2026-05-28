@@ -832,6 +832,20 @@ Legacy Meta webhook
    WHERE missing_fields_json <> '[]'
    ORDER BY updated_at DESC;
 
+Безопасный reset одного тестового чата
+--------------------------------------
+
+Если тестовый chatID уже попал в handed_off/automation_closed и нужно проверить сценарий с нуля, не сбрасывайте всю БД. Остановите бота и удалите только один тестовый чат:
+
+   sqlite3 ./data/stone.sqlite3
+
+   BEGIN;
+   DELETE FROM whatsapp_messages WHERE chat_id = '77000000000@c.us';
+   DELETE FROM whatsapp_clients WHERE chat_id = '77000000000@c.us';
+   COMMIT;
+
+После этого запустите бота и отправьте новое свежее сообщение с этого номера. Старые queued-сообщения всё равно должны отфильтровываться по BOT_MAX_MESSAGE_AGE_SECONDS/startup grace.
+
 Типичный путь одного клиента
 ----------------------------
 
@@ -956,4 +970,3 @@ conversation_json:
 
 processed_at:
   если заполнен у incoming сообщения, значит сообщение успешно обработано и повторно отвечать не нужно.
-

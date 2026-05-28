@@ -21,6 +21,13 @@ func managerQualificationForConversation(conversation Conversation) managerQuali
 	}
 }
 
+func leadHasRequiredManagerFields(lead LeadState) bool {
+	return isValidNiche(lead.Niche) &&
+		isValidGoal(lead.Goal) &&
+		isValidDeadline(lead.Deadline) &&
+		isValidPackageInterest(lead.SelectedPackage)
+}
+
 func requiredLeadMissingFields(conversation Conversation) []string {
 	lead := conversation.Lead
 	missing := make([]string, 0, 4)
@@ -53,6 +60,13 @@ func sanitizeLeadForQualification(lead LeadState) LeadState {
 		lead.SelectedPackage = ""
 	} else {
 		lead.SelectedPackage = normalizePackageInterest(lead.SelectedPackage)
+	}
+	if !leadHasRequiredManagerFields(lead) {
+		lead.BriefCompleted = false
+		lead.ContactBriefReady = false
+		if normalizeLeadStatus(lead.LeadStatus) == LeadStatusHandoffRequired {
+			lead.LeadStatus = ""
+		}
 	}
 	return lead
 }
@@ -213,6 +227,11 @@ func refreshConversationDerivedState(conversation *Conversation) {
 	if conversation.Lead.WantsQuestionnaire {
 		conversation.WantsQuestionnaire = true
 	}
+	if !leadHasRequiredManagerFields(conversation.Lead) && normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
+		conversation.LeadStatus = LeadStatusHot
+	}
+	conversation.BriefAsked = conversation.Lead.BriefRequested
+	conversation.BriefCollected = conversation.Lead.BriefCompleted
 	conversation.MissingFields = requiredLeadMissingFields(*conversation)
 	conversation.ConversationSummary = buildConversationSummary(*conversation)
 	if conversation.HandedOffToOwner && conversation.TransferredAt.IsZero() && !conversation.AdminNotifiedAt.IsZero() {

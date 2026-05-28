@@ -179,7 +179,7 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	}
 	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.Stage == ClientStateHandedOff {
 		s.info("post-handoff incoming message saved without automation reply",
-			zap.String("chat_hash", chatFingerprint(chatID)),
+			automationSilenceFields(chatID, conversation, "intentional_post_handoff_silence")...,
 		)
 		return nil
 	}
@@ -219,10 +219,9 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		return s.stopClient(ctx, chatID, true)
 	}
 	if conversation.OptOut || conversation.Stopped || state == ClientStateOptOut || state == ClientStateStopped || state == ClientStateHandedOff {
-		s.info("state machine automatic reply stopped",
-			zap.String("chat_hash", chatFingerprint(chatID)),
-			zap.String("state", state),
-		)
+		fields := automationSilenceFields(chatID, conversation, "state_machine_stopped")
+		fields = append(fields, zap.String("computed_state", state))
+		s.info("state machine automatic reply stopped", fields...)
 		return nil
 	}
 	if shouldSuppressRapidFollowup(conversation, analysis) {
@@ -241,6 +240,12 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	}
 	if wantsManagerFlow(conversation, analysis) {
 		if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
+			s.info("handoff postponed because lead is incomplete",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("state", conversation.Stage),
+				zap.String("lead_status", conversation.LeadStatus),
+				zap.Strings("missing_fields", qualification.Missing),
+			)
 			return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
 		}
 	}
@@ -1368,6 +1373,19 @@ func (s *Service) info(message string, fields ...zap.Field) {
 		return
 	}
 	s.logger.Info(message, fields...)
+}
+
+func automationSilenceFields(chatID string, conversation Conversation, reason string) []zap.Field {
+	return []zap.Field{
+		zap.String("chat_hash", chatFingerprint(chatID)),
+		zap.String("state", conversation.Stage),
+		zap.String("lead_status", conversation.LeadStatus),
+		zap.Bool("handed_off_to_owner", conversation.HandedOffToOwner),
+		zap.Bool("automation_closed", conversation.AutomationClosed),
+		zap.Bool("stopped", conversation.Stopped),
+		zap.Bool("opt_out", conversation.OptOut),
+		zap.String("reason", reason),
+	}
 }
 
 func (s *Service) lockChat(ctx context.Context, chatID string) (func(), error) {

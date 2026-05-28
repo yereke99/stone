@@ -513,7 +513,7 @@ func clientStateForConversation(conversation *Conversation) string {
 		ClientStateOptOut:
 		return state
 	}
-	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
+	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() {
 		return ClientStateHandedOff
 	}
 	if conversation.Stopped {

@@ -195,6 +195,68 @@ func TestDavaiteWithMissingFieldsAsksOnlyMissingFields(t *testing.T) {
 	}
 }
 
+func TestBriefAnswerWithIncompleteLeadDoesNotCloseAutomation(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77011110000@c.us"
+
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "салон красоты"
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	sendText(t, service, chatID, "аудитория женщины, оффер скидка, сайт example.kz")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage == ClientStateHandedOff || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+		t.Fatalf("incomplete brief answer closed automation: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired || normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired {
+		t.Fatalf("incomplete brief answer marked handoff required: conversation=%q lead=%q", conversation.LeadStatus, conversation.Lead.LeadStatus)
+	}
+	if conversation.CompletedFields[fieldBrief] {
+		t.Fatalf("brief was marked completed before lead qualification: completed=%#v", conversation.CompletedFields)
+	}
+	if !sameFields(conversation.MissingFields, []string{fieldGoal, fieldPackageInterest}) {
+		t.Fatalf("missing fields = %#v, want goal/package_interest", conversation.MissingFields)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	for _, want := range []string{"цель", "пакет"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("missing-field reply %q does not mention %q", last, want)
+		}
+	}
+}
+
+func TestIncompleteLeadCannotBeForcedIntoHandoffState(t *testing.T) {
+	store := NewConversationStore()
+	chatID := "77011112222@c.us"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Lead.Niche = "салон красоты"
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	if err := store.UpdateState(context.Background(), chatID, ClientStateHandedOff, 0); err != nil {
+		t.Fatalf("UpdateState() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage == ClientStateHandedOff || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+		t.Fatalf("incomplete lead was forced into handoff: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired || normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired {
+		t.Fatalf("incomplete lead marked handoff required: conversation=%q lead=%q", conversation.LeadStatus, conversation.Lead.LeadStatus)
+	}
+	if !sameFields(conversation.MissingFields, []string{fieldGoal, fieldPackageInterest}) {
+		t.Fatalf("missing fields = %#v, want goal/package_interest", conversation.MissingFields)
+	}
+}
+
 func TestOneLetterNicheIsRejected(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -269,9 +331,14 @@ func TestQualifiedLeadNotifiesAdminOnceAndClosesAutomation(t *testing.T) {
 	}
 
 	before := len(sender.messages)
-	sendText(t, service, chatID, "а сколько будет стоить?")
+	postHandoffText := "а сколько будет стоить?"
+	sendText(t, service, chatID, postHandoffText)
 	if len(sender.messages) != before {
 		t.Fatalf("bot replied after handoff: %#v", sender.messages[before:])
+	}
+	afterHandoff := snapshotConversation(t, store, chatID)
+	if afterHandoff.LastIncomingText != postHandoffText {
+		t.Fatalf("post-handoff incoming was not saved: last=%q", afterHandoff.LastIncomingText)
 	}
 }
 

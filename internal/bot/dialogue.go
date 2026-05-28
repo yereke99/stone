@@ -439,6 +439,18 @@ func continueBriefForPackageText(language string, level int) string {
 	}
 }
 
+func packageSelectedNextStepText(language string, level int) string {
+	label := formatLabel(language, level)
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return label + " форматты белгіледім. Егер осы форматпен жалғастырамыз десеңіз, «анкета» деп жазыңыз."
+	case "en":
+		return "I marked the " + label + " format. If you want to continue with it, write “brief”."
+	default:
+		return "Отлично, " + label + " формат выбрали. Если продолжаем с ним, напишите «анкета»."
+	}
+}
+
 func continueAfterOfferText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":

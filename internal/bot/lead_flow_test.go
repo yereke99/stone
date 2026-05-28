@@ -195,11 +195,14 @@ func TestReplyToPackageVideoSelectsPackageByQuotedID(t *testing.T) {
 			if !conversation.CompletedFields[fieldPackageInterest] {
 				t.Fatalf("package field was not completed: %#v", conversation.CompletedFields)
 			}
-			if conversation.Stage != StageBriefRequested || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+			if conversation.Stage != ClientStatePackagesPresented || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
 				t.Fatalf("unexpected state after reply selection: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
 			}
-			if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
-				t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+			if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+				t.Fatalf("brief was opened immediately after package selection: %d messages=%#v", got, sender.messages)
+			}
+			if got := countMessagesContaining(sender.messages, "формат выбрали"); got != 1 {
+				t.Fatalf("package selection acknowledgements = %d, want 1: %#v", got, sender.messages)
 			}
 			if len(sender.files) != 0 {
 				t.Fatalf("selected package video was resent: %#v", sender.files)
@@ -230,8 +233,11 @@ func TestReplyToPackageVideoSelectsPackageFromQuotedCaption(t *testing.T) {
 	if conversation.Lead.SelectedPackage != "standard" {
 		t.Fatalf("selected package = %q, want standard", conversation.Lead.SelectedPackage)
 	}
-	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
-		t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+		t.Fatalf("brief was opened immediately after package selection: %d messages=%#v", got, sender.messages)
+	}
+	if got := countMessagesContaining(sender.messages, "формат выбрали"); got != 1 {
+		t.Fatalf("package selection acknowledgements = %d, want 1: %#v", got, sender.messages)
 	}
 }
 
@@ -359,8 +365,11 @@ func TestDuplicateIncomingPackageReplyIsProcessedOnce(t *testing.T) {
 		t.Fatalf("duplicate HandleIncomingMessage() error = %v", err)
 	}
 
-	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
-		t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+		t.Fatalf("brief was opened immediately after duplicate package reply: %d messages=%#v", got, sender.messages)
+	}
+	if got := countMessagesContaining(sender.messages, "формат выбрали"); got != 1 {
+		t.Fatalf("package selection acknowledgements = %d, want 1: %#v", got, sender.messages)
 	}
 }
 
@@ -396,7 +405,7 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 	chatID := "77015550000@c.us"
 
 	sendText(t, service, chatID, "Здравствуйте")
-	sendText(t, service, chatID, "мебель, цель продажи, срок через неделю")
+	sendText(t, service, chatID, "ниша мебель, цель получать заявки, срок через неделю")
 	if len(sender.files) != 0 {
 		t.Fatalf("portfolio links should not upload videos yet: %#v", sender.files)
 	}
@@ -410,13 +419,17 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 		t.Fatalf("unexpected selected video caption: %#v", sender.captions)
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
-		t.Fatalf("package selection should wait for brief: stage=%q stopped=%v handed=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed)
+	if conversation.Stage == StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
+		t.Fatalf("package selection opened brief too early: stage=%q stopped=%v handed=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed)
 	}
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
 		t.Fatalf("admin was notified before brief answer: %d messages=%#v", got, sender.messages)
 	}
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+		t.Fatalf("brief was sent immediately after selected video: %d messages=%#v", got, sender.messages)
+	}
 
+	sendText(t, service, chatID, "анкета")
 	sendText(t, service, chatID, "1) рекламируем мебель 2) хотят красивый интерьер 3) скидка на заказ")
 
 	conversation = snapshotConversation(t, store, chatID)
@@ -508,6 +521,39 @@ func TestBriefAnswerWithIncompleteLeadDoesNotCloseAutomation(t *testing.T) {
 		if !strings.Contains(last, want) {
 			t.Fatalf("missing-field reply %q does not mention %q", last, want)
 		}
+	}
+}
+
+func TestWeakBriefAnswerDoesNotCloseQualifiedLead(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "77011115555@c.us"
+
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "бизнесмены и блогеры"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+	})
+
+	sendText(t, service, chatID, "цель у меня чтобы мои клиенты поняли почему именно я?")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage == ClientStateHandedOff || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+		t.Fatalf("weak brief answer closed automation: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+	if got := countMessagesContaining(sender.messages, BriefCollectedText("ru")); got != 0 {
+		t.Fatalf("weak brief was accepted as complete: %d messages=%#v", got, sender.messages)
+	}
+	if len(sender.messages) == 0 || !strings.Contains(sender.messages[len(sender.messages)-1], "Короткий бриф") {
+		t.Fatalf("weak brief did not get a brief reminder: %#v", sender.messages)
 	}
 }
 
@@ -654,8 +700,8 @@ func TestQualifiedLeadNotifiesAdminOnceAndClosesAutomation(t *testing.T) {
 	}
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
-		t.Fatalf("qualified package selection should wait for brief: stage=%q stopped=%v handed=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed)
+	if conversation.Stage == StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
+		t.Fatalf("qualified package selection opened brief too early: stage=%q stopped=%v handed=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner, conversation.AutomationClosed)
 	}
 	if conversation.Lead.Niche != "салон красоты" || conversation.Lead.Goal != "привлечь клиентов" || conversation.Lead.Deadline != "в течение месяца" || conversation.Lead.SelectedPackage != "standard" {
 		t.Fatalf("lead fields = %#v", conversation.Lead)
@@ -663,7 +709,11 @@ func TestQualifiedLeadNotifiesAdminOnceAndClosesAutomation(t *testing.T) {
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
 		t.Fatalf("admin notifications before brief = %d, want 0: %#v", got, sender.messages)
 	}
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+		t.Fatalf("brief was sent immediately after package selection: %d messages=%#v", got, sender.messages)
+	}
 
+	sendText(t, service, chatID, "анкета")
 	sendText(t, service, chatID, "1) рекламируем абонементы 2) хотят форму к лету 3) пробное занятие")
 
 	conversation = snapshotConversation(t, store, chatID)
@@ -724,8 +774,11 @@ func TestDuplicateIncomingMessageIsProcessedOnce(t *testing.T) {
 		t.Fatalf("duplicate HandleIncomingMessage() error = %v", err)
 	}
 
-	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
-		t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+		t.Fatalf("brief was sent immediately after duplicate package selection: %d messages=%#v", got, sender.messages)
+	}
+	if len(sender.files) != 1 {
+		t.Fatalf("selected package videos = %d, want 1: %#v", len(sender.files), sender.files)
 	}
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
 		t.Fatalf("admin notifications before brief = %d, want 0: %#v", got, sender.messages)

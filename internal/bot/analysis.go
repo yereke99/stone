@@ -113,7 +113,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	if packageInterest := extractPackageInterest(text, current, analysis.SelectedLevel); packageInterest != "" {
 		analysis.PackageInterest = stringPointer(packageInterest)
 	}
-	analysis.WantsQuestionnaire = containsQuestionnaireIntent(normalized) || containsReadySignal(text)
+	questionnaireIntent := containsQuestionnaireIntent(normalized)
+	readySignal := containsReadySignal(text)
+	analysis.WantsQuestionnaire = questionnaireIntent || readySignal
 
 	switch {
 	case isMuteRequest(normalized):
@@ -134,7 +136,7 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentPriceQuestion
 	case analysis.SelectedLevel > 0 && looksLikePackageSelection(normalized):
 		analysis.Intent = IntentPackageSelection
-	case containsReadySignal(text) || analysis.WantsQuestionnaire:
+	case readySignal || questionnaireIntent:
 		analysis.Intent = IntentReadyToOrder
 	case containsObjection(text):
 		analysis.Intent = IntentObjection
@@ -150,6 +152,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentAnswer
 	default:
 		analysis.Intent = IntentOther
+	}
+	if analysis.Intent == IntentPackageSelection && !questionnaireIntent {
+		analysis.WantsQuestionnaire = false
 	}
 
 	updated := current

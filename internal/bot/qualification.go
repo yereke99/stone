@@ -195,7 +195,7 @@ func packageUncertainty(normalized string) bool {
 func containsQuestionnaireIntent(normalized string) bool {
 	normalized = normalizeForAnalysis(normalized)
 	return containsAny(normalized, []string{
-		"откройте анкет", "открывайте анкет", "давайте анкет", "заполнить анкет",
+		"анкета", "анкету", "бриф", "откройте анкет", "открывайте анкет", "давайте анкет", "заполнить анкет",
 		"оставить заявку", "хочу заявку", "готов заполнить", "давайте начнем", "давайте начнём",
 		"хочу начать", "open the questionnaire", "start the brief", "ready to proceed",
 	})

@@ -317,6 +317,9 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		}
 		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
+	if (conversation.Stage == StageBriefRequested || conversation.Lead.BriefRequested) && managerQualificationForConversation(conversation).Ready {
+		return s.sendAndRemember(ctx, chatID, BriefReminderText(language), StageBriefRequested, selectedLevelFromConversation(conversation))
+	}
 	if wantsManagerFlow(conversation, analysis) {
 		if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
 			s.info("handoff postponed because lead is incomplete",
@@ -331,8 +334,26 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 
 	switch state {
 	case ClientStateNeutralNew:
+		if analysis.Intent == IntentPackageSelection {
+			level := analysis.SelectedLevel
+			if level == 0 {
+				level = selectedLevelFromConversation(conversation)
+			}
+			if level > 0 {
+				return s.selectPackageWithoutOpeningBrief(ctx, chatID, language, conversation, level)
+			}
+		}
 		return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
 	case ClientStateAwaitingQualification:
+		if analysis.Intent == IntentPackageSelection {
+			level := analysis.SelectedLevel
+			if level == 0 {
+				level = selectedLevelFromConversation(conversation)
+			}
+			if level > 0 {
+				return s.selectPackageWithoutOpeningBrief(ctx, chatID, language, conversation, level)
+			}
+		}
 		if len(conversation.Lead.MissingCoreFields()) > 0 && shouldClarifyWeakQualificationAnswer(analysis) {
 			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
 		}
@@ -393,6 +414,12 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		level = requestedLevelFromText(text)
 	}
 
+	if hasAny(normalized, []string{"анкета", "бриф", "brief"}) {
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
+	}
 	if analysis.Intent == IntentHumanRequest {
 		if level == 0 {
 			level = selectedLevelFromConversation(conversation)
@@ -400,7 +427,7 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		return s.sendHumanHandoff(ctx, chatID, language, level)
 	}
 	if analysis.Intent == IntentPackageSelection && level > 0 {
-		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
+		return s.selectPackageWithoutOpeningBrief(ctx, chatID, language, conversation, level)
 	}
 	if analysis.Intent == IntentReadyToOrder || containsReadySignal(text) {
 		if level == 0 {
@@ -491,6 +518,45 @@ func (s *Service) sendSelectedPackageVideo(ctx context.Context, chatID string, l
 	return s.sendVideos(ctx, chatID, []string{offer.FileName}, language, allowRepeat)
 }
 
+func (s *Service) selectPackageWithoutOpeningBrief(ctx context.Context, chatID string, language string, conversation Conversation, level int) error {
+	offer, ok := OfferByLevel(level)
+	if !ok {
+		return nil
+	}
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.SelectedLevel = level
+		conversation.Lead.SelectedPackage = packageKey(level)
+		conversation.CompletedFields[fieldPackageInterest] = true
+	})
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	shouldSend, err := s.store.ShouldSendVideo(ctx, chatID, offer.FileName, false)
+	if err != nil {
+		return err
+	}
+	if shouldSend {
+		if err := s.sendSelectedPackageVideo(ctx, chatID, language, level, false); err != nil {
+			return err
+		}
+		if err := s.store.UpdateState(ctx, chatID, ClientStatePackagesPresented, level); err != nil {
+			return err
+		}
+		conversation, err = s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return err
+		}
+	}
+	if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
+		return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, level, missing...)
+	}
+	if shouldSend {
+		return nil
+	}
+	return s.sendAndRemember(ctx, chatID, packageSelectedNextStepText(language, level), ClientStatePackagesPresented, level)
+}
+
 func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID string, language string, level int) error {
 	s.store.Update(chatID, func(conversation *Conversation) {
 		conversation.WantsQuestionnaire = true
@@ -514,9 +580,6 @@ func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID str
 	text := BriefText(language)
 	if level > 0 {
 		text = BriefTextForPackage(language, level)
-		if err := s.sendSelectedPackageVideo(ctx, chatID, language, level, false); err != nil {
-			return err
-		}
 	}
 	if err := s.sendAndRemember(ctx, chatID, text, StageBriefRequested, level); err != nil {
 		return err
@@ -1645,7 +1708,26 @@ func isBriefAnswerForConversation(text string, analysis CustomerAnalysis, conver
 	if strings.Contains(normalized, "http") || strings.Contains(normalized, "www") || strings.Contains(normalized, "instagram") || strings.Contains(normalized, "@") {
 		return true
 	}
-	return len(strings.Fields(normalized)) >= 3 || analysis.HasBusinessSignal()
+	if hasNumberedBriefStructure(normalized) {
+		return true
+	}
+	return hasBriefSpecificSignal(normalized) && len(strings.Fields(normalized)) >= 4
+}
+
+func hasNumberedBriefStructure(normalized string) bool {
+	return (strings.Contains(normalized, "1)") || strings.Contains(normalized, "1.") || strings.Contains(normalized, "1 ")) &&
+		(strings.Contains(normalized, "2)") || strings.Contains(normalized, "2.") || strings.Contains(normalized, "2 ")) &&
+		(strings.Contains(normalized, "3)") || strings.Contains(normalized, "3.") || strings.Contains(normalized, "3 "))
+}
+
+func hasBriefSpecificSignal(normalized string) bool {
+	hasProduct := containsAny(normalized, []string{"рекламируем", "рекламировать", "продвигаем", "продвигать", "что реклам", "товар", "услуг", "продукт", "курс", "advertise", "product", "service"})
+	hasValue := containsAny(normalized, []string{"ценность", "преимуществ", "почему", "отлич", "уникаль", "value", "benefit"})
+	hasAudience := containsAny(normalized, []string{"аудитор", "клиент", "покупател", "бизнесмен", "блогер", "инфлю", "target audience", "audience"})
+	hasPain := containsAny(normalized, []string{"боль", "желан", "сомнева", "хотят", "нужно", "проблем", "pain", "desire"})
+	hasOffer := containsAny(normalized, []string{"оффер", "скидк", "акци", "бонус", "подар", "рассроч", "заявк", "offer", "discount", "bonus"})
+	return (hasProduct && (hasValue || hasAudience || hasPain || hasOffer)) ||
+		(hasOffer && (hasValue || hasAudience || hasPain))
 }
 
 func shouldAcknowledgePostHandoffBrief(text string, language string, conversation Conversation, analysis CustomerAnalysis) bool {
@@ -1764,8 +1846,6 @@ func shouldTransferToManagerNow(conversation Conversation, analysis CustomerAnal
 	switch analysis.Intent {
 	case IntentReadyToOrder, IntentHumanRequest, IntentBriefAnswer:
 		return true
-	case IntentPackageSelection:
-		return isValidPackageInterest(conversation.Lead.SelectedPackage)
 	default:
 		return false
 	}
@@ -1776,7 +1856,7 @@ func wantsManagerFlow(conversation Conversation, analysis CustomerAnalysis) bool
 		return true
 	}
 	switch analysis.Intent {
-	case IntentReadyToOrder, IntentHumanRequest, IntentBriefAnswer, IntentPackageSelection:
+	case IntentReadyToOrder, IntentHumanRequest, IntentBriefAnswer:
 		return true
 	default:
 		return false

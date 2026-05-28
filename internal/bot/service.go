@@ -366,6 +366,17 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 				return s.selectPackageWithoutOpeningBrief(ctx, chatID, language, conversation, level)
 			}
 		}
+		if hasPackageFlowStarted(conversation) {
+			if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
+				return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, selectedLevelFromConversation(conversation), missing...)
+			}
+			if level := selectedLevelFromConversation(conversation); level > 0 {
+				if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire || analysis.WantsQuestionnaire {
+					return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
+				}
+				return s.sendAndRemember(ctx, chatID, packageSelectedNextStepText(language, level), ClientStatePackagesPresented, level)
+			}
+		}
 		if len(conversation.Lead.MissingCoreFields()) > 0 && shouldClarifyWeakQualificationAnswer(analysis) {
 			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
 		}
@@ -1818,6 +1829,9 @@ func qualificationFollowupText(language string, conversation Conversation) strin
 	if len(missing) == 0 {
 		return packagesPresentedFallbackText(language)
 	}
+	if len(missing) == 1 {
+		return singleMissingQuestion(language, missing[0], conversation.Lead)
+	}
 	switch normalizeLanguageCode(language) {
 	case "kk":
 		return "Түсіндім. Нишаны және роликті қашан іске қосқыңыз келетінін қысқаша жазыңыз."
@@ -1882,11 +1896,20 @@ func wantsManagerFlow(conversation Conversation, analysis CustomerAnalysis) bool
 	}
 }
 
+func hasPackageFlowStarted(conversation Conversation) bool {
+	return conversation.PackagesSent ||
+		conversation.Lead.OfferSent ||
+		conversation.SentPortfolio ||
+		conversation.Lead.PortfolioSent ||
+		selectedLevelFromConversation(conversation) > 0 ||
+		isValidPackageInterest(conversation.Lead.SelectedPackage)
+}
+
 func shouldAskPackageBeforeQuestionnaire(conversation Conversation, analysis CustomerAnalysis, text string) bool {
 	if isValidPackageInterest(conversation.Lead.SelectedPackage) || selectedLevelFromConversation(conversation) > 0 || analysis.SelectedLevel > 0 {
 		return false
 	}
-	if !(conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent) {
+	if !hasPackageFlowStarted(conversation) {
 		return false
 	}
 	switch analysis.Intent {

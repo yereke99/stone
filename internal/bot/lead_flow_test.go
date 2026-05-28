@@ -354,6 +354,101 @@ func TestPendingQuestionnairePackageSelectionDoesNotOpenBriefBeforeQualification
 	}
 }
 
+func TestSelectedPackageContinuesCollectingMissingQualificationFields(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-selected-package-collects-fields"
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "reply-standard-collect-fields",
+		ChatID:          chatID,
+		Text:            ".",
+		QuotedMessageID: "standard-video-id",
+		QuotedType:      "videoMessage",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.LastReplyAt = time.Now().Add(-10 * time.Second)
+	})
+
+	sendText(t, service, chatID, "ниша: бизнесмены и блогеры")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche == "" || conversation.Lead.SelectedPackage != "standard" {
+		t.Fatalf("lead did not keep selected package and niche: %#v", conversation.Lead)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if !strings.Contains(last, "цель") {
+		t.Fatalf("bot did not ask the next missing field after niche: %q", last)
+	}
+	if strings.Contains(last, "нишу") || strings.Contains(last, "пакет") || strings.Contains(last, "анкету откроем") {
+		t.Fatalf("bot asked stale fields after niche: %q", last)
+	}
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.LastReplyAt = time.Now().Add(-10 * time.Second)
+	})
+
+	sendText(t, service, chatID, "цель: чтобы клиенты поняли почему именно я")
+
+	conversation = snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStatePackagesPresented || conversation.QuestionnaireSent {
+		t.Fatalf("unexpected state after qualification completed: stage=%q questionnaire=%v", conversation.Stage, conversation.QuestionnaireSent)
+	}
+	last = sender.messages[len(sender.messages)-1]
+	if !strings.Contains(last, "формат выбрали") {
+		t.Fatalf("bot did not send package next step after all fields: %q", last)
+	}
+	if strings.Contains(last, "Короткий бриф") {
+		t.Fatalf("brief opened without explicit questionnaire request: %q", last)
+	}
+}
+
+func TestPendingQuestionnaireOpensBriefAfterQualificationCompleted(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-pending-questionnaire-complete"
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "reply-standard-before-brief",
+		ChatID:          chatID,
+		Text:            ".",
+		QuotedMessageID: "standard-video-id",
+		QuotedType:      "videoMessage",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.LastReplyAt = time.Now().Add(-10 * time.Second)
+	})
+	sendText(t, service, chatID, "ниша: бизнесмены и блогеры")
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.LastReplyAt = time.Now().Add(-10 * time.Second)
+	})
+	sendText(t, service, chatID, "цель: чтобы клиенты поняли почему именно я")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != StageBriefRequested || !conversation.QuestionnaireSent || !conversation.Lead.BriefRequested {
+		t.Fatalf("brief was not opened after pending questionnaire became qualified: stage=%q questionnaire=%v brief=%v", conversation.Stage, conversation.QuestionnaireSent, conversation.Lead.BriefRequested)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if !strings.Contains(last, "Короткий бриф") {
+		t.Fatalf("brief text was not sent: %q", last)
+	}
+}
+
 func TestMissingReplyContextFallsBackToNormalTextAnalysis(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -750,7 +845,7 @@ func TestOneLetterNicheIsRejected(t *testing.T) {
 		t.Fatalf("invalid niche caused handoff: stage=%q stopped=%v handed=%v", conversation.Stage, conversation.Stopped, conversation.HandedOffToOwner)
 	}
 	last := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(last, "нишу") {
+	if !strings.Contains(last, "ниш") {
 		t.Fatalf("bot did not clarify invalid niche: %q", last)
 	}
 }

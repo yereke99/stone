@@ -133,18 +133,6 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if err != nil {
 		return err
 	}
-	if reopened, missing, err := s.store.ReopenIncompleteHandoff(ctx, chatID); err != nil {
-		return err
-	} else if reopened {
-		s.info("incomplete handoff conversation reopened for qualification",
-			zap.String("chat_hash", chatFingerprint(chatID)),
-			zap.Strings("missing_fields", missing),
-		)
-		conversation, err = s.store.Snapshot(ctx, chatID)
-		if err != nil {
-			return err
-		}
-	}
 	stateBefore := conversation.Stage
 	leadStatusBefore := conversation.LeadStatus
 	selectedBefore := conversation.SelectedLevel
@@ -210,6 +198,25 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if err := s.store.MarkIncoming(ctx, chatID, text); err != nil {
 		return err
 	}
+	conversation, err = s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(conversation.FollowupStage) != followupStageWeeklyDiscountSent {
+		if err := s.cancelFollowups(ctx, chatID); err != nil {
+			return err
+		}
+		conversation, err = s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return err
+		}
+	}
+	if isConversationClosedForAutomation(conversation) {
+		s.info("incoming message saved without automation reply",
+			automationSilenceFields(chatID, conversation, "protected_conversation_state")...,
+		)
+		return nil
+	}
 	if handled, err := s.maybeApplyHistoryGuard(ctx, msg, text, language, conversation); err != nil {
 		return err
 	} else if handled {
@@ -219,23 +226,18 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if err != nil {
 		return err
 	}
-	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.Stage == ClientStateHandedOff {
-		postHandoffAnalysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
-		if shouldAcknowledgePostHandoffBrief(text, language, conversation, postHandoffAnalysis) {
-			s.info("post-handoff brief answer acknowledged",
-				zap.String("chat_hash", chatFingerprint(chatID)),
-				zap.String("state", conversation.Stage),
-				zap.String("lead_status", conversation.LeadStatus),
-			)
-			return s.completeBriefAndHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
-		}
-		s.info("post-handoff incoming message saved without automation reply",
-			automationSilenceFields(chatID, conversation, "intentional_post_handoff_silence")...,
+	if isConversationClosedForAutomation(conversation) {
+		s.info("incoming message saved without automation reply",
+			automationSilenceFields(chatID, conversation, "protected_conversation_state_after_history_guard")...,
 		)
 		return nil
 	}
 
 	analysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
+	if faqKey, ok := detectFAQIntent(text); ok {
+		analysis.Intent = IntentFAQ
+		analysis.FAQKey = faqKey
+	}
 	if replyPackageDetected {
 		analysis.SelectedLevel = levelByPackageKey(replyPackage)
 		analysis.PackageInterest = stringPointer(replyPackage)
@@ -243,6 +245,14 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	}
 	if isBriefAnswerForConversation(text, analysis, conversation) {
 		analysis.Intent = IntentBriefAnswer
+	}
+	if !isBusinessRelevantMessage(text, analysis, analysis.FAQKey != "", conversation) {
+		s.info("incoming message ignored because it is outside stone production flow",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("state", conversation.Stage),
+			zap.String("intent", analysis.Intent),
+		)
+		return nil
 	}
 	lead := conversation.Lead
 	lead.ApplyAnalysis(analysis)
@@ -283,7 +293,7 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		s.info("state machine opt out", zap.String("chat_hash", chatFingerprint(chatID)))
 		return s.stopClient(ctx, chatID, true)
 	}
-	if conversation.OptOut || conversation.Stopped || state == ClientStateOptOut || state == ClientStateStopped || state == ClientStateHandedOff {
+	if isConversationClosedForAutomation(conversation) || conversation.OptOut || conversation.Stopped || state == ClientStateOptOut || state == ClientStateStopped || state == ClientStateHandedOff {
 		fields := automationSilenceFields(chatID, conversation, "state_machine_stopped")
 		fields = append(fields, zap.String("computed_state", state))
 		s.info("state machine automatic reply stopped", fields...)
@@ -296,6 +306,15 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 			zap.String("computed_state", state),
 		)
 		return nil
+	}
+	if isReplyAfterWeeklyFollowup(conversation) {
+		return s.completeFollowupReplyHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
+	}
+	if analysis.Intent == IntentFAQ && strings.TrimSpace(analysis.FAQKey) != "" {
+		return s.handleFAQ(ctx, chatID, language, conversation, analysis)
+	}
+	if state == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
+		return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
 	}
 	if shouldSuppressRapidFollowup(conversation, analysis) {
 		s.info("rapid follow-up suppressed",
@@ -329,9 +348,6 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		}
 		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
-	if (conversation.Stage == StageBriefRequested || conversation.Lead.BriefRequested) && managerQualificationForConversation(conversation).Ready {
-		return s.sendAndRemember(ctx, chatID, BriefReminderText(language), StageBriefRequested, selectedLevelFromConversation(conversation))
-	}
 	if wantsManagerFlow(conversation, analysis) {
 		if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
 			s.info("handoff postponed because lead is incomplete",
@@ -355,7 +371,10 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 				return s.selectPackageWithoutOpeningBrief(ctx, chatID, language, conversation, level)
 			}
 		}
-		return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+		if len(conversation.Lead.MissingCoreFields()) == 0 && hasQualificationSignal(conversation, analysis) {
+			return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
+		}
+		return s.sendGreetingAndSchedule(ctx, chatID, language)
 	case ClientStateAwaitingQualification:
 		if analysis.Intent == IntentPackageSelection {
 			level := analysis.SelectedLevel
@@ -374,7 +393,7 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 				if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire || analysis.WantsQuestionnaire {
 					return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 				}
-				return s.sendAndRemember(ctx, chatID, packageSelectedNextStepText(language, level), ClientStatePackagesPresented, level)
+				return s.sendQuestionnaireOffer(ctx, chatID, language, level)
 			}
 		}
 		if len(conversation.Lead.MissingCoreFields()) > 0 && shouldClarifyWeakQualificationAnswer(analysis) {
@@ -388,9 +407,14 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		return s.handlePackagesPresented(ctx, chatID, text, language, conversation, analysis)
 	case ClientStateAwaitingQuestionnaireConfirm:
 		return s.handleQuestionnaireConfirmation(ctx, chatID, text, language, conversation, analysis)
+	case StageBriefRequested:
+		return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
 	default:
 		if !conversation.InitialMessageSent && !conversation.Lead.HasBeenGreeted {
-			return s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+			return s.sendGreetingAndSchedule(ctx, chatID, language)
+		}
+		if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
+			return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
 		}
 		if conversation.QuestionnaireOfferSent {
 			return s.handleQuestionnaireConfirmation(ctx, chatID, text, language, conversation, analysis)
@@ -406,28 +430,8 @@ func (s *Service) presentPortfolioAndPackages(ctx context.Context, chatID string
 	if conversation.PackagesSent || conversation.Lead.OfferSent {
 		return nil
 	}
-	if shouldRecommendTestPackage(conversation, analysis) {
-		if err := s.sendAndRemember(ctx, chatID, testPackageRecommendationText(language), ClientStatePackagesPresented, 0); err != nil {
-			return err
-		}
-	}
-
-	if !(conversation.SentPortfolio || conversation.Lead.PortfolioSent) {
-		portfolioText := portfolioLinksMessage(language, s.portfolio, 0)
-		if !s.portfolio.HasAny() {
-			portfolioText = PortfolioIntroText(language)
-		}
-		if err := s.sendAndRemember(ctx, chatID, portfolioText, ClientStatePackagesPresented, 0); err != nil {
-			return err
-		}
-		if !s.portfolio.HasAny() {
-			if err := s.sendVideos(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, false); err != nil {
-				return err
-			}
-		}
-	}
-
-	return s.store.UpdateState(ctx, chatID, ClientStatePackagesPresented, selectedLevelFromConversation(conversation))
+	_ = analysis
+	return s.sendPackageVideosAndAskFormat(ctx, chatID, language, false, time.Now().UTC())
 }
 
 func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
@@ -480,19 +484,19 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStatePackagesPresented, 0)
 	}
 	if analysis.Intent == IntentAgreement {
-		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, selectedLevelFromConversation(conversation))
+		return s.sendFormatQuestionAndSchedule(ctx, chatID, language, selectedLevelFromConversation(conversation), time.Now().UTC())
 	}
 	if isLocalOfftopic(normalized) {
-		return s.sendAndRemember(ctx, chatID, OfftopicText(language), ClientStatePackagesPresented, 0)
+		return nil
 	}
-	return s.sendAndRemember(ctx, chatID, packagesPresentedFallbackText(language), ClientStatePackagesPresented, selectedLevelFromConversation(conversation))
+	return s.sendFormatQuestionAndSchedule(ctx, chatID, language, selectedLevelFromConversation(conversation), time.Now().UTC())
 }
 
 func (s *Service) askPackageBeforeQuestionnaire(ctx context.Context, chatID string, language string) error {
 	s.store.Update(chatID, func(conversation *Conversation) {
 		conversation.MissingFields = []string{fieldPackageInterest}
 	})
-	return s.sendAndRemember(ctx, chatID, packageChoiceNoPricesText(language), ClientStatePackagesPresented, 0, fieldPackageInterest)
+	return s.sendFormatQuestionAndSchedule(ctx, chatID, language, 0, time.Now().UTC())
 }
 
 func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
@@ -521,7 +525,8 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStateAwaitingQuestionnaireConfirm, 0)
 	}
 	if looksLikeBriefDetails(text, analysis) {
-		return s.completeBriefAndHandoff(ctx, chatID, language, level)
+		s.recordBriefMessage(chatID, text, analysis)
+		return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
 	}
 	if isSoftNo(text) {
 		return s.stopClient(ctx, chatID, false)
@@ -530,7 +535,10 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 }
 
 func (s *Service) sendQuestionnaireOffer(ctx context.Context, chatID string, language string, level int) error {
-	return s.sendAndRemember(ctx, chatID, QuestionnaireOfferText(language), ClientStateAwaitingQuestionnaireConfirm, level)
+	if err := s.sendAndRemember(ctx, chatID, QuestionnaireOfferText(language), ClientStateAwaitingQuestionnaireConfirm, level); err != nil {
+		return err
+	}
+	return s.scheduleFollowup(ctx, chatID, followupStageQuestionnaireReminder, questionnaireReminderAfter, time.Now().UTC())
 }
 
 func (s *Service) sendQuestionnaireOfferWithSelectedVideo(ctx context.Context, chatID string, language string, level int) error {
@@ -581,10 +589,8 @@ func (s *Service) selectPackageWithoutOpeningBrief(ctx context.Context, chatID s
 	if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
 		return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, level, missing...)
 	}
-	if shouldSend {
-		return nil
-	}
-	return s.sendAndRemember(ctx, chatID, packageSelectedNextStepText(language, level), ClientStatePackagesPresented, level)
+	_ = shouldSend
+	return s.sendQuestionnaireOffer(ctx, chatID, language, level)
 }
 
 func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID string, language string, level int) error {
@@ -603,9 +609,6 @@ func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID str
 	if level == 0 {
 		level = selectedLevelFromConversation(conversation)
 	}
-	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
-		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
-	}
 
 	text := BriefText(language)
 	if level > 0 {
@@ -618,7 +621,7 @@ func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID str
 		conversation.QuestionnaireSent = true
 		conversation.Lead.BriefRequested = true
 	})
-	return nil
+	return s.cancelFollowups(ctx, chatID)
 }
 
 func (s *Service) completeBriefAndHandoff(ctx context.Context, chatID string, language string, level int) error {
@@ -627,9 +630,13 @@ func (s *Service) completeBriefAndHandoff(ctx context.Context, chatID string, la
 		conversation.Lead.WantsQuestionnaire = true
 		conversation.QuestionnaireSent = true
 		conversation.Lead.BriefRequested = true
+		conversation.Lead.BriefCompleted = true
+		conversation.Lead.ContactBriefReady = true
 		if level > 0 {
 			conversation.SelectedLevel = level
 			conversation.Lead.SelectedPackage = packageKey(level)
+		} else if !isValidPackageInterest(conversation.Lead.SelectedPackage) {
+			conversation.Lead.SelectedPackage = packageNeedsManagerRecommendation
 		}
 	})
 	conversation, err := s.store.Snapshot(ctx, chatID)
@@ -642,7 +649,10 @@ func (s *Service) completeBriefAndHandoff(ctx context.Context, chatID string, la
 	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
 		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
 	}
-	return s.sendAndRemember(ctx, chatID, BriefCollectedText(language), StageHandoffRequired, level, fieldBrief)
+	if err := s.sendAndRemember(ctx, chatID, BriefCollectedText(language), StageHandoffRequired, level, fieldBrief); err != nil {
+		return err
+	}
+	return s.cancelFollowups(ctx, chatID)
 }
 
 func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language string, level int) error {
@@ -697,7 +707,10 @@ func (s *Service) stopClient(ctx context.Context, chatID string, optOut bool) er
 			conversation.LeadStatus = LeadStatusMuted
 		}
 	})
-	return s.store.UpdateState(ctx, chatID, stage, 0)
+	if err := s.store.UpdateState(ctx, chatID, stage, 0); err != nil {
+		return err
+	}
+	return s.cancelFollowups(ctx, chatID)
 }
 
 func (s *Service) HandleNonTextMessage(ctx context.Context, chatID string, language string) error {
@@ -900,7 +913,7 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	if err != nil {
 		return err
 	}
-	if (latest.AutomationClosed || latest.HandedOffToOwner || !latest.TransferredAt.IsZero()) && stage != ClientStateHandedOff && stage != StageHandoffRequired {
+	if !canSendAutomationToConversation(latest) && stage != ClientStateHandedOff && stage != StageHandoffRequired && stage != StageBriefCollected {
 		s.info("outgoing whatsapp reply skipped because automation is closed",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("stage", stage),
@@ -962,7 +975,7 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 	if err != nil {
 		return err
 	}
-	if latest.AutomationClosed || latest.HandedOffToOwner || !latest.TransferredAt.IsZero() {
+	if !canSendAutomationToConversation(latest) {
 		s.info("portfolio video skipped because automation is closed",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 		)
@@ -1140,9 +1153,9 @@ func adminLeadNotificationText(conversation Conversation) string {
 		"Телефон: "+formatPhoneForAdmin(conversation.ChatID),
 		"ChatID: "+strings.TrimSpace(conversation.ChatID),
 		"",
-		"Ниша: "+strings.TrimSpace(lead.Niche),
-		"Цель: "+strings.TrimSpace(lead.Goal),
-		"Срок: "+strings.TrimSpace(lead.Deadline),
+		"Ниша: "+valueOrDash(lead.Niche),
+		"Цель: "+valueOrDash(lead.Goal),
+		"Срок: "+valueOrDash(lead.Deadline),
 		"Пакет: "+adminPackageLabel(lead.SelectedPackage),
 		"",
 		"Намерение клиента: "+adminClientIntent(conversation),
@@ -1223,7 +1236,7 @@ func adminPackageLabel(packageKey string) string {
 	case packageNeedsManagerRecommendation:
 		return "нужна рекомендация менеджера"
 	default:
-		return strings.TrimSpace(packageKey)
+		return valueOrDash(packageKey)
 	}
 }
 
@@ -1873,7 +1886,7 @@ func shouldTransferToManagerNow(conversation Conversation, analysis CustomerAnal
 	if !managerQualificationForConversation(conversation).Ready {
 		return false
 	}
-	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire || analysis.WantsQuestionnaire {
+	if analysis.WantsQuestionnaire {
 		return true
 	}
 	switch analysis.Intent {
@@ -1885,7 +1898,7 @@ func shouldTransferToManagerNow(conversation Conversation, analysis CustomerAnal
 }
 
 func wantsManagerFlow(conversation Conversation, analysis CustomerAnalysis) bool {
-	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire || analysis.WantsQuestionnaire {
+	if analysis.WantsQuestionnaire {
 		return true
 	}
 	switch analysis.Intent {
@@ -1944,7 +1957,7 @@ func isOptOutText(text string) bool {
 		return true
 	}
 	return containsAny(normalized, []string{
-		"не пишите", "не надо", "не интересно", "отпиш", "unsubscribe", "stop messaging",
+		"не пишите", "не надо", "не интересно", "не актуально", "отстан", "отпиш", "unsubscribe", "stop messaging",
 		"жазбаңыз", "мазаламаңыз", "керек емес", "not interested", "do not message",
 	})
 }
@@ -1953,10 +1966,10 @@ func isPositiveConfirmation(text string) bool {
 	normalized := normalizeForAnalysis(text)
 	clean := strings.Trim(normalized, " .,!?:;")
 	switch clean {
-	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "давайте", "иә", "иа", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
+	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "давайте", "жду", "конечно", "иә", "иа", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
 		return true
 	default:
-		return containsAny(normalized, []string{"отправьте", "скиньте", "жибер", "жібер", "send it", "send me"})
+		return containsAny(normalized, []string{"отправьте", "скиньте", "сбросьте", "жду", "жибер", "жібер", "send it", "send me"})
 	}
 }
 

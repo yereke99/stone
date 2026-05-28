@@ -195,14 +195,17 @@ func TestReplyToPackageVideoSelectsPackageByQuotedID(t *testing.T) {
 			if !conversation.CompletedFields[fieldPackageInterest] {
 				t.Fatalf("package field was not completed: %#v", conversation.CompletedFields)
 			}
-			if conversation.Stage != ClientStatePackagesPresented || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+			if conversation.Stage != ClientStateAwaitingQuestionnaireConfirm || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
 				t.Fatalf("unexpected state after reply selection: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
 			}
 			if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
 				t.Fatalf("brief was opened immediately after package selection: %d messages=%#v", got, sender.messages)
 			}
-			if got := countMessagesContaining(sender.messages, "формат выбрали"); got != 1 {
-				t.Fatalf("package selection acknowledgements = %d, want 1: %#v", got, sender.messages)
+			if got := countMessagesContaining(sender.messages, QuestionnaireOfferText("ru")); got != 1 {
+				t.Fatalf("questionnaire offers = %d, want 1: %#v", got, sender.messages)
+			}
+			if countMessagesContaining(sender.messages, "напишите «анкета»") != 0 {
+				t.Fatalf("old questionnaire command text was sent: %#v", sender.messages)
 			}
 			if len(sender.files) != 0 {
 				t.Fatalf("selected package video was resent: %#v", sender.files)
@@ -236,8 +239,8 @@ func TestReplyToPackageVideoSelectsPackageFromQuotedCaption(t *testing.T) {
 	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
 		t.Fatalf("brief was opened immediately after package selection: %d messages=%#v", got, sender.messages)
 	}
-	if got := countMessagesContaining(sender.messages, "формат выбрали"); got != 1 {
-		t.Fatalf("package selection acknowledgements = %d, want 1: %#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, QuestionnaireOfferText("ru")); got != 1 {
+		t.Fatalf("questionnaire offers = %d, want 1: %#v", got, sender.messages)
 	}
 }
 
@@ -397,12 +400,12 @@ func TestSelectedPackageContinuesCollectingMissingQualificationFields(t *testing
 	sendText(t, service, chatID, "цель: чтобы клиенты поняли почему именно я")
 
 	conversation = snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStatePackagesPresented || conversation.QuestionnaireSent {
+	if conversation.Stage != ClientStateAwaitingQuestionnaireConfirm || conversation.QuestionnaireSent {
 		t.Fatalf("unexpected state after qualification completed: stage=%q questionnaire=%v", conversation.Stage, conversation.QuestionnaireSent)
 	}
 	last = sender.messages[len(sender.messages)-1]
-	if !strings.Contains(last, "формат выбрали") {
-		t.Fatalf("bot did not send package next step after all fields: %q", last)
+	if !strings.Contains(last, "Отправить анкету?") {
+		t.Fatalf("bot did not send questionnaire offer after all fields: %q", last)
 	}
 	if strings.Contains(last, "Короткий бриф") {
 		t.Fatalf("brief opened without explicit questionnaire request: %q", last)
@@ -444,7 +447,7 @@ func TestPendingQuestionnaireOpensBriefAfterQualificationCompleted(t *testing.T)
 		t.Fatalf("brief was not opened after pending questionnaire became qualified: stage=%q questionnaire=%v brief=%v", conversation.Stage, conversation.QuestionnaireSent, conversation.Lead.BriefRequested)
 	}
 	last := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(last, "Короткий бриф") {
+	if last != BriefText("ru") {
 		t.Fatalf("brief text was not sent: %q", last)
 	}
 }
@@ -535,8 +538,8 @@ func TestDuplicateIncomingPackageReplyIsProcessedOnce(t *testing.T) {
 	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
 		t.Fatalf("brief was opened immediately after duplicate package reply: %d messages=%#v", got, sender.messages)
 	}
-	if got := countMessagesContaining(sender.messages, "формат выбрали"); got != 1 {
-		t.Fatalf("package selection acknowledgements = %d, want 1: %#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, QuestionnaireOfferText("ru")); got != 1 {
+		t.Fatalf("questionnaire offers = %d, want 1: %#v", got, sender.messages)
 	}
 }
 
@@ -573,17 +576,17 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 
 	sendText(t, service, chatID, "Здравствуйте")
 	sendText(t, service, chatID, "ниша мебель, цель получать заявки, срок через неделю")
-	if len(sender.files) != 0 {
-		t.Fatalf("portfolio links should not upload videos yet: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("qualification should upload all package videos: %#v", sender.files)
 	}
 
 	sendText(t, service, chatID, "берём basic")
 
-	if len(sender.files) != 1 || filepath.Base(sender.files[0]) != VideoLevel2 {
-		t.Fatalf("sent files = %#v, want selected basic video", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("selected package video was resent unexpectedly: %#v", sender.files)
 	}
-	if len(sender.captions) != 1 || !strings.Contains(sender.captions[0], "Базовый формат") || !strings.Contains(sender.captions[0], "50 000 тг") {
-		t.Fatalf("unexpected selected video caption: %#v", sender.captions)
+	if len(sender.captions) != 3 || !strings.Contains(sender.captions[1], "Базовый формат") || !strings.Contains(sender.captions[1], "50 000 тг") {
+		t.Fatalf("unexpected package video captions: %#v", sender.captions)
 	}
 	conversation := snapshotConversation(t, store, chatID)
 	if conversation.Stage == StageBriefRequested || conversation.Stopped || conversation.HandedOffToOwner || conversation.AutomationClosed {
@@ -592,7 +595,7 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
 		t.Fatalf("admin was notified before brief answer: %d messages=%#v", got, sender.messages)
 	}
-	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
+	if got := countMessagesContaining(sender.messages, BriefText("ru")); got != 0 {
 		t.Fatalf("brief was sent immediately after selected video: %d messages=%#v", got, sender.messages)
 	}
 
@@ -684,7 +687,7 @@ func TestBriefAnswerWithIncompleteLeadDoesNotCloseAutomation(t *testing.T) {
 		t.Fatalf("missing fields = %#v, want goal/package_interest", conversation.MissingFields)
 	}
 	last := sender.messages[len(sender.messages)-1]
-	for _, want := range []string{"цель", "пакет"} {
+	for _, want := range []string{"сильная сторона"} {
 		if !strings.Contains(last, want) {
 			t.Fatalf("missing-field reply %q does not mention %q", last, want)
 		}
@@ -719,7 +722,7 @@ func TestWeakBriefAnswerDoesNotCloseQualifiedLead(t *testing.T) {
 	if got := countMessagesContaining(sender.messages, BriefCollectedText("ru")); got != 0 {
 		t.Fatalf("weak brief was accepted as complete: %d messages=%#v", got, sender.messages)
 	}
-	if len(sender.messages) == 0 || !strings.Contains(sender.messages[len(sender.messages)-1], "Короткий бриф") {
+	if len(sender.messages) == 0 || !strings.Contains(sender.messages[len(sender.messages)-1], "сильная сторона") {
 		t.Fatalf("weak brief did not get a brief reminder: %#v", sender.messages)
 	}
 }
@@ -748,7 +751,7 @@ func TestIncompleteLeadCannotBeForcedIntoHandoffState(t *testing.T) {
 	}
 }
 
-func TestInvalidPersistedHandoffIsReopenedForQualification(t *testing.T) {
+func TestPersistedHandoffStaysSilentEvenWhenIncomplete(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
@@ -773,24 +776,15 @@ func TestInvalidPersistedHandoffIsReopenedForQualification(t *testing.T) {
 	sendText(t, service, chatID, "алло")
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage == ClientStateHandedOff || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
-		t.Fatalf("invalid handoff was not reopened: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	if conversation.Stage != ClientStateHandedOff || !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {
+		t.Fatalf("handoff was reopened unexpectedly: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
 	}
-	if len(sender.messages) == 0 {
-		t.Fatal("reopened incomplete handoff did not produce a qualification reply")
-	}
-	if !sameFields(conversation.MissingFields, []string{fieldGoal, fieldPackageInterest}) {
-		t.Fatalf("missing fields = %#v, want goal/package_interest", conversation.MissingFields)
-	}
-	last := sender.messages[len(sender.messages)-1]
-	for _, want := range []string{"цель", "пакет"} {
-		if !strings.Contains(last, want) {
-			t.Fatalf("missing-field reply %q does not mention %q", last, want)
-		}
+	if len(sender.messages) != 0 {
+		t.Fatalf("handed-off chat received automation: %#v", sender.messages)
 	}
 }
 
-func TestPrematurePersistedHandoffBriefAnswerGetsAcknowledgement(t *testing.T) {
+func TestPrematurePersistedHandoffBriefAnswerStaysSilent(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
@@ -814,8 +808,8 @@ func TestPrematurePersistedHandoffBriefAnswerGetsAcknowledgement(t *testing.T) {
 
 	sendText(t, service, chatID, "1) оригинальные шиповки 2) сомневаются почему дешево 3) разные модели в наличии")
 
-	if len(sender.messages) != 1 || sender.messages[0] != BriefCollectedText("ru") {
-		t.Fatalf("post-handoff brief acknowledgement = %#v, want one thank-you", sender.messages)
+	if len(sender.messages) != 0 {
+		t.Fatalf("post-handoff brief answer got automation: %#v", sender.messages)
 	}
 	conversation := snapshotConversation(t, store, chatID)
 	if !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {

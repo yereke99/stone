@@ -32,6 +32,7 @@ const (
 	IntentBriefAnswer      = "brief_answer"
 	IntentHumanRequest     = "human_request"
 	IntentMute             = "mute"
+	IntentFAQ              = "faq"
 	IntentOther            = "other"
 )
 
@@ -75,6 +76,7 @@ type CustomerAnalysis struct {
 	SelectedLevel      int      `json:"selected_level,omitempty"`
 	PackageInterest    *string  `json:"package_interest,omitempty"`
 	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
+	FAQKey             string   `json:"faq_key,omitempty"`
 	MissingFields      []string `json:"missing_fields"`
 }
 
@@ -574,7 +576,7 @@ func isAgreement(normalized string) bool {
 
 func isRefusal(normalized string) bool {
 	return containsAny(normalized, []string{
-		"нет", "не надо", "не интересно", "отказыва", "жоқ", "керек емес", "no thanks", "not interested",
+		"нет", "не надо", "не интересно", "не актуально", "отказыва", "жоқ", "керек емес", "no thanks", "not interested",
 	})
 }
 
@@ -593,14 +595,17 @@ func extractSelectedLevel(text string) int {
 
 	switch {
 	case containsAny(normalized, []string{"стандарт", "премиум", "standard", "premium", "стандартный"}) ||
+		containsAny(normalized, []string{"третий вариант", "3 вариант", "номер 3", "третий", "третье"}) ||
 		strings.Contains(compact, "75000") ||
 		priceShortcutSelected(normalized, "75"):
 		return 3
 	case containsAny(normalized, []string{"базов", "basic", "базалык", "базалық"}) ||
+		containsAny(normalized, []string{"второй вариант", "2 вариант", "номер 2", "второй", "второе"}) ||
 		strings.Contains(compact, "50000") ||
 		priceShortcutSelected(normalized, "50"):
 		return 2
 	case containsAny(normalized, []string{"тест", "test", "тестовый", "тестілік"}) ||
+		containsAny(normalized, []string{"первый вариант", "1 вариант", "номер 1", "первый", "первое"}) ||
 		strings.Contains(compact, "35000") ||
 		priceShortcutSelected(normalized, "35"):
 		return 1

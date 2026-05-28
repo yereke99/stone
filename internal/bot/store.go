@@ -89,6 +89,10 @@ type Conversation struct {
 	LegacyProcessed         bool
 	LegacyReengagement      bool
 	AutoPackagesSentAt      time.Time
+	NextFollowupAt          time.Time
+	FollowupStage           string
+	FollowupReferenceAt     time.Time
+	LastFollowupSentAt      time.Time
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	LastUpdated             time.Time
@@ -415,6 +419,9 @@ func (s *ConversationStore) MarkAdminNotified(ctx context.Context, chatID string
 	conversation.AutomationClosed = true
 	conversation.Stage = ClientStateHandedOff
 	conversation.Stopped = true
+	conversation.NextFollowupAt = time.Time{}
+	conversation.FollowupStage = ""
+	conversation.FollowupReferenceAt = time.Time{}
 	conversation.Lead.ContactBriefReady = true
 	conversation.Lead.LeadStatus = LeadStatusHandoffRequired
 	conversation.LeadStatus = LeadStatusHandoffRequired
@@ -469,6 +476,9 @@ func (s *ConversationStore) MarkAdminOperatorNotified(ctx context.Context, chatI
 	conversation.AutomationClosed = true
 	conversation.Stage = ClientStateHandedOff
 	conversation.Stopped = true
+	conversation.NextFollowupAt = time.Time{}
+	conversation.FollowupStage = ""
+	conversation.FollowupReferenceAt = time.Time{}
 	conversation.Lead.ContactBriefReady = true
 	conversation.Lead.LeadStatus = LeadStatusHandoffRequired
 	conversation.LeadStatus = LeadStatusHandoffRequired
@@ -620,6 +630,122 @@ func (s *ConversationStore) DelayedPackageCandidates(ctx context.Context, now ti
 	return candidates, nil
 }
 
+func (s *ConversationStore) DueFollowupCandidates(ctx context.Context, now time.Time, limit int) ([]Conversation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupLocked(now)
+
+	candidates := make([]Conversation, 0)
+	for _, conversation := range s.conversations {
+		if conversation == nil || strings.TrimSpace(conversation.FollowupStage) == "" || conversation.NextFollowupAt.IsZero() {
+			continue
+		}
+		if conversation.NextFollowupAt.After(now) {
+			continue
+		}
+		candidates = append(candidates, cloneConversation(*conversation))
+		if len(candidates) >= limit {
+			break
+		}
+	}
+	return candidates, nil
+}
+
+func (s *ConversationStore) ScheduleFollowup(ctx context.Context, chatID string, stage string, dueAt time.Time, referenceAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	stage = strings.TrimSpace(stage)
+	if chatID == "" || stage == "" || dueAt.IsZero() {
+		return nil
+	}
+	if referenceAt.IsZero() {
+		referenceAt = time.Now().UTC()
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	if isConversationClosedForAutomation(*conversation) {
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
+		conversation.UpdatedAt = now
+		conversation.LastUpdated = now
+		return s.persistConversationLocked(ctx, conversation)
+	}
+	conversation.FollowupStage = stage
+	conversation.NextFollowupAt = dueAt.UTC()
+	conversation.FollowupReferenceAt = referenceAt.UTC()
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
+func (s *ConversationStore) CancelFollowup(ctx context.Context, chatID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.NextFollowupAt = time.Time{}
+	conversation.FollowupStage = ""
+	conversation.FollowupReferenceAt = time.Time{}
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
+func (s *ConversationStore) MarkFollowupSent(ctx context.Context, chatID string, sentStage string, sentAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	if sentAt.IsZero() {
+		sentAt = time.Now().UTC()
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.LastFollowupSentAt = sentAt.UTC()
+	conversation.FollowupStage = strings.TrimSpace(sentStage)
+	conversation.NextFollowupAt = time.Time{}
+	conversation.FollowupReferenceAt = sentAt.UTC()
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
 func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stage string, selectedLevel int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -659,6 +785,11 @@ func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stag
 			requestedStage = activeStageForIncompleteHandoff(*conversation)
 			conversation.Stage = requestedStage
 		}
+	}
+	if isClosingOrMutedStage(requestedStage) {
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
 	}
 	conversation.Lead = updateLeadFlagsForStage(conversation.Lead, requestedStage)
 	updateConversationFlagsForStage(conversation, requestedStage)
@@ -1133,6 +1264,20 @@ func isHandoffClosingStage(stage string) bool {
 	}
 }
 
+func isClosingOrMutedStage(stage string) bool {
+	switch strings.TrimSpace(stage) {
+	case ClientStateHandedOff,
+		ClientStateStopped,
+		ClientStateOptOut,
+		StageHandoffRequired,
+		StageBriefCollected,
+		StageMuted:
+		return true
+	default:
+		return false
+	}
+}
+
 func activeStageForIncompleteHandoff(conversation Conversation) string {
 	if conversation.QuestionnaireOfferSent {
 		return ClientStateAwaitingQuestionnaireConfirm
@@ -1168,7 +1313,6 @@ func updateConversationFlagsForStage(conversation *Conversation, stage string) {
 		conversation.Lead.OfferSent = true
 	case ClientStateAwaitingQuestionnaireConfirm:
 		conversation.QuestionnaireOfferSent = true
-		conversation.Lead.BriefRequested = true
 		conversation.WantsQuestionnaire = true
 		conversation.Lead.WantsQuestionnaire = true
 	case ClientStateHandedOff:
@@ -1176,15 +1320,24 @@ func updateConversationFlagsForStage(conversation *Conversation, stage string) {
 		conversation.HandedOffToOwner = true
 		conversation.AutomationClosed = true
 		conversation.Stopped = true
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
 		conversation.Lead.BriefRequested = true
 		conversation.Lead.ContactBriefReady = true
 		conversation.Lead.WantsQuestionnaire = true
 		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
 	case ClientStateStopped:
 		conversation.Stopped = true
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
 	case ClientStateOptOut:
 		conversation.OptOut = true
 		conversation.Stopped = true
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
 		conversation.Lead.LeadStatus = LeadStatusMuted
 	case StageQualification:
 		conversation.InitialMessageSent = true
@@ -1201,6 +1354,9 @@ func updateConversationFlagsForStage(conversation *Conversation, stage string) {
 		conversation.HandedOffToOwner = true
 		conversation.AutomationClosed = true
 		conversation.Stopped = true
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
 	}
 }
 

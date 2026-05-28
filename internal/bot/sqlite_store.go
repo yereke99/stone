@@ -124,6 +124,10 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			legacy_processed INTEGER NOT NULL DEFAULT 0,
 			legacy_reengagement INTEGER NOT NULL DEFAULT 0,
 			auto_packages_sent_at TEXT,
+			next_followup_at TEXT,
+			followup_stage TEXT,
+			followup_reference_at TEXT,
+			last_followup_sent_at TEXT,
 			conversation_json TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -175,6 +179,10 @@ func (s *ConversationStore) ensureWhatsAppClientColumns(ctx context.Context) err
 		"legacy_processed":         "INTEGER NOT NULL DEFAULT 0",
 		"legacy_reengagement":      "INTEGER NOT NULL DEFAULT 0",
 		"auto_packages_sent_at":    "TEXT",
+		"next_followup_at":         "TEXT",
+		"followup_stage":           "TEXT",
+		"followup_reference_at":    "TEXT",
+		"last_followup_sent_at":    "TEXT",
 	}
 
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(whatsapp_clients)`)
@@ -312,8 +320,9 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 			handed_off_to_owner, wants_questionnaire, automation_closed, stopped, opt_out, last_processed_message_id,
 			conversation_summary, missing_fields_json, transferred_at, history_checked_at, history_detected,
 			history_message_count, history_classification, history_summary, do_not_auto_start, legacy_existing,
-			legacy_processed, legacy_reengagement, auto_packages_sent_at, conversation_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			legacy_processed, legacy_reengagement, auto_packages_sent_at, next_followup_at, followup_stage,
+			followup_reference_at, last_followup_sent_at, conversation_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id) DO UPDATE SET
 			phone = excluded.phone,
 			display_name = excluded.display_name,
@@ -352,6 +361,10 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 			legacy_processed = excluded.legacy_processed,
 			legacy_reengagement = excluded.legacy_reengagement,
 			auto_packages_sent_at = excluded.auto_packages_sent_at,
+			next_followup_at = excluded.next_followup_at,
+			followup_stage = excluded.followup_stage,
+			followup_reference_at = excluded.followup_reference_at,
+			last_followup_sent_at = excluded.last_followup_sent_at,
 			conversation_json = excluded.conversation_json,
 			updated_at = excluded.updated_at`,
 		conversation.ChatID,
@@ -393,6 +406,10 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 		boolInt(conversation.LegacyProcessed),
 		boolInt(conversation.LegacyReengagement),
 		timeText(conversation.AutoPackagesSentAt),
+		timeText(conversation.NextFollowupAt),
+		strings.TrimSpace(conversation.FollowupStage),
+		timeText(conversation.FollowupReferenceAt),
+		timeText(conversation.LastFollowupSentAt),
 		string(raw),
 		timeText(conversation.CreatedAt),
 		timeText(conversation.UpdatedAt),
@@ -565,7 +582,8 @@ func clientStateForConversation(conversation *Conversation) string {
 		ClientStateLegacyExisting,
 		ClientStateLegacyProcessed,
 		ClientStateLegacyReengagement,
-		ClientStateHistoryCheckFailed:
+		ClientStateHistoryCheckFailed,
+		StageBriefRequested:
 		return state
 	}
 	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() {

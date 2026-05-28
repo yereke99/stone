@@ -440,15 +440,7 @@ func continueBriefForPackageText(language string, level int) string {
 }
 
 func packageSelectedNextStepText(language string, level int) string {
-	label := formatLabel(language, level)
-	switch normalizeLanguageCode(language) {
-	case "kk":
-		return label + " форматты белгіледім. Егер осы форматпен жалғастырамыз десеңіз, «анкета» деп жазыңыз."
-	case "en":
-		return "I marked the " + label + " format. If you want to continue with it, write “brief”."
-	default:
-		return "Отлично, " + label + " формат выбрали. Если продолжаем с ним, напишите «анкета»."
-	}
+	return QuestionnaireOfferText(language)
 }
 
 func continueAfterOfferText(language string) string {
@@ -587,11 +579,11 @@ func (links PortfolioLinks) URLByLevel(level int) string {
 func requestedLevelFromText(text string) int {
 	normalized := normalizeForAnalysis(text)
 	switch {
-	case containsAny(normalized, []string{"тест", "test", "тестілік"}):
+	case containsAny(normalized, []string{"тест", "test", "тестілік", "первый вариант", "1 вариант", "номер 1", "первый"}):
 		return 1
-	case containsAny(normalized, []string{"базов", "basic", "базалық"}):
+	case containsAny(normalized, []string{"базов", "basic", "базалық", "второй вариант", "2 вариант", "номер 2", "второй"}):
 		return 2
-	case containsAny(normalized, []string{"стандарт", "премиум", "standard", "premium"}):
+	case containsAny(normalized, []string{"стандарт", "премиум", "standard", "premium", "третий вариант", "3 вариант", "номер 3", "третий"}):
 		return 3
 	default:
 		return 0

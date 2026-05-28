@@ -13,6 +13,20 @@ const (
 	defaultDelayedPackageLimit    = 100
 )
 
+const (
+	followupStageSendPackages          = "send_packages_after_greeting"
+	followupStageQuestionnaireOffer    = "questionnaire_offer_after_packages"
+	followupStageQuestionnaireReminder = "questionnaire_reminder_24h"
+	followupStageWeeklyDiscount        = "weekly_discount_1w"
+	followupStageWeeklyDiscountSent    = "weekly_discount_sent"
+)
+
+const (
+	packageSelectionFollowupAfter = time.Hour
+	questionnaireReminderAfter    = 24 * time.Hour
+	weeklyDiscountFollowupAfter   = 7 * 24 * time.Hour
+)
+
 type DelayedPackageOptions struct {
 	Enabled       bool
 	After         time.Duration
@@ -41,8 +55,8 @@ func (s *Service) StartDelayedPackageScheduler(ctx context.Context) {
 	if options.CheckInterval <= 0 {
 		options.CheckInterval = defaultDelayedPackageInterval
 	}
-	s.info("delayed package scheduler started",
-		zap.Duration("after", options.After),
+	s.info("follow-up scheduler started",
+		zap.Duration("packages_after", options.After),
 		zap.Duration("interval", options.CheckInterval),
 	)
 	go func() {
@@ -54,7 +68,7 @@ func (s *Service) StartDelayedPackageScheduler(ctx context.Context) {
 				return
 			case now := <-ticker.C:
 				if err := s.ProcessDueDelayedPackages(ctx, now.UTC()); err != nil {
-					s.warn("delayed package scheduler tick failed", zap.Error(err))
+					s.warn("follow-up scheduler tick failed", zap.Error(err))
 				}
 			}
 		}
@@ -62,11 +76,18 @@ func (s *Service) StartDelayedPackageScheduler(ctx context.Context) {
 }
 
 func (s *Service) ProcessDueDelayedPackages(ctx context.Context, now time.Time) error {
+	return s.ProcessDueFollowups(ctx, now)
+}
+
+func (s *Service) ProcessDueFollowups(ctx context.Context, now time.Time) error {
 	options := s.autoPackages.options
 	if !options.Enabled || options.After <= 0 {
 		return nil
 	}
-	candidates, err := s.store.DelayedPackageCandidates(ctx, now, options.After, defaultDelayedPackageLimit)
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	candidates, err := s.store.DueFollowupCandidates(ctx, now.UTC(), defaultDelayedPackageLimit)
 	if err != nil {
 		return err
 	}
@@ -74,7 +95,7 @@ func (s *Service) ProcessDueDelayedPackages(ctx context.Context, now time.Time) 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.sendDelayedPackagesForConversation(ctx, conversation, now); err != nil {
+		if err := s.processDueFollowupForConversation(ctx, conversation, now.UTC()); err != nil {
 			return err
 		}
 	}
@@ -82,6 +103,10 @@ func (s *Service) ProcessDueDelayedPackages(ctx context.Context, now time.Time) 
 }
 
 func (s *Service) sendDelayedPackagesForConversation(ctx context.Context, conversation Conversation, now time.Time) error {
+	return s.processDueFollowupForConversation(ctx, conversation, now)
+}
+
+func (s *Service) processDueFollowupForConversation(ctx context.Context, conversation Conversation, now time.Time) error {
 	chatID := strings.TrimSpace(conversation.ChatID)
 	if chatID == "" {
 		return nil
@@ -96,46 +121,88 @@ func (s *Service) sendDelayedPackagesForConversation(ctx context.Context, conver
 	if err != nil {
 		return err
 	}
-	if !shouldSendDelayedPackages(latest, now, s.autoPackages.options.After) {
-		s.info("delayed package skipped",
+	if !shouldSendFollowup(latest, now, s.autoPackages.options.After) {
+		s.info("delayed follow-up skipped",
 			zap.String("chat_hash", chatFingerprint(chatID)),
-			zap.String("reason", delayedPackageSkipReason(latest, now, s.autoPackages.options.After)),
+			zap.String("stage", strings.TrimSpace(latest.FollowupStage)),
+			zap.String("reason", followupSkipReason(latest, now, s.autoPackages.options.After)),
 		)
+		if shouldClearIrrelevantFollowup(latest, now, s.autoPackages.options.After) {
+			return s.store.CancelFollowup(context.WithoutCancel(ctx), chatID)
+		}
 		return nil
 	}
+
 	language := latest.Language
 	if language == "" {
 		language = "ru"
 	}
-	if err := s.sendVideos(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, false); err != nil {
-		return err
+	stage := strings.TrimSpace(latest.FollowupStage)
+	switch stage {
+	case followupStageSendPackages:
+		if err := s.sendPackageVideosAndAskFormat(ctx, chatID, language, true, now.UTC()); err != nil {
+			return err
+		}
+		if err := s.store.MarkAutoPackagesSent(context.WithoutCancel(ctx), chatID, now.UTC()); err != nil {
+			return err
+		}
+	case followupStageQuestionnaireOffer:
+		if err := s.sendQuestionnaireOffer(ctx, chatID, language, selectedLevelFromConversation(latest)); err != nil {
+			return err
+		}
+	case followupStageQuestionnaireReminder:
+		if err := s.sendQuestionnaireReminder(ctx, chatID, language, selectedLevelFromConversation(latest), now.UTC()); err != nil {
+			return err
+		}
+	case followupStageWeeklyDiscount:
+		if err := s.sendWeeklyDiscountFollowup(ctx, chatID, language, selectedLevelFromConversation(latest), now.UTC()); err != nil {
+			return err
+		}
+	default:
+		return s.store.CancelFollowup(context.WithoutCancel(ctx), chatID)
 	}
-	if err := s.store.MarkAutoPackagesSent(context.WithoutCancel(ctx), chatID, now.UTC()); err != nil {
-		return err
-	}
-	s.info("delayed package videos sent",
+	s.info("delayed follow-up sent",
 		zap.String("chat_hash", chatFingerprint(chatID)),
-		zap.Int("video_count", 3),
+		zap.String("stage", stage),
 	)
 	return nil
 }
 
 func shouldSendDelayedPackages(conversation Conversation, now time.Time, after time.Duration) bool {
+	return strings.TrimSpace(conversation.FollowupStage) == followupStageSendPackages &&
+		shouldSendFollowup(conversation, now, after)
+}
+
+func shouldSendFollowup(conversation Conversation, now time.Time, after time.Duration) bool {
 	if after <= 0 || now.IsZero() {
 		return false
 	}
-	if conversation.AutoPackagesSentAt.IsZero() == false {
+	if strings.TrimSpace(conversation.FollowupStage) == "" || conversation.NextFollowupAt.IsZero() || conversation.NextFollowupAt.After(now) {
 		return false
 	}
-	if conversation.HistoryCheckedAt.IsZero() || conversation.HistoryClassification != HistoryClassificationNewClient || conversation.HistoryDetected {
+	if isConversationClosedForAutomation(conversation) || shouldSilenceForStoredHistory(conversation) {
 		return false
 	}
-	if conversation.DoNotAutoStart || conversation.LegacyExisting || conversation.LegacyProcessed || conversation.LegacyReengagement {
+	if !conversation.FollowupReferenceAt.IsZero() && conversation.LastIncomingAt.After(conversation.FollowupReferenceAt) {
 		return false
 	}
-	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() ||
-		conversation.Stopped || conversation.OptOut || conversation.Stage == ClientStateHandedOff ||
-		conversation.Stage == ClientStateStopped || conversation.Stage == ClientStateOptOut {
+
+	switch strings.TrimSpace(conversation.FollowupStage) {
+	case followupStageSendPackages:
+		return shouldSendPackageFollowup(conversation, now, after)
+	case followupStageQuestionnaireOffer:
+		return shouldSendQuestionnaireOfferFollowup(conversation)
+	case followupStageQuestionnaireReminder:
+		return shouldSendQuestionnaireReminderFollowup(conversation)
+	case followupStageWeeklyDiscount:
+		return shouldSendWeeklyDiscountFollowup(conversation)
+	default:
+		return false
+	}
+}
+
+func shouldSendPackageFollowup(conversation Conversation, now time.Time, after time.Duration) bool {
+	if !conversation.AutoPackagesSentAt.IsZero() {
 		return false
 	}
 	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
@@ -147,41 +214,78 @@ func shouldSendDelayedPackages(conversation Conversation, now time.Time, after t
 	if conversation.Stage != ClientStateAwaitingQualification {
 		return false
 	}
-	greetingSentAt := conversation.InitialGreetingSentAt
-	if greetingSentAt.IsZero() {
-		greetingSentAt = conversation.LastReplyAt
-	}
+	greetingSentAt := initialGreetingTime(conversation)
 	if greetingSentAt.IsZero() || now.Sub(greetingSentAt) < after {
 		return false
 	}
 	return conversation.LastIncomingAt.IsZero() || !conversation.LastIncomingAt.After(greetingSentAt)
 }
 
+func shouldSendQuestionnaireOfferFollowup(conversation Conversation) bool {
+	if !(conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent) {
+		return false
+	}
+	if conversation.QuestionnaireOfferSent || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
+		return false
+	}
+	return conversation.Stage == ClientStatePackagesPresented
+}
+
+func shouldSendQuestionnaireReminderFollowup(conversation Conversation) bool {
+	if !conversation.QuestionnaireOfferSent || conversation.QuestionnaireSent {
+		return false
+	}
+	return conversation.Stage == ClientStateAwaitingQuestionnaireConfirm
+}
+
+func shouldSendWeeklyDiscountFollowup(conversation Conversation) bool {
+	if conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
+		return false
+	}
+	return conversation.QuestionnaireOfferSent || conversation.PackagesSent || conversation.SentPortfolio
+}
+
 func delayedPackageSkipReason(conversation Conversation, now time.Time, after time.Duration) string {
+	return followupSkipReason(conversation, now, after)
+}
+
+func followupSkipReason(conversation Conversation, now time.Time, after time.Duration) string {
 	switch {
-	case !conversation.AutoPackagesSentAt.IsZero():
-		return "already_sent"
-	case conversation.HistoryCheckedAt.IsZero() || conversation.HistoryClassification != HistoryClassificationNewClient || conversation.HistoryDetected:
-		return "not_confirmed_new_client"
-	case conversation.DoNotAutoStart || conversation.LegacyExisting || conversation.LegacyProcessed || conversation.LegacyReengagement:
-		return "legacy_or_do_not_auto_start"
-	case conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero():
-		return "automation_closed"
-	case conversation.Stopped || conversation.OptOut:
-		return "stopped_or_opt_out"
-	case conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent:
-		return "packages_already_sent"
-	case !conversation.InitialMessageSent && !conversation.Lead.HasBeenGreeted:
-		return "initial_greeting_not_sent"
-	case conversation.Stage != ClientStateAwaitingQualification:
-		return "not_waiting_for_qualification"
-	case initialGreetingTime(conversation).IsZero() || now.Sub(initialGreetingTime(conversation)) < after:
+	case strings.TrimSpace(conversation.FollowupStage) == "" || conversation.NextFollowupAt.IsZero():
+		return "no_scheduled_followup"
+	case conversation.NextFollowupAt.After(now):
 		return "not_due_yet"
-	case conversation.LastIncomingAt.After(initialGreetingTime(conversation)):
-		return "client_replied_after_greeting"
+	case isConversationClosedForAutomation(conversation):
+		return "automation_closed"
+	case shouldSilenceForStoredHistory(conversation):
+		return "history_guard_silenced"
+	case !conversation.FollowupReferenceAt.IsZero() && conversation.LastIncomingAt.After(conversation.FollowupReferenceAt):
+		return "client_replied_after_reference"
+	case strings.TrimSpace(conversation.FollowupStage) == followupStageSendPackages && !conversation.AutoPackagesSentAt.IsZero():
+		return "already_sent"
+	case strings.TrimSpace(conversation.FollowupStage) == followupStageSendPackages && (conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent):
+		return "packages_already_sent"
+	case strings.TrimSpace(conversation.FollowupStage) == followupStageSendPackages && !conversation.InitialMessageSent && !conversation.Lead.HasBeenGreeted:
+		return "initial_greeting_not_sent"
+	case strings.TrimSpace(conversation.FollowupStage) == followupStageSendPackages && conversation.Stage != ClientStateAwaitingQualification:
+		return "not_waiting_for_qualification"
+	case strings.TrimSpace(conversation.FollowupStage) == followupStageQuestionnaireOffer && conversation.QuestionnaireOfferSent:
+		return "questionnaire_offer_already_sent"
+	case strings.TrimSpace(conversation.FollowupStage) == followupStageQuestionnaireReminder && conversation.QuestionnaireSent:
+		return "questionnaire_already_sent"
 	default:
 		return "not_eligible"
 	}
+}
+
+func shouldClearIrrelevantFollowup(conversation Conversation, now time.Time, after time.Duration) bool {
+	if strings.TrimSpace(conversation.FollowupStage) == "" {
+		return false
+	}
+	if conversation.NextFollowupAt.IsZero() || conversation.NextFollowupAt.After(now) {
+		return false
+	}
+	return !shouldSendFollowup(conversation, now, after)
 }
 
 func initialGreetingTime(conversation Conversation) time.Time {

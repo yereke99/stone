@@ -130,19 +130,18 @@ func BriefText(language string) string {
 	case "en":
 		return "Great, then a short brief:\n1) What are we advertising and what is the main value?\n2) What pain/desire does your audience have?\n3) What offer should we show in the video?\nYou can also send Instagram/website."
 	default:
-		return "Отлично, тогда короткий бриф:\n1) Что рекламируем и в чём главная ценность?\n2) Какая боль/желание у вашей аудитории?\n3) Какой оффер показать в ролике?\nМожете также отправить Instagram/сайт."
+		return "Чтобы сделать ролик точно под вашу задачу 🙌\nНапишите, пожалуйста, кратко:\n\n— Что продаёте?\n— В чём ваша сильная сторона?\n— Кто ваш клиент?\n— Есть ли сейчас акция / оффер?\n\nТакже можете отправить Instagram или сайт 🎯\nПосле этого предложим идею и формат ролика 🤝"
 	}
 }
 
 func BriefTextForPackage(language string, level int) string {
-	label := formatLabel(language, level)
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Керемет, " + label + " формат аламыз. Қысқа бриф:\n1) Нені жарнамалаймыз және басты құндылығы қандай?\n2) Аудиторияның қандай мәселесі/қалауы бар?\n3) Қандай оффер көрсету керек?\nInstagram/сайт жіберсеңіз болады."
+		return BriefText(language)
 	case "en":
-		return "Great, we will take the " + label + " format. Short brief:\n1) What are we advertising and what is the main value?\n2) What pain/desire does your audience have?\n3) What offer should we show?\nYou can also send Instagram/website."
+		return BriefText(language)
 	default:
-		return "Отлично, берём " + label + " формат. Короткий бриф:\n1) Что рекламируем и в чём главная ценность?\n2) Какая боль/желание у вашей аудитории?\n3) Какой оффер показать в ролике?\nМожете также отправить Instagram/сайт."
+		return BriefText(language)
 	}
 }
 
@@ -208,7 +207,7 @@ func QuestionnaireOfferText(language string) string {
 	case "en":
 		return "You can fill in a short questionnaire, we will write a free script and prepare the concept. Then you choose the format that fits.\n\nIt takes 1 minute.\n\nShould I send it?"
 	default:
-		return "Вы можете заполнить анкету, мы пропишем вам бесплатный сценарий, далее подготовим концепт, и уже выберете, какой формат вам подходит.\n\nЭто займет 1 минуту.\n\nОтправить анкету?"
+		return "Вы можете заполнить анкету. Мы бесплатно пропишем для вас сценарий, далее подготовим концепт, и уже после этого вы выберете, какой формат вам подходит.\n\nЭто займет 1 минуту.\n\nОтправить анкету?"
 	}
 }
 
@@ -252,7 +251,7 @@ func questionnaireConfirmationFallbackText(language string) string {
 	case "en":
 		return "Good. Should I send the questionnaire?"
 	default:
-		return "Хорошо. Отправить анкету?"
+		return "Отправить анкету?"
 	}
 }
 

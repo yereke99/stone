@@ -22,15 +22,28 @@ func managerQualificationForConversation(conversation Conversation) managerQuali
 }
 
 func leadHasRequiredManagerFields(lead LeadState) bool {
+	if leadHasCollectedBrief(lead) {
+		return true
+	}
 	return isValidNiche(lead.Niche) &&
 		isValidGoal(lead.Goal) &&
 		isValidDeadline(lead.Deadline) &&
 		isValidPackageInterest(lead.SelectedPackage)
 }
 
+func leadHasCollectedBrief(lead LeadState) bool {
+	if !lead.BriefCompleted && !lead.ContactBriefReady {
+		return false
+	}
+	return meaningfulRuneCount(lead.FreeText) >= 10 || meaningfulRuneCount(lead.Notes) >= 10
+}
+
 func requiredLeadMissingFields(conversation Conversation) []string {
 	lead := conversation.Lead
 	missing := make([]string, 0, 4)
+	if leadHasCollectedBrief(lead) {
+		return missing
+	}
 	if !isValidNiche(lead.Niche) {
 		missing = append(missing, fieldNiche)
 	}
@@ -276,6 +289,9 @@ func buildConversationSummary(conversation Conversation) string {
 	}
 	if isValidPackageInterest(lead.SelectedPackage) {
 		parts = append(parts, "пакет: "+adminPackageLabel(lead.SelectedPackage))
+	}
+	if brief := strings.TrimSpace(lead.FreeText); brief != "" {
+		parts = append(parts, "анкета: "+brief)
 	}
 	if len(parts) == 0 {
 		return strings.TrimSpace(conversation.LastIncomingText)

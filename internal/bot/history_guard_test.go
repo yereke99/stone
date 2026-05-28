@@ -171,7 +171,7 @@ func TestHistoryGuardFetchErrorFailClosedDoesNotAutoReply(t *testing.T) {
 	}
 }
 
-func TestStoredLegacyProcessedCanReengageOnClearNewRequest(t *testing.T) {
+func TestStoredLegacyProcessedDoesNotRestartAutomation(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	history := &fakeHistorySource{}
@@ -200,15 +200,15 @@ func TestStoredLegacyProcessedCanReengageOnClearNewRequest(t *testing.T) {
 	if history.calls != 0 {
 		t.Fatalf("history guard fetched history again for stored legacy chat: %d", history.calls)
 	}
-	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "для какого проекта") {
-		t.Fatalf("messages = %#v, want one soft clarification", sender.messages)
+	if len(sender.messages) != 0 {
+		t.Fatalf("messages = %#v, want silence for stored processed client", sender.messages)
 	}
 	if len(sender.files) != 0 {
 		t.Fatalf("stored reengagement sent package videos: %#v", sender.files)
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.HistoryClassification != HistoryClassificationLegacyReengagement || !conversation.LegacyReengagement || conversation.DoNotAutoStart {
-		t.Fatalf("history flags = classification=%q reengagement=%v do_not=%v", conversation.HistoryClassification, conversation.LegacyReengagement, conversation.DoNotAutoStart)
+	if conversation.HistoryClassification != HistoryClassificationLegacyProcessed || !conversation.LegacyProcessed || !conversation.DoNotAutoStart {
+		t.Fatalf("history flags = classification=%q processed=%v do_not=%v", conversation.HistoryClassification, conversation.LegacyProcessed, conversation.DoNotAutoStart)
 	}
 }
 
@@ -261,6 +261,9 @@ func TestDelayedPackagesSendOnceForUnansweredNewClient(t *testing.T) {
 		conversation.InitialGreetingSentAt = now.Add(-16 * time.Minute)
 		conversation.LastReplyAt = now.Add(-16 * time.Minute)
 		conversation.LastIncomingAt = now.Add(-17 * time.Minute)
+		conversation.FollowupStage = followupStageSendPackages
+		conversation.FollowupReferenceAt = now.Add(-16 * time.Minute)
+		conversation.NextFollowupAt = now.Add(-time.Minute)
 	})
 
 	if err := service.ProcessDueDelayedPackages(context.Background(), now); err != nil {
@@ -268,6 +271,9 @@ func TestDelayedPackagesSendOnceForUnansweredNewClient(t *testing.T) {
 	}
 	if len(sender.files) != 3 {
 		t.Fatalf("files sent = %#v, want three package videos", sender.files)
+	}
+	if got := sender.messages[len(sender.messages)-1]; got != FormatQuestionText("ru") {
+		t.Fatalf("format question = %q, want approved text", got)
 	}
 	for i, want := range []string{VideoLevel1, VideoLevel2, VideoLevel3} {
 		if filepath.Base(sender.files[i]) != want {
@@ -303,6 +309,9 @@ func TestDelayedPackagesSkipWhenNewClientRepliedBeforeDue(t *testing.T) {
 		conversation.InitialGreetingSentAt = now.Add(-16 * time.Minute)
 		conversation.LastIncomingAt = now.Add(-5 * time.Minute)
 		conversation.LastReplyAt = now.Add(-4 * time.Minute)
+		conversation.FollowupStage = followupStageSendPackages
+		conversation.FollowupReferenceAt = now.Add(-16 * time.Minute)
+		conversation.NextFollowupAt = now.Add(-time.Minute)
 	})
 
 	if err := service.ProcessDueDelayedPackages(context.Background(), now); err != nil {
@@ -373,6 +382,9 @@ func TestDelayedPackagesSkipClosedOrStoppedChats(t *testing.T) {
 				conversation.InitialGreetingSentAt = now.Add(-16 * time.Minute)
 				conversation.LastReplyAt = now.Add(-16 * time.Minute)
 				conversation.LastIncomingAt = now.Add(-17 * time.Minute)
+				conversation.FollowupStage = followupStageSendPackages
+				conversation.FollowupReferenceAt = now.Add(-16 * time.Minute)
+				conversation.NextFollowupAt = now.Add(-time.Minute)
 				tt.mark(conversation)
 			})
 

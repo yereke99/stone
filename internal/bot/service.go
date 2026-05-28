@@ -304,6 +304,18 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		)
 		return nil
 	}
+	if analysis.Intent == IntentPackageSelection {
+		level := analysis.SelectedLevel
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		if level > 0 {
+			return s.selectPackageWithoutOpeningBrief(ctx, chatID, language, conversation, level)
+		}
+	}
+	if shouldAskPackageBeforeQuestionnaire(conversation, analysis, text) {
+		return s.askPackageBeforeQuestionnaire(ctx, chatID, language)
+	}
 	if shouldTransferToManagerNow(conversation, analysis) {
 		level := analysis.SelectedLevel
 		if level == 0 {
@@ -463,6 +475,13 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		return s.sendAndRemember(ctx, chatID, OfftopicText(language), ClientStatePackagesPresented, 0)
 	}
 	return s.sendAndRemember(ctx, chatID, packagesPresentedFallbackText(language), ClientStatePackagesPresented, selectedLevelFromConversation(conversation))
+}
+
+func (s *Service) askPackageBeforeQuestionnaire(ctx context.Context, chatID string, language string) error {
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.MissingFields = []string{fieldPackageInterest}
+	})
+	return s.sendAndRemember(ctx, chatID, packageChoiceNoPricesText(language), ClientStatePackagesPresented, 0, fieldPackageInterest)
 }
 
 func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
@@ -1861,6 +1880,23 @@ func wantsManagerFlow(conversation Conversation, analysis CustomerAnalysis) bool
 	default:
 		return false
 	}
+}
+
+func shouldAskPackageBeforeQuestionnaire(conversation Conversation, analysis CustomerAnalysis, text string) bool {
+	if isValidPackageInterest(conversation.Lead.SelectedPackage) || selectedLevelFromConversation(conversation) > 0 || analysis.SelectedLevel > 0 {
+		return false
+	}
+	if !(conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent) {
+		return false
+	}
+	switch analysis.Intent {
+	case IntentReadyToOrder, IntentAgreement:
+		return true
+	}
+	if analysis.WantsQuestionnaire {
+		return true
+	}
+	return containsQuestionnaireIntent(normalizeForAnalysis(text)) || containsReadySignal(text)
 }
 
 func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {

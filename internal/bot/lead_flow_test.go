@@ -282,6 +282,78 @@ func TestPackageReplyWithMissingFieldsAsksOnlyMissingFields(t *testing.T) {
 	}
 }
 
+func TestQuestionnaireRequestAfterPackageVideosAsksPackageFirst(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-questionnaire-before-package"
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Lead.Niche = "салон красоты"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	sendText(t, service, chatID, "давайте анкету")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if !sameFields(conversation.MissingFields, []string{fieldPackageInterest}) {
+		t.Fatalf("missing fields = %#v, want package_interest", conversation.MissingFields)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if strings.Contains(last, "анкету откроем") {
+		t.Fatalf("questionnaire was opened before package selection: %q", last)
+	}
+	if !strings.Contains(last, "Какой формат") {
+		t.Fatalf("reply did not ask for package format first: %q", last)
+	}
+	for _, unwanted := range []string{"нишу", "цель"} {
+		if strings.Contains(last, unwanted) {
+			t.Fatalf("reply asked for %q before package choice: %q", unwanted, last)
+		}
+	}
+}
+
+func TestPendingQuestionnairePackageSelectionDoesNotOpenBriefBeforeQualification(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-pending-questionnaire-package"
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.Deadline = "на этой неделе"
+	})
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "reply-standard-after-questionnaire",
+		ChatID:          chatID,
+		Text:            "Вот этот",
+		QuotedMessageID: "standard-video-id",
+		QuotedType:      "videoMessage",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.SelectedPackage != "standard" {
+		t.Fatalf("selected package = %q, want standard", conversation.Lead.SelectedPackage)
+	}
+	if conversation.QuestionnaireSent || conversation.Stage == StageBriefRequested {
+		t.Fatalf("brief was opened before qualification: stage=%q questionnaire=%v", conversation.Stage, conversation.QuestionnaireSent)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if strings.Contains(last, "анкету откроем") || strings.Contains(last, "пакет") {
+		t.Fatalf("unexpected questionnaire/package prompt after selected package: %q", last)
+	}
+	for _, want := range []string{"нишу", "цель"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("missing-field reply %q does not mention %q", last, want)
+		}
+	}
+}
+
 func TestMissingReplyContextFallsBackToNormalTextAnalysis(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()

@@ -116,11 +116,11 @@ func (c *Client) SendMessage(ctx context.Context, chatID string, message string)
 	return c.postJSON(ctx, c.apiURL, "sendMessage", payload)
 }
 
-func (c *Client) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) error {
+func (c *Client) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
 	filePath = filepath.Clean(filePath)
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("open file for upload: %w", err)
+		return "", fmt.Errorf("open file for upload: %w", err)
 	}
 	defer closeFile(file)
 
@@ -133,40 +133,57 @@ func (c *Client) SendFileByUpload(ctx context.Context, chatID string, filePath s
 	}
 	for key, value := range fields {
 		if err := writer.WriteField(key, value); err != nil {
-			return fmt.Errorf("write multipart field %s: %w", key, err)
+			return "", fmt.Errorf("write multipart field %s: %w", key, err)
 		}
 	}
 
 	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
 	if err != nil {
-		return fmt.Errorf("create multipart file field: %w", err)
+		return "", fmt.Errorf("create multipart file field: %w", err)
 	}
 	if _, err := io.Copy(part, file); err != nil {
-		return fmt.Errorf("copy multipart file: %w", err)
+		return "", fmt.Errorf("copy multipart file: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("close multipart writer: %w", err)
+		return "", fmt.Errorf("close multipart writer: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/waInstance%s/sendFileByUpload/%s", c.mediaAPIURL, c.idInstance, c.apiToken)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
 	if err != nil {
-		return fmt.Errorf("create sendFileByUpload request: %w", err)
+		return "", fmt.Errorf("create sendFileByUpload request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := c.do(req)
 	if err != nil {
-		return fmt.Errorf("call sendFileByUpload: %w", err)
+		return "", fmt.Errorf("call sendFileByUpload: %w", err)
 	}
 	defer closeBody(resp.Body)
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return c.statusError("sendFileByUpload", resp.StatusCode, data)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read sendFileByUpload response: %w", err)
 	}
 
-	return nil
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if len(data) > maxErrorBodyBytes {
+			data = data[:maxErrorBodyBytes]
+		}
+		return "", c.statusError("sendFileByUpload", resp.StatusCode, data)
+	}
+
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return "", nil
+	}
+	var result struct {
+		IDMessage string `json:"idMessage"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("decode sendFileByUpload response: %w", err)
+	}
+
+	return strings.TrimSpace(result.IDMessage), nil
 }
 
 func (c *Client) UploadFile(ctx context.Context, filePath string) (string, error) {

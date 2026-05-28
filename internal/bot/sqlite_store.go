@@ -466,6 +466,10 @@ func (s *ConversationStore) markMessageProcessedLocked(ctx context.Context, dedu
 }
 
 func (s *ConversationStore) LogOutgoingMessage(ctx context.Context, chatID string, messageType string, text string) error {
+	return s.LogOutgoingGreenAPIMessage(ctx, chatID, "", messageType, text)
+}
+
+func (s *ConversationStore) LogOutgoingGreenAPIMessage(ctx context.Context, chatID string, greenAPIMessageID string, messageType string, text string) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -481,8 +485,9 @@ func (s *ConversationStore) LogOutgoingMessage(ctx context.Context, chatID strin
 	dedupeKey := outgoingDedupeKey(chatID, messageType, text, now)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO whatsapp_messages (
 			chat_id, green_api_message_id, dedupe_key, direction, message_type, text, raw_payload_json, processed_at, created_at
-		) VALUES (?, '', ?, 'outgoing', ?, ?, '', ?, ?)`,
+		) VALUES (?, ?, ?, 'outgoing', ?, ?, '', ?, ?)`,
 		chatID,
+		strings.TrimSpace(greenAPIMessageID),
 		dedupeKey,
 		strings.TrimSpace(messageType),
 		text,

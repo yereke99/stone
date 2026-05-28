@@ -215,6 +215,8 @@ func processNotification(
 		zap.String("message_type", notification.TypeMessage()),
 		zap.String("message_id", messageID),
 		zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+		zap.Bool("has_reply_context", notification.QuotedMessageID() != "" || notification.QuotedText() != "" || notification.QuotedCaption() != ""),
+		zap.String("quoted_type", notification.QuotedType()),
 	)
 
 	dedupeDecision, err := conversationStore.BeginIncomingMessageProcessing(ctx, bot.WhatsAppMessageLog{
@@ -247,13 +249,18 @@ func processNotification(
 	processingStarted = dedupeDecision == bot.MessageDedupeNew
 
 	msg := bot.IncomingMessage{
-		IDMessage:   messageID,
-		DedupeKey:   dedupeMessageID,
-		ChatID:      chatID,
-		SenderName:  notification.SenderName(),
-		TypeMessage: notification.TypeMessage(),
-		Text:        text,
-		Timestamp:   time.Unix(notification.Body.Timestamp, 0).UTC(),
+		IDMessage:       messageID,
+		DedupeKey:       dedupeMessageID,
+		ChatID:          chatID,
+		SenderName:      notification.SenderName(),
+		TypeMessage:     notification.TypeMessage(),
+		Text:            text,
+		Timestamp:       time.Unix(notification.Body.Timestamp, 0).UTC(),
+		QuotedMessageID: notification.QuotedMessageID(),
+		QuotedText:      notification.QuotedText(),
+		QuotedCaption:   notification.QuotedCaption(),
+		QuotedType:      notification.QuotedType(),
+		QuotedFileName:  notification.QuotedFileName(),
 	}
 	if err := botService.HandleIncomingMessage(ctx, msg); err != nil {
 		zapLogger.Warn("incoming message handling failed",

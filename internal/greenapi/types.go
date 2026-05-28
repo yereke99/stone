@@ -7,6 +7,7 @@ const (
 
 	TypeMessageText         = "textMessage"
 	TypeMessageExtendedText = "extendedTextMessage"
+	TypeMessageQuoted       = "quotedMessage"
 )
 
 type Notification struct {
@@ -34,6 +35,7 @@ type MessageData struct {
 	TextMessageData         TextMessageData         `json:"textMessageData"`
 	ExtendedTextMessageData ExtendedTextMessageData `json:"extendedTextMessageData"`
 	FileMessageData         FileMessageData         `json:"fileMessageData"`
+	QuotedMessage           QuotedMessageData       `json:"quotedMessage"`
 }
 
 type TextMessageData struct {
@@ -43,10 +45,27 @@ type TextMessageData struct {
 type ExtendedTextMessageData struct {
 	Text        string `json:"text"`
 	Description string `json:"description"`
+	StanzaID    string `json:"stanzaId"`
+	Participant string `json:"participant"`
 }
 
 type FileMessageData struct {
 	Caption string `json:"caption"`
+}
+
+type QuotedMessageData struct {
+	StanzaID            string                    `json:"stanzaId"`
+	Participant         string                    `json:"participant"`
+	TypeMessage         string                    `json:"typeMessage"`
+	TextMessage         string                    `json:"textMessage"`
+	Caption             string                    `json:"caption"`
+	FileName            string                    `json:"fileName"`
+	ExtendedTextMessage QuotedExtendedTextMessage `json:"extendedTextMessage"`
+}
+
+type QuotedExtendedTextMessage struct {
+	Description string `json:"description"`
+	Title       string `json:"title"`
 }
 
 func (n *Notification) IsIncomingMessage() bool {
@@ -86,7 +105,7 @@ func (n *Notification) TypeMessage() string {
 
 func (n *Notification) IsTextMessage() bool {
 	messageType := n.TypeMessage()
-	return messageType == TypeMessageText || messageType == TypeMessageExtendedText
+	return messageType == TypeMessageText || messageType == TypeMessageExtendedText || messageType == TypeMessageQuoted
 }
 
 func (n *Notification) Text() string {
@@ -97,7 +116,7 @@ func (n *Notification) Text() string {
 	switch n.TypeMessage() {
 	case TypeMessageText:
 		return strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage)
-	case TypeMessageExtendedText:
+	case TypeMessageExtendedText, TypeMessageQuoted:
 		if text := strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Text); text != "" {
 			return text
 		}
@@ -105,4 +124,49 @@ func (n *Notification) Text() string {
 	default:
 		return ""
 	}
+}
+
+func (n *Notification) QuotedMessageID() string {
+	if n == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(n.Body.MessageData.QuotedMessage.StanzaID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.StanzaID)
+}
+
+func (n *Notification) QuotedText() string {
+	if n == nil {
+		return ""
+	}
+	quoted := n.Body.MessageData.QuotedMessage
+	if text := strings.TrimSpace(quoted.TextMessage); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(quoted.ExtendedTextMessage.Title); text != "" {
+		return text
+	}
+	return strings.TrimSpace(quoted.ExtendedTextMessage.Description)
+}
+
+func (n *Notification) QuotedCaption() string {
+	if n == nil {
+		return ""
+	}
+	return strings.TrimSpace(n.Body.MessageData.QuotedMessage.Caption)
+}
+
+func (n *Notification) QuotedType() string {
+	if n == nil {
+		return ""
+	}
+	return strings.TrimSpace(n.Body.MessageData.QuotedMessage.TypeMessage)
+}
+
+func (n *Notification) QuotedFileName() string {
+	if n == nil {
+		return ""
+	}
+	return strings.TrimSpace(n.Body.MessageData.QuotedMessage.FileName)
 }

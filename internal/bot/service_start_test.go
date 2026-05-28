@@ -9,10 +9,11 @@ import (
 )
 
 type fakeSender struct {
-	messages []string
-	chatIDs  []string
-	files    []string
-	captions []string
+	messages       []string
+	chatIDs        []string
+	files          []string
+	captions       []string
+	fileMessageIDs []string
 }
 
 func (s *fakeSender) SendMessage(ctx context.Context, chatID string, message string) error {
@@ -21,10 +22,14 @@ func (s *fakeSender) SendMessage(ctx context.Context, chatID string, message str
 	return nil
 }
 
-func (s *fakeSender) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) error {
+func (s *fakeSender) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
+	messageID := ""
+	if len(s.fileMessageIDs) > len(s.files) {
+		messageID = s.fileMessageIDs[len(s.files)]
+	}
 	s.files = append(s.files, filePath)
 	s.captions = append(s.captions, caption)
-	return nil
+	return messageID, nil
 }
 
 type fakeAI struct {
@@ -66,7 +71,7 @@ func TestFirstRussianMessageSendsQualificationGreeting(t *testing.T) {
 
 func TestUnknownFirstMessageDefaultsToRussianWithoutLanguageQuestion(t *testing.T) {
 	sender := &fakeSender{}
-	service := NewService(sender, &fakeAI{}, NewConversationStore(), "./video", PortfolioLinks{}, "auto", nil)
+	service := NewService(sender, &fakeAI{}, NewConversationStore(), testVideoDir(t), PortfolioLinks{}, "auto", nil)
 
 	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{ChatID: "chat", Text: "ok"}); err != nil {
 		t.Fatalf("first HandleIncomingMessage() error = %v", err)
@@ -84,7 +89,7 @@ func TestUnknownFirstMessageDefaultsToRussianWithoutLanguageQuestion(t *testing.
 
 func TestLanguageIsLockedAfterFirstDetection(t *testing.T) {
 	sender := &fakeSender{}
-	service := NewService(sender, &fakeAI{}, NewConversationStore(), "./video", PortfolioLinks{}, "auto", nil)
+	service := NewService(sender, &fakeAI{}, NewConversationStore(), testVideoDir(t), PortfolioLinks{}, "auto", nil)
 
 	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{ChatID: "chat", Text: "Сәлеметсіз бе"}); err != nil {
 		t.Fatalf("first HandleIncomingMessage() error = %v", err)
@@ -96,8 +101,11 @@ func TestLanguageIsLockedAfterFirstDetection(t *testing.T) {
 	if len(sender.messages) < 2 {
 		t.Fatalf("sent messages = %d, want at least 2", len(sender.messages))
 	}
-	if got := sender.messages[len(sender.messages)-1]; !strings.Contains(got, "Test") || !strings.Contains(got, "35 000") {
-		t.Fatalf("language was not locked to Kazakh, got:\n%s", got)
+	if len(sender.captions) == 0 {
+		t.Fatalf("package videos were not sent: messages=%#v", sender.messages)
+	}
+	if got := sender.captions[0]; !strings.Contains(got, "Тестілік") || !strings.Contains(got, "35 000") {
+		t.Fatalf("language was not locked to Kazakh package caption, got:\n%s", got)
 	}
 }
 

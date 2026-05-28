@@ -27,18 +27,23 @@ type outgoingCounter struct {
 }
 
 type IncomingMessage struct {
-	IDMessage   string
-	DedupeKey   string
-	ChatID      string
-	SenderName  string
-	TypeMessage string
-	Text        string
-	Timestamp   time.Time
+	IDMessage       string
+	DedupeKey       string
+	ChatID          string
+	SenderName      string
+	TypeMessage     string
+	Text            string
+	Timestamp       time.Time
+	QuotedMessageID string
+	QuotedText      string
+	QuotedCaption   string
+	QuotedType      string
+	QuotedFileName  string
 }
 
 type GreenSender interface {
 	SendMessage(ctx context.Context, chatID string, message string) error
-	SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) error
+	SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error)
 }
 
 type SalesAI interface {
@@ -183,6 +188,19 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		return s.sendAndRemember(ctx, chatID, fallbackForLead(language, conversation.Lead), StageDiagnosis, 0)
 	}
 
+	hasReplyContext := incomingHasReplyContext(msg)
+	replyPackage, replyPackageDetected := detectPackageFromReplyContext(conversation, msg)
+	s.info("incoming reply context inspected",
+		zap.String("chat_hash", chatFingerprint(chatID)),
+		zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+		zap.Bool("has_reply_context", hasReplyContext),
+		zap.String("quoted_type", strings.TrimSpace(msg.QuotedType)),
+		zap.Bool("has_quoted_text", strings.TrimSpace(msg.QuotedText) != ""),
+		zap.Bool("has_quoted_caption", strings.TrimSpace(msg.QuotedCaption) != ""),
+		zap.Bool("package_detected", replyPackageDetected),
+		zap.String("package_key", replyPackage),
+	)
+
 	if err := s.store.AppendMessage(ctx, chatID, "user", text); err != nil {
 		return err
 	}
@@ -206,6 +224,11 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	}
 
 	analysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
+	if replyPackageDetected {
+		analysis.SelectedLevel = levelByPackageKey(replyPackage)
+		analysis.PackageInterest = stringPointer(replyPackage)
+		analysis.Intent = IntentPackageSelection
+	}
 	if isBriefAnswerForConversation(text, analysis, conversation) {
 		analysis.Intent = IntentBriefAnswer
 	}
@@ -213,6 +236,15 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	lead.ApplyAnalysis(analysis)
 	if err := s.store.UpdateLead(ctx, chatID, lead); err != nil {
 		return err
+	}
+	if replyPackageDetected {
+		level := levelByPackageKey(replyPackage)
+		if level > 0 {
+			s.store.Update(chatID, func(conversation *Conversation) {
+				conversation.SelectedLevel = level
+				conversation.CompletedFields[fieldPackageInterest] = true
+			})
+		}
 	}
 	conversation, err = s.store.Snapshot(ctx, chatID)
 	if err != nil {
@@ -331,7 +363,7 @@ func (s *Service) presentPortfolioAndPackages(ctx context.Context, chatID string
 		}
 	}
 
-	return s.sendAndRemember(ctx, chatID, packageOptionsText(language), ClientStatePackagesPresented, 0)
+	return s.store.UpdateState(ctx, chatID, ClientStatePackagesPresented, selectedLevelFromConversation(conversation))
 }
 
 func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
@@ -853,17 +885,24 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 			caption = "Stone production"
 		}
 
-		if err := s.sender.SendFileByUpload(ctx, chatID, filePath, caption); err != nil {
+		messageID, err := s.sender.SendFileByUpload(ctx, chatID, filePath, caption)
+		if err != nil {
 			s.warn("portfolio video send failed", zap.String("file_name", fileName), zap.Error(err))
 			return err
 		}
 		s.info("portfolio video sent",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("file_name", fileName),
+			zap.String("message_id", strings.TrimSpace(messageID)),
 		)
 		incrementOutgoingCount(ctx)
-		if err := s.store.LogOutgoingMessage(context.WithoutCancel(ctx), chatID, "file", caption); err != nil {
+		if err := s.store.LogOutgoingGreenAPIMessage(context.WithoutCancel(ctx), chatID, messageID, "file", caption); err != nil {
 			return err
+		}
+		if offer, ok := OfferByVideo(fileName); ok {
+			if err := s.store.RecordOutgoingPackageMessage(context.WithoutCancel(ctx), chatID, messageID, packageKey(offer.Level), fileName, caption); err != nil {
+				return err
+			}
 		}
 		if err := s.store.MarkVideoSent(context.WithoutCancel(ctx), chatID, fileName); err != nil {
 			return err

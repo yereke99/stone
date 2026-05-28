@@ -75,10 +75,12 @@ func (c *fakeNotificationClient) DeleteNotification(ctx context.Context, receipt
 
 type fakeIncomingHandler struct {
 	calls int
+	last  bot.IncomingMessage
 }
 
 func (h *fakeIncomingHandler) HandleIncomingMessage(ctx context.Context, msg bot.IncomingMessage) error {
 	h.calls++
+	h.last = msg
 	return nil
 }
 
@@ -91,8 +93,8 @@ func (s *testSender) SendMessage(ctx context.Context, chatID string, message str
 	return nil
 }
 
-func (s *testSender) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) error {
-	return nil
+func (s *testSender) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
+	return "", nil
 }
 
 type testAI struct{}
@@ -217,6 +219,40 @@ func TestShouldProcessNotificationRequiresAutoReplyAndText(t *testing.T) {
 	notification.Body.MessageData.TextMessageData.TextMessage = "   "
 	if _, _, ok, reason := shouldProcessNotification(notification, now, time.Hour, time.Time{}, true); ok || reason != "empty_text" {
 		t.Fatalf("empty text ok=%v reason=%q, want empty_text", ok, reason)
+	}
+}
+
+func TestQuotedNotificationIsAcceptedAndPassesReplyContext(t *testing.T) {
+	client := &fakeNotificationClient{}
+	handler := &fakeIncomingHandler{}
+	store := bot.NewConversationStore()
+	logger := zap.NewNop()
+	notification := incomingTextNotification(601, "quoted-reply", "77060000000@c.us", "")
+	notification.Body.MessageData = greenapi.MessageData{
+		TypeMessage: greenapi.TypeMessageQuoted,
+		ExtendedTextMessageData: greenapi.ExtendedTextMessageData{
+			Text:     ".",
+			StanzaID: "standard-video-id",
+		},
+		QuotedMessage: greenapi.QuotedMessageData{
+			StanzaID:    "standard-video-id",
+			TypeMessage: "videoMessage",
+			Caption:     "Стандарт (премиум подача)\n\n💰 от 75 000 тг",
+			FileName:    "video_level_3.mp4",
+		},
+	}
+
+	processNotification(context.Background(), client, handler, store, time.Hour, true, time.Time{}, notification, logger)
+
+	if handler.calls != 1 {
+		t.Fatalf("handler calls = %d, want 1", handler.calls)
+	}
+	if handler.last.Text != "." ||
+		handler.last.QuotedMessageID != "standard-video-id" ||
+		handler.last.QuotedType != "videoMessage" ||
+		handler.last.QuotedFileName != "video_level_3.mp4" ||
+		handler.last.QuotedCaption == "" {
+		t.Fatalf("reply context not passed: %#v", handler.last)
 	}
 }
 

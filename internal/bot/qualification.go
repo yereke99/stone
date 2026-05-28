@@ -117,6 +117,15 @@ func isValidPackageInterest(value string) bool {
 	}
 }
 
+func isPackageSelectionKey(value string) bool {
+	switch normalizePackageInterest(value) {
+	case "test", "basic", "standard":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizePackageInterest(value string) string {
 	clean := normalizedLeadValue(value)
 	switch {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestService(sender *fakeSender, store *ConversationStore, links PortfolioLinks) *Service {
@@ -44,6 +45,51 @@ func snapshotConversation(t *testing.T, store *ConversationStore, chatID string)
 	return conversation
 }
 
+func seedPresentedPackageMessages(store *ConversationStore, chatID string) {
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStatePackagesPresented
+		conversation.InitialMessageSent = true
+		conversation.SentPortfolio = true
+		conversation.PackagesSent = true
+		conversation.Lead.PortfolioSent = true
+		conversation.Lead.OfferSent = true
+		conversation.SentVideoFiles[VideoLevel1] = time.Now().UTC()
+		conversation.SentVideoFiles[VideoLevel2] = time.Now().UTC()
+		conversation.SentVideoFiles[VideoLevel3] = time.Now().UTC()
+		conversation.SentVideos[1] = true
+		conversation.SentVideos[2] = true
+		conversation.SentVideos[3] = true
+		conversation.OutgoingPackageMessages["test-video-id"] = OutgoingPackageMessage{
+			PackageKey: "test",
+			FileName:   VideoLevel1,
+			Caption:    OfferCaptionByVideo(VideoLevel1, "ru"),
+			SentAt:     time.Now().UTC(),
+		}
+		conversation.OutgoingPackageMessages["basic-video-id"] = OutgoingPackageMessage{
+			PackageKey: "basic",
+			FileName:   VideoLevel2,
+			Caption:    OfferCaptionByVideo(VideoLevel2, "ru"),
+			SentAt:     time.Now().UTC(),
+		}
+		conversation.OutgoingPackageMessages["standard-video-id"] = OutgoingPackageMessage{
+			PackageKey: "standard",
+			FileName:   VideoLevel3,
+			Caption:    OfferCaptionByVideo(VideoLevel3, "ru"),
+			SentAt:     time.Now().UTC(),
+		}
+	})
+}
+
+func seedPresentedQualifiedLead(store *ConversationStore, chatID string) {
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Lead.Niche = "салон красоты"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "в течение месяца"
+	})
+}
+
 func TestServiceConstructionSendsNothing(t *testing.T) {
 	sender := &fakeSender{}
 	_ = newTestService(sender, NewConversationStore(), PortfolioLinks{})
@@ -73,7 +119,7 @@ func TestNewClientFirstIncomingSendsOpeningOnce(t *testing.T) {
 }
 
 func TestQualificationReplySendsPortfolioAndPackagesOnce(t *testing.T) {
-	sender := &fakeSender{}
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
 	chatID := "chat-qualified"
@@ -91,11 +137,230 @@ func TestQualificationReplySendsPortfolioAndPackagesOnce(t *testing.T) {
 	if conversation.Lead.Niche != "салон красоты" || conversation.Lead.Goal != "получать заявки" || conversation.Lead.Deadline != "на этой неделе" {
 		t.Fatalf("lead = %#v, want extracted niche/goal/deadline", conversation.Lead)
 	}
-	if countMessagesContaining(sender.messages, "Выберите подходящий формат:") != 1 {
-		t.Fatalf("package options were not sent exactly once: %#v", sender.messages)
+	if countMessagesContaining(sender.messages, "Выберите подходящий формат:") != 0 {
+		t.Fatalf("standalone package options should not be sent: %#v", sender.messages)
 	}
 	if len(sender.files) != 3 {
 		t.Fatalf("sent files = %#v, want all package examples", sender.files)
+	}
+	for _, tt := range []struct {
+		messageID string
+		want      string
+	}{
+		{messageID: "test-video-id", want: "test"},
+		{messageID: "basic-video-id", want: "basic"},
+		{messageID: "standard-video-id", want: "standard"},
+	} {
+		metadata, ok := conversation.OutgoingPackageMessages[tt.messageID]
+		if !ok || metadata.PackageKey != tt.want {
+			t.Fatalf("outgoing package metadata[%q] = %#v, ok=%v, want %q", tt.messageID, metadata, ok, tt.want)
+		}
+	}
+}
+
+func TestReplyToPackageVideoSelectsPackageByQuotedID(t *testing.T) {
+	tests := []struct {
+		name      string
+		quotedID  string
+		replyText string
+		want      string
+	}{
+		{name: "test", quotedID: "test-video-id", replyText: "Вот этот", want: "test"},
+		{name: "basic", quotedID: "basic-video-id", replyText: "Этот", want: "basic"},
+		{name: "standard", quotedID: "standard-video-id", replyText: ".", want: "standard"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := &fakeSender{}
+			store := NewConversationStore()
+			service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+			chatID := "chat-reply-id-" + tt.name
+			seedPresentedQualifiedLead(store, chatID)
+
+			if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+				IDMessage:       "reply-" + tt.name,
+				ChatID:          chatID,
+				Text:            tt.replyText,
+				QuotedMessageID: tt.quotedID,
+				QuotedType:      "videoMessage",
+			}); err != nil {
+				t.Fatalf("HandleIncomingMessage() error = %v", err)
+			}
+
+			conversation := snapshotConversation(t, store, chatID)
+			if conversation.Lead.SelectedPackage != tt.want {
+				t.Fatalf("selected package = %q, want %q", conversation.Lead.SelectedPackage, tt.want)
+			}
+			if !conversation.CompletedFields[fieldPackageInterest] {
+				t.Fatalf("package field was not completed: %#v", conversation.CompletedFields)
+			}
+			if conversation.Stage != StageBriefRequested || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+				t.Fatalf("unexpected state after reply selection: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+			}
+			if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
+				t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+			}
+			if len(sender.files) != 0 {
+				t.Fatalf("selected package video was resent: %#v", sender.files)
+			}
+		})
+	}
+}
+
+func TestReplyToPackageVideoSelectsPackageFromQuotedCaption(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-reply-caption"
+	seedPresentedQualifiedLead(store, chatID)
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:      "reply-caption-standard",
+		ChatID:         chatID,
+		Text:           ".",
+		QuotedCaption:  OfferCaptionByVideo(VideoLevel3, "ru"),
+		QuotedType:     "videoMessage",
+		QuotedFileName: "",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.SelectedPackage != "standard" {
+		t.Fatalf("selected package = %q, want standard", conversation.Lead.SelectedPackage)
+	}
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
+		t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
+	}
+}
+
+func TestPackageReplyWithMissingFieldsAsksOnlyMissingFields(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-reply-incomplete"
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Lead.Deadline = "в течение месяца"
+	})
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "reply-incomplete-standard",
+		ChatID:          chatID,
+		Text:            "Вот этот",
+		QuotedMessageID: "standard-video-id",
+		QuotedType:      "videoMessage",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.SelectedPackage != "standard" {
+		t.Fatalf("selected package = %q, want standard", conversation.Lead.SelectedPackage)
+	}
+	if conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+		t.Fatalf("incomplete lead was handed off: stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+	if !sameFields(conversation.MissingFields, []string{fieldNiche, fieldGoal}) {
+		t.Fatalf("missing fields = %#v, want niche/goal", conversation.MissingFields)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if strings.Contains(last, "пакет") {
+		t.Fatalf("reply asked for already selected package: %q", last)
+	}
+	for _, want := range []string{"нишу", "цель"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("missing-field reply %q does not mention %q", last, want)
+		}
+	}
+}
+
+func TestMissingReplyContextFallsBackToNormalTextAnalysis(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-no-reply-context"
+	seedPresentedQualifiedLead(store, chatID)
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage: "normal-basic",
+		ChatID:    chatID,
+		Text:      "берём basic",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.SelectedPackage != "basic" {
+		t.Fatalf("selected package = %q, want basic", conversation.Lead.SelectedPackage)
+	}
+}
+
+func TestHandedOffReplyContextIsSavedWithoutAutoReply(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-handed-reply"
+	seedPresentedQualifiedLead(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = ClientStateHandedOff
+		conversation.HandedOffToOwner = true
+		conversation.AutomationClosed = true
+		conversation.Stopped = true
+		conversation.TransferredAt = time.Now().UTC()
+		conversation.QuestionnaireSent = true
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.BriefCompleted = true
+		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+		conversation.LeadStatus = LeadStatusHandoffRequired
+	})
+
+	text := "Вот этот"
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "reply-after-handoff",
+		ChatID:          chatID,
+		Text:            text,
+		QuotedMessageID: "standard-video-id",
+		QuotedType:      "videoMessage",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	if len(sender.messages) != 0 {
+		t.Fatalf("bot replied after handoff: %#v", sender.messages)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.LastIncomingText != text {
+		t.Fatalf("post-handoff incoming was not saved: %q", conversation.LastIncomingText)
+	}
+}
+
+func TestDuplicateIncomingPackageReplyIsProcessedOnce(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-duplicate-package-reply"
+	seedPresentedQualifiedLead(store, chatID)
+	msg := IncomingMessage{
+		IDMessage:       "reply-duplicate-package",
+		ChatID:          chatID,
+		Text:            "Вот этот",
+		QuotedMessageID: "standard-video-id",
+		QuotedType:      "videoMessage",
+	}
+
+	if err := service.HandleIncomingMessage(context.Background(), msg); err != nil {
+		t.Fatalf("first HandleIncomingMessage() error = %v", err)
+	}
+	if err := service.HandleIncomingMessage(context.Background(), msg); err != nil {
+		t.Fatalf("duplicate HandleIncomingMessage() error = %v", err)
+	}
+
+	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 1 {
+		t.Fatalf("brief prompts = %d, want 1: %#v", got, sender.messages)
 	}
 }
 
@@ -613,8 +878,8 @@ func TestMultipleQuickMessagesDoNotDuplicateBotResponses(t *testing.T) {
 	}
 	wg.Wait()
 
-	if countMessagesContaining(sender.messages, "Выберите подходящий формат:") != 1 {
-		t.Fatalf("package responses duplicated: %#v", sender.messages)
+	if countMessagesContaining(sender.messages, "Выберите подходящий формат:") != 0 {
+		t.Fatalf("standalone package options should not be sent: %#v", sender.messages)
 	}
 }
 

@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,13 @@ type ChatMessage struct {
 	CreatedAt time.Time
 }
 
+type OutgoingPackageMessage struct {
+	PackageKey string
+	FileName   string
+	Caption    string
+	SentAt     time.Time
+}
+
 type LeadData = LeadState
 
 type Conversation struct {
@@ -50,6 +58,7 @@ type Conversation struct {
 	CompletedFields         map[string]bool
 	SentVideos              map[int]bool
 	SentVideoFiles          map[string]time.Time
+	OutgoingPackageMessages map[string]OutgoingPackageMessage
 	SentPortfolio           bool
 	BriefAsked              bool
 	BriefCollected          bool
@@ -683,23 +692,54 @@ func (s *ConversationStore) MarkVideoSent(ctx context.Context, chatID string, fi
 	return s.persistConversationLocked(ctx, conversation)
 }
 
+func (s *ConversationStore) RecordOutgoingPackageMessage(ctx context.Context, chatID string, messageID string, packageKeyValue string, fileName string, caption string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	messageID = strings.TrimSpace(messageID)
+	packageKeyValue = normalizePackageInterest(packageKeyValue)
+	fileName = strings.TrimSpace(filepath.Base(fileName))
+	caption = strings.TrimSpace(caption)
+	if chatID == "" || messageID == "" || !isPackageSelectionKey(packageKeyValue) {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.OutgoingPackageMessages[messageID] = OutgoingPackageMessage{
+		PackageKey: packageKeyValue,
+		FileName:   fileName,
+		Caption:    caption,
+		SentAt:     now,
+	}
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
 func (s *ConversationStore) getOrCreateLocked(chatID string, now time.Time) *Conversation {
 	conversation, exists := s.conversations[chatID]
 	if !exists {
 		conversation = &Conversation{
-			ChatID:              chatID,
-			Phone:               phoneFromChatID(chatID),
-			Stage:               ClientStateNeutralNew,
-			LeadStatus:          LeadStatusNeutral,
-			ProcessedMessageIDs: make(map[string]time.Time),
-			AskedFields:         make(map[string]bool),
-			CompletedFields:     make(map[string]bool),
-			SentVideos:          make(map[int]bool),
-			SentVideoFiles:      make(map[string]time.Time),
-			SelectedLevel:       0,
-			CreatedAt:           now,
-			UpdatedAt:           now,
-			LastUpdated:         now,
+			ChatID:                  chatID,
+			Phone:                   phoneFromChatID(chatID),
+			Stage:                   ClientStateNeutralNew,
+			LeadStatus:              LeadStatusNeutral,
+			ProcessedMessageIDs:     make(map[string]time.Time),
+			AskedFields:             make(map[string]bool),
+			CompletedFields:         make(map[string]bool),
+			SentVideos:              make(map[int]bool),
+			SentVideoFiles:          make(map[string]time.Time),
+			OutgoingPackageMessages: make(map[string]OutgoingPackageMessage),
+			SelectedLevel:           0,
+			CreatedAt:               now,
+			UpdatedAt:               now,
+			LastUpdated:             now,
 		}
 		s.conversations[chatID] = conversation
 	}
@@ -770,6 +810,10 @@ func cloneConversation(conversation Conversation) Conversation {
 	for fileName, sentAt := range conversation.SentVideoFiles {
 		clone.SentVideoFiles[fileName] = sentAt
 	}
+	clone.OutgoingPackageMessages = make(map[string]OutgoingPackageMessage, len(conversation.OutgoingPackageMessages))
+	for messageID, metadata := range conversation.OutgoingPackageMessages {
+		clone.OutgoingPackageMessages[messageID] = metadata
+	}
 	clone.MissingFields = append([]string(nil), conversation.MissingFields...)
 	return clone
 }
@@ -807,6 +851,9 @@ func ensureConversationMaps(conversation *Conversation) {
 	}
 	if conversation.SentVideoFiles == nil {
 		conversation.SentVideoFiles = make(map[string]time.Time)
+	}
+	if conversation.OutgoingPackageMessages == nil {
+		conversation.OutgoingPackageMessages = make(map[string]OutgoingPackageMessage)
 	}
 	if conversation.LeadStatus == "" {
 		conversation.LeadStatus = normalizeLeadStatus(conversation.Lead.LeadStatus)

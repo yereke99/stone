@@ -171,6 +171,47 @@ func TestHistoryGuardFetchErrorFailClosedDoesNotAutoReply(t *testing.T) {
 	}
 }
 
+func TestStoredLegacyProcessedCanReengageOnClearNewRequest(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	history := &fakeHistorySource{}
+	service := newHistoryGuardTestService(sender, store, history, testVideoDir(t))
+	chatID := "770700000045@c.us"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = ClientStateLegacyProcessed
+		conversation.HistoryCheckedAt = time.Now().UTC().Add(-time.Hour)
+		conversation.HistoryDetected = true
+		conversation.HistoryMessageCount = 4
+		conversation.HistoryClassification = HistoryClassificationLegacyProcessed
+		conversation.DoNotAutoStart = true
+		conversation.LegacyProcessed = true
+	})
+
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:      "stored-reengage",
+		ChatID:         chatID,
+		Text:           "Сколько стоит новое видео?",
+		Timestamp:      time.Now().UTC(),
+		LocalChatKnown: true,
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	if history.calls != 0 {
+		t.Fatalf("history guard fetched history again for stored legacy chat: %d", history.calls)
+	}
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "для какого проекта") {
+		t.Fatalf("messages = %#v, want one soft clarification", sender.messages)
+	}
+	if len(sender.files) != 0 {
+		t.Fatalf("stored reengagement sent package videos: %#v", sender.files)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.HistoryClassification != HistoryClassificationLegacyReengagement || !conversation.LegacyReengagement || conversation.DoNotAutoStart {
+		t.Fatalf("history flags = classification=%q reengagement=%v do_not=%v", conversation.HistoryClassification, conversation.LegacyReengagement, conversation.DoNotAutoStart)
+	}
+}
+
 func TestKnownLocalChatSkipsHistoryGuardAndContinuesStateMachine(t *testing.T) {
 	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
 	store := NewConversationStore()

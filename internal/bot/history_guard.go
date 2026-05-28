@@ -121,6 +121,30 @@ func normalizeHistoryClassification(classification string) string {
 
 func (s *Service) maybeApplyHistoryGuard(ctx context.Context, msg IncomingMessage, text string, language string, conversation Conversation) (bool, error) {
 	if shouldSilenceForStoredHistory(conversation) {
+		if shouldReengageStoredLegacyConversation(conversation, text) {
+			decision := HistoryGuardDecision{
+				Classification:      HistoryClassificationLegacyReengagement,
+				HistoryDetected:     true,
+				HistoryMessageCount: conversation.HistoryMessageCount,
+				DoNotAutoStart:      false,
+				ShouldSoftClarify:   true,
+				Summary:             strings.TrimSpace(conversation.HistorySummary),
+				Reason:              "stored_legacy_current_message_reengages",
+				CheckedAt:           time.Now().UTC(),
+			}
+			if decision.Summary == "" {
+				decision.Summary = "Stored legacy conversation re-engaged with a new request."
+			}
+			if err := s.store.ApplyHistoryGuardDecision(ctx, msg.ChatID, decision); err != nil {
+				return false, err
+			}
+			s.info("history guard stored legacy reengagement",
+				zap.String("chat_hash", chatFingerprint(msg.ChatID)),
+				zap.String("previous_classification", conversation.HistoryClassification),
+				zap.String("classification", decision.Classification),
+			)
+			return true, s.sendAndRemember(ctx, msg.ChatID, LegacyReengagementClarificationText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+		}
 		s.info("history guard stored decision silenced automation",
 			zap.String("chat_hash", chatFingerprint(msg.ChatID)),
 			zap.String("classification", conversation.HistoryClassification),
@@ -165,6 +189,20 @@ func (s *Service) maybeApplyHistoryGuard(ctx context.Context, msg IncomingMessag
 		)
 		return true, nil
 	}
+}
+
+func shouldReengageStoredLegacyConversation(conversation Conversation, text string) bool {
+	if !looksLikeNewOrderRequest(text) {
+		return false
+	}
+	if conversation.HistoryClassification == HistoryClassificationHistoryCheckFailed {
+		return false
+	}
+	return conversation.LegacyExisting ||
+		conversation.LegacyProcessed ||
+		conversation.HistoryClassification == HistoryClassificationLegacyExisting ||
+		conversation.HistoryClassification == HistoryClassificationLegacyProcessed ||
+		conversation.HistoryClassification == HistoryClassificationUnknown
 }
 
 func (s *Service) shouldRunHistoryGuard(msg IncomingMessage, conversation Conversation) bool {

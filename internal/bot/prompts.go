@@ -215,11 +215,11 @@ func QuestionnaireOfferText(language string) string {
 func packageOptionsText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Форматтар:\nTest — 35 000 тг\nBasic — 50 000 тг\nStandard — 75 000 тг"
+		return "Форматты таңдаңыз:\n1️⃣ Test — 35 000 ₸\n2️⃣ Basic — 50 000 ₸\n3️⃣ Standard — 75 000 ₸ден бастап\n\nҚай формат ұнады?"
 	case "en":
-		return "Packages:\nTest — 35,000 KZT\nBasic — 50,000 KZT\nStandard — 75,000 KZT"
+		return "Choose your format:\n1️⃣ Test — 35,000 KZT\n2️⃣ Basic — 50,000 KZT\n3️⃣ Standard — from 75,000 KZT\n\nWhich format do you like?"
 	default:
-		return "Пакеты:\nTest — 35 000 тг\nBasic — 50 000 тг\nStandard — 75 000 тг"
+		return "Выберите подходящий формат:\n1️⃣ Test — 35 000 тг\n2️⃣ Basic — 50 000 тг\n3️⃣ Standard — от 75 000 тг\n\nКакой формат вам понравился?"
 	}
 }
 

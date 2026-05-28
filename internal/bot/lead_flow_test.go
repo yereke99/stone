@@ -91,7 +91,7 @@ func TestQualificationReplySendsPortfolioAndPackagesOnce(t *testing.T) {
 	if conversation.Lead.Niche != "салон красоты" || conversation.Lead.Goal != "получать заявки" || conversation.Lead.Deadline != "на этой неделе" {
 		t.Fatalf("lead = %#v, want extracted niche/goal/deadline", conversation.Lead)
 	}
-	if countMessagesContaining(sender.messages, "Пакеты:") != 1 {
+	if countMessagesContaining(sender.messages, "Выберите подходящий формат:") != 1 {
 		t.Fatalf("package options were not sent exactly once: %#v", sender.messages)
 	}
 	if len(sender.files) != 3 {
@@ -445,7 +445,7 @@ func TestMultipleQuickMessagesDoNotDuplicateBotResponses(t *testing.T) {
 	}
 	wg.Wait()
 
-	if countMessagesContaining(sender.messages, "Пакеты:") != 1 {
+	if countMessagesContaining(sender.messages, "Выберите подходящий формат:") != 1 {
 		t.Fatalf("package responses duplicated: %#v", sender.messages)
 	}
 }

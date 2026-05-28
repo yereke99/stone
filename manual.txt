@@ -1,0 +1,959 @@
+MANUAL: как проект общается с клиентами и как сохраняет данные в БД
+====================================================================
+
+Проект
+------
+
+Stone Production WhatsApp Sales Bot - Go-приложение для общения с клиентами в WhatsApp через GreenAPI. Основной рабочий сценарий:
+
+1. Приложение запускается из cmd/main.go.
+2. Через GreenAPI long polling получает входящие уведомления WhatsApp.
+3. Принимает только свежие входящие текстовые сообщения.
+4. Дедуплицирует сообщение, чтобы не ответить два раза на одно и то же уведомление.
+5. Сохраняет входящее сообщение и состояние клиента в SQLite.
+6. Обновляет воронку продаж по локальной state machine.
+7. Отправляет клиенту текст, видео или уведомление менеджеру через GreenAPI.
+8. Сохраняет исходящие сообщения и новое состояние клиента в SQLite.
+9. После успешной обработки удаляет receipt из очереди GreenAPI через deleteNotification.
+
+Главные файлы
+-------------
+
+- cmd/main.go - точка входа, создание клиентов, SQLite store, запуск GreenAPI polling loop.
+- internal/config/config.go - загрузка .env и конфигурации.
+- internal/greenapi/client.go - HTTP-клиент GreenAPI: receiveNotification, deleteNotification, sendMessage, sendFileByUpload.
+- internal/greenapi/types.go - структура GreenAPI уведомлений и извлечение chatID/text.
+- internal/bot/service.go - основной сервис общения с клиентом.
+- internal/bot/analysis.go - локальный анализ текста клиента: intent, ниша, цель, сроки, пакет.
+- internal/bot/qualification.go - проверка полноты лида перед передачей менеджеру.
+- internal/bot/store.go - in-memory слой ConversationStore и методы обновления состояния.
+- internal/bot/sqlite_store.go - SQLite миграции, загрузка/сохранение conversations и message log.
+- internal/bot/prompts.go - тексты ответов клиенту.
+- internal/bot/offers.go - пакеты Test/Basic/Standard и имена видео.
+- internal/http/*, internal/meta/*, internal/storage/memory.go - legacy/старый Meta webhook путь. В текущем cmd/main.go HTTP server не запускается.
+
+Важный факт про OpenAI
+----------------------
+
+В cmd/main.go создаётся openai.Client, и в internal/openai/client.go есть клиент для Responses API. Но в текущем активном пути internal/bot/service.go поле s.ai не используется: нет вызова GenerateSalesReply. Ответы клиенту сейчас формируются локальной логикой:
+
+- AnalyzeCustomerMessage() в internal/bot/analysis.go;
+- handleSalesState() в internal/bot/service.go;
+- готовые тексты из internal/bot/prompts.go;
+- правила квалификации из internal/bot/qualification.go.
+
+То есть по текущему коду бот не отправляет диалог в OpenAI для генерации ответа. OpenAI-клиент остался в проекте и может быть подключён позже, но сейчас основной боевой поток работает без него.
+
+Конфигурация
+------------
+
+Конфигурация читается из .env функцией config.Load().
+
+Обязательные и важные переменные:
+
+- GREEN_API_URL - базовый API endpoint GreenAPI.
+- GREEN_MEDIA_API_URL - media endpoint GreenAPI для загрузки файлов.
+- GREEN_ID_INSTANCE - ID инстанса GreenAPI.
+- GREEN_API_TOKEN - токен GreenAPI.
+- OPENAI_API_KEY - сейчас требуется конфигом, но активный бот OpenAI не вызывает.
+- OPENAI_MODEL - модель OpenAI, сейчас не используется активным потоком.
+- OPENAI_TEMPERATURE - температура OpenAI, сейчас не используется активным потоком.
+- DATABASE_PATH - путь к SQLite файлу, например ./data/stone.sqlite3.
+- PORTFOLIO_VIDEO_DIR - папка с видео, например ./video.
+- PORTFOLIO_TEST_URL, PORTFOLIO_BASIC_URL, PORTFOLIO_STANDARD_URL - опциональные ссылки на портфолио по пакетам.
+- RECEIVE_TIMEOUT_SECONDS - long polling timeout для receiveNotification.
+- HTTP_CLIENT_TIMEOUT_SECONDS - timeout HTTP клиента.
+- BOT_REPLY_LANGUAGE_MODE - auto, ru, kk или en.
+- BOT_AUTO_REPLY_ENABLED - главный рубильник. Если false, polling не запускается и клиентам ничего не отправляется.
+- BOT_MAX_MESSAGE_AGE_SECONDS - максимальный возраст сообщения, чтобы не отвечать на старую очередь.
+- OWNER_WA_CHAT_ID, ADMIN_CHAT_IDS - WhatsApp chatID менеджеров, которым отправляется qualified lead.
+- APP_ENV - окружение для логгера.
+
+Безопасный режим:
+
+Если BOT_AUTO_REPLY_ENABLED=false, приложение создаст конфиг, клиентов и store, проверит видео, напишет warning и завершится без polling. Это защита от случайной рассылки клиентам.
+
+Запуск приложения
+-----------------
+
+Локально:
+
+1. Создать .env из .env.example.
+2. Заполнить реальные значения.
+3. Запустить:
+
+   set -a
+   source .env
+   set +a
+   go run ./cmd
+
+Проверка:
+
+   go test ./...
+   go build ./...
+
+Docker:
+
+   docker compose up --build
+
+Dockerfile собирает бинарь ./cmd и копирует папку video внутрь контейнера.
+
+Как бот получает сообщения
+--------------------------
+
+Активный режим - GreenAPI long polling, не webhook.
+
+В cmd/main.go:
+
+1. main() загружает конфиг.
+2. Создаёт greenapi.Client.
+3. Создаёт openai.Client, хотя сейчас он не вызывается в active flow.
+4. Создаёт ConversationStore через NewSQLiteConversationStore().
+5. Создаёт bot.Service.
+6. Проверяет наличие ожидаемых видеофайлов.
+7. Если BOT_AUTO_REPLY_ENABLED=true, запускает runPolling().
+
+runPolling() делает бесконечный цикл:
+
+1. greenClient.ReceiveNotification(ctx).
+2. Если GreenAPI вернул пустой ответ/null - цикл продолжается.
+3. Если ошибка - логирует warning и делает backoff от 1 до 10 секунд.
+4. Если уведомление есть - передаёт его в processNotification().
+
+Что делает processNotification()
+--------------------------------
+
+processNotification() - первый важный фильтр и дедупликация.
+
+Порядок:
+
+1. Берёт receiptID и messageID из GreenAPI notification.
+2. Через shouldProcessNotification() проверяет:
+   - auto reply включён;
+   - notification не nil;
+   - typeWebhook == incomingMessageReceived;
+   - timestamp есть;
+   - сообщение не старше startup grace period;
+   - сообщение не старше BOT_MAX_MESSAGE_AGE_SECONDS;
+   - тип сообщения textMessage или extendedTextMessage;
+   - chatID не пустой;
+   - text не пустой.
+3. Если уведомление не подходит, оно удаляется из GreenAPI очереди без ответа.
+4. Если подходит, строится dedupe key:
+   - если есть GreenAPI idMessage: chatID + "|" + idMessage;
+   - если idMessage пустой: fallback ключ из chatID + timestamp + hash текста.
+5. Вызывается conversationStore.BeginIncomingMessageProcessing().
+6. Если решение duplicate или in_flight - сообщение пропускается, receipt удаляется.
+7. Если new - создаётся bot.IncomingMessage и вызывается botService.HandleIncomingMessage().
+8. Если обработка прошла успешно:
+   - FinishMessageProcessing(..., true) помечает message processed;
+   - MarkProcessedMessage() обновляет conversation.LastProcessedMessageID;
+   - receipt удаляется через GreenAPI deleteNotification.
+9. Если отправка/обработка упала, receipt не удаляется, чтобы GreenAPI мог повторить доставку.
+
+Почему receipt удаляется не всегда
+----------------------------------
+
+deleteNotification вызывается только после успешной обработки или безопасного skip. Если бот не смог отправить ответ клиенту или произошла ошибка обработки, notification остаётся в очереди GreenAPI. Это сделано для повторной доставки.
+
+Какие сообщения принимаются
+---------------------------
+
+Принимаются только:
+
+- typeWebhook: incomingMessageReceived;
+- typeMessage: textMessage или extendedTextMessage;
+- свежие сообщения по timestamp;
+- сообщения с непустым chatID;
+- сообщения с непустым текстом.
+
+Файлы, картинки, audio и другие типы в GreenAPI polling path сейчас не обрабатываются как входящий диалог. Для них shouldProcessNotification() вернёт unsupported_message_type, и notification будет удалён без ответа.
+
+Как устроен chatID
+------------------
+
+GreenAPI chatID выглядит как:
+
+   77000000000@c.us
+
+В БД отдельно сохраняется:
+
+- chat_id - полный chatID;
+- phone - часть до @, извлекается функцией phoneFromChatID().
+
+Для логов реальный chatID не печатается напрямую. Используется короткий hash через ChatFingerprintForLog().
+
+Как бот обрабатывает текст клиента
+----------------------------------
+
+Основной метод:
+
+   Service.ProcessIncomingWhatsAppMessage(ctx, msg)
+
+Порядок внутри:
+
+1. Проверяет chatID.
+2. Берёт per-chat lock, чтобы два сообщения одного клиента не обрабатывались параллельно.
+3. Если сообщение пришло без DedupeKey, но с IDMessage, делает standalone дедупликацию.
+4. Если есть senderName, сохраняет DisplayName и Lead.ClientName.
+5. Берёт Snapshot разговора из store.
+6. Если язык ещё не задан:
+   - BOT_REPLY_LANGUAGE_MODE=ru/kk/en принудительно задаёт язык;
+   - BOT_REPLY_LANGUAGE_MODE=auto определяет язык по тексту;
+   - по умолчанию ru.
+7. Сохраняет входящий текст в историю conversation.Messages как role=user.
+8. Обновляет LastIncomingText и LastIncomingAt.
+9. Если разговор уже передан менеджеру или automation closed, новое входящее сообщение сохраняется, но бот не отвечает.
+10. AnalyzeCustomerMessage() извлекает из текста intent и данные лида.
+11. Lead.ApplyAnalysis() обновляет LeadState.
+12. store.UpdateLead() сохраняет обновлённого лида.
+13. handleSalesState() выбирает следующий ответ и stage.
+
+Что извлекается из сообщения клиента
+------------------------------------
+
+AnalyzeCustomerMessage() умеет вытаскивать:
+
+- niche - ниша/сфера бизнеса;
+- goal - цель ролика: заявки, продажи, узнаваемость и т.п.;
+- platforms/platform - Instagram, TikTok, Facebook, WhatsApp, сайт;
+- deadline - сроки запуска;
+- previous_ai_ads / ai_experience - был ли опыт с AI роликами;
+- budget - бюджет;
+- target_audience - аудитория;
+- selected_level - выбранный уровень пакета 1/2/3;
+- package_interest - test/basic/standard/needs_manager_recommendation;
+- wants_questionnaire - хочет анкету/готов продолжить;
+- intent.
+
+Основные intent:
+
+- greeting - приветствие;
+- answer - ответ с полезной информацией;
+- portfolio_request - просит примеры/портфолио/видео;
+- price_question - спрашивает цену;
+- package_question - спрашивает конкретный пакет;
+- package_selection - выбирает пакет;
+- agreement - согласие;
+- refusal - отказ;
+- ready_to_order - готов заказать/открыть анкету;
+- objection - возражение, например дорого;
+- negative_reaction - негативная реакция;
+- brief_answer - ответ на бриф;
+- human_request - просит менеджера/оператора;
+- mute - просит не писать;
+- other - нераспознанное.
+
+Состояния клиента
+-----------------
+
+Основные client state:
+
+- neutral_new - новый чат, ещё не начата квалификация.
+- awaiting_qualification - бот ждёт нишу, цель, сроки.
+- packages_presented - портфолио/пакеты уже показаны.
+- awaiting_questionnaire_confirmation - предложена анкета, ждём подтверждение.
+- handed_off - лид передан менеджеру, автоматизация закрыта.
+- stopped - бот остановил общение.
+- opt_out - клиент отказался/попросил не писать.
+
+Также есть старые/дополнительные stage:
+
+- new_lead;
+- qualification;
+- platform_detected;
+- ai_experience_checked;
+- package_suggested;
+- package_selected;
+- portfolio_sent;
+- brief_requested;
+- brief_collected;
+- handoff_required;
+- muted;
+- diagnosis;
+- offer;
+- portfolio;
+- objection;
+- closing;
+- offtopic.
+
+В SQLite в колонке state сохраняется результат clientStateForConversation(), то есть нормализованное состояние для клиента.
+
+Логика воронки
+--------------
+
+1. Новый клиент
+
+Если conversation в состоянии neutral_new, бот отправляет QualificationGreetingText():
+
+- приветствие;
+- коротко говорит, что Stone production делает ИИ-рекламные ролики за 48 часов;
+- цена от 35 000 тг;
+- просит нишу, цель и сроки.
+
+После отправки stage становится awaiting_qualification.
+
+2. Квалификация
+
+В awaiting_qualification бот проверяет обязательные поля:
+
+- niche;
+- goal;
+- deadline.
+
+Если данных мало, бот задаёт уточняющий вопрос. Если есть сигнал квалификации, бот переходит к показу портфолио и пакетов.
+
+3. Портфолио и пакеты
+
+presentPortfolioAndPackages():
+
+- если у клиента первый запуск/тестовый запрос, может рекомендовать Test;
+- если в конфиге есть PORTFOLIO_*_URL, отправляет ссылки;
+- если ссылок нет, отправляет intro text и видеофайлы из ./video:
+  - video_level_1.mp4;
+  - video_level_2.mp4;
+  - video_level_3.mp4;
+- затем отправляет packageOptionsText() с пакетами:
+  - Test - 35 000 тг;
+  - Basic - 50 000 тг;
+  - Standard - 75 000 тг.
+
+После этого stage становится packages_presented.
+
+4. Работа с вопросами по пакетам
+
+В packages_presented бот реагирует на:
+
+- запрос менеджера - sendHumanHandoff();
+- выбор пакета - sendQuestionnaireAndHandoff();
+- готовность заказать - sendQuestionnaireAndHandoff();
+- просьбу примеров - либо напоминает, что уже отправлял, либо отправляет видео;
+- вопрос цены - отвечает по конкретному пакету или общим reminder;
+- возражение дорого - ObjectionText();
+- off-topic - OfftopicText();
+- неясный ответ - packagesPresentedFallbackText().
+
+5. Анкета и передача менеджеру
+
+Перед передачей менеджеру обязательно проверяется managerQualificationForConversation().
+
+Для qualified lead нужны:
+
+- валидная niche;
+- валидная goal;
+- валидный deadline;
+- валидный package_interest/selected_package:
+  - test;
+  - basic;
+  - standard;
+  - needs_manager_recommendation.
+
+Если клиент просит менеджера или анкету, но полей не хватает, бот не передаёт менеджеру сразу. Он сохраняет WantsQuestionnaire=true и спрашивает только недостающие поля.
+
+Когда всё готово:
+
+- sendQuestionnaireAndHandoff() отправляет выбранное видео при наличии пакета;
+- отправляет BriefText или BriefTextForPackage;
+- stage переводится в handed_off;
+- QuestionnaireSent=true;
+- Lead.BriefRequested=true;
+- notifyAdminsIfNeeded() отправляет менеджеру резюме лида.
+
+6. После передачи менеджеру
+
+Когда conversation.HandedOffToOwner=true, AutomationClosed=true или TransferredAt заполнен:
+
+- входящие сообщения клиента продолжают сохраняться;
+- автоматических ответов клиенту больше нет;
+- бот не начинает воронку заново.
+
+Это защищает от ситуации, когда менеджер уже подключился, а бот снова пишет клиенту.
+
+Как отправляются ответы
+-----------------------
+
+Все обычные текстовые ответы идут через:
+
+   Service.sendAndRemember()
+
+Порядок:
+
+1. Проверяет, что automation не закрыта.
+2. Проверяет duplicate reply window: не отправлял ли такой же текст в последние 2 минуты.
+3. Вызывает GreenAPI SendMessage().
+4. Сохраняет исходящее сообщение в whatsapp_messages через LogOutgoingMessage().
+5. Обновляет LastReplyText и LastReplyAt.
+6. Добавляет сообщение в conversation.Messages как role=assistant.
+7. Помечает asked_fields.
+8. Обновляет state через UpdateState().
+9. Проверяет, нужно ли уведомить админов/менеджеров.
+
+Видео отправляются через:
+
+   Service.sendVideos()
+
+Порядок:
+
+1. Проверяет, что automation не закрыта.
+2. Дедуплицирует список видео.
+3. Проверяет ShouldSendVideo(), чтобы не отправлять одно и то же повторно без явной просьбы.
+4. Проверяет наличие файла в PORTFOLIO_VIDEO_DIR.
+5. Отправляет файл через GreenAPI SendFileByUpload().
+6. Логирует исходящее file-сообщение в whatsapp_messages.
+7. Помечает файл как отправленный через MarkVideoSent().
+
+Между несколькими видео есть задержка videoSendDelay = 1500 ms.
+
+Как уведомляется менеджер
+-------------------------
+
+Менеджеры берутся из:
+
+- OWNER_WA_CHAT_ID;
+- ADMIN_CHAT_IDS.
+
+Оба поля приводятся к WhatsApp chatID. Например 77000000000 превращается в 77000000000@c.us.
+
+notifyAdminsIfNeeded() срабатывает только на stage:
+
+- handoff_required;
+- brief_collected;
+- handed_off.
+
+Перед отправкой менеджеру бот снова проверяет, что лид полный. Если не полный, уведомление менеджеру не отправляется, а conversation возвращается в активное состояние, чтобы добрать поля.
+
+Сообщение менеджеру содержит:
+
+- имя, если известно;
+- телефон;
+- chatID клиента;
+- niche;
+- goal;
+- deadline;
+- interested package;
+- client intent;
+- последнее сообщение клиента;
+- conversation summary;
+- ссылку wa.me.
+
+Чтобы не спамить менеджеру, есть отдельные флаги:
+
+- AdminNotifiedAt;
+- AdminOperatorNotifiedAt.
+
+Обычный qualified lead и прямой operator request учитываются отдельно.
+
+Как устроено сохранение в SQLite
+--------------------------------
+
+SQLite store создаётся здесь:
+
+   bot.NewSQLiteConversationStore(context.Background(), cfg.Database.Path)
+
+Порядок инициализации:
+
+1. Проверяется путь DATABASE_PATH.
+2. Создаётся директория под БД, если нужно.
+3. Открывается sql.Open("sqlite", path).
+4. db.SetMaxOpenConns(1), чтобы SQLite работал через одно соединение.
+5. Выполняются миграции.
+6. Из таблицы whatsapp_clients загружаются сохранённые conversations в память.
+
+Важно: ConversationStore хранит состояние и в памяти, и в SQLite. На каждом Update/Append/Mark* состояние persistится в SQLite.
+
+Таблица whatsapp_clients
+------------------------
+
+Главная таблица состояния клиента. Создаётся в sqlite_store.go.
+
+Поля:
+
+- id - autoincrement primary key.
+- chat_id - WhatsApp chatID, уникальный.
+- phone - телефон из chatID.
+- display_name - имя отправителя из GreenAPI.
+- first_seen_at - первое появление клиента.
+- last_seen_at - последняя активность.
+- last_incoming_at - время последнего входящего сообщения.
+- last_outgoing_at - время последнего исходящего ответа.
+- state - текущее состояние воронки.
+- lead_status - статус лида.
+- language - ru/kk/en.
+- niche - ниша клиента.
+- goal - цель.
+- deadline - срок запуска.
+- selected_package - test/basic/standard/needs_manager_recommendation.
+- initial_message_sent - отправлялось ли приветствие.
+- portfolio_sent - отправлялось ли портфолио/видео.
+- packages_sent - отправлялись ли пакеты.
+- questionnaire_offer_sent - предлагалась ли анкета.
+- questionnaire_sent - отправлялся ли бриф/анкета.
+- handed_off_to_owner - передан ли менеджеру.
+- wants_questionnaire - хочет ли клиент анкету/продолжение.
+- automation_closed - закрыта ли автоматизация.
+- stopped - остановлена ли автоматизация.
+- opt_out - клиент отказался/попросил не писать.
+- last_processed_message_id - последний обработанный dedupe/message ID.
+- conversation_summary - короткое резюме лида.
+- missing_fields_json - JSON массив недостающих полей.
+- transferred_at - время передачи менеджеру.
+- conversation_json - полный JSON снимок структуры Conversation.
+- created_at - время создания записи.
+- updated_at - время последнего обновления.
+
+Зачем есть и отдельные колонки, и conversation_json:
+
+- отдельные колонки удобны для быстрых выборок, отчётов и просмотра лидов;
+- conversation_json сохраняет полный объект Conversation, включая историю, карты флагов, sent video files, asked/completed fields и служебные поля.
+
+При старте loadConversations() читает chat_id и conversation_json. Если JSON валидный, он восстанавливает полное состояние клиента. Если JSON повреждён/пустой, создаётся минимальная Conversation с этим chatID.
+
+Таблица whatsapp_messages
+-------------------------
+
+Журнал входящих и исходящих сообщений.
+
+Поля:
+
+- id - autoincrement primary key.
+- chat_id - WhatsApp chatID.
+- green_api_message_id - idMessage из GreenAPI для входящих.
+- dedupe_key - уникальный ключ дедупликации.
+- direction - incoming или outgoing.
+- message_type - text, file или GreenAPI typeMessage.
+- text - текст сообщения или caption файла.
+- raw_payload_json - сырой JSON GreenAPI notification для входящих.
+- processed_at - когда входящее сообщение успешно обработано.
+- created_at - когда запись создана.
+
+Индексы:
+
+- unique idx_whatsapp_messages_dedupe_key по dedupe_key;
+- unique idx_whatsapp_messages_green_api_message_id по green_api_message_id, если он не пустой;
+- idx_whatsapp_messages_chat_created по chat_id, created_at.
+
+Как сохраняется входящее сообщение
+----------------------------------
+
+В processNotification() вызывается:
+
+   BeginIncomingMessageProcessing(ctx, WhatsAppMessageLog{...})
+
+Если SQLite включён:
+
+1. Нормализуется DedupeKey.
+2. Проверяется in-memory processed map.
+3. Проверяется in-memory processing map.
+4. messageAlreadyProcessed() смотрит whatsapp_messages:
+   - по dedupe_key;
+   - или по green_api_message_id.
+5. Если processed_at уже заполнен, сообщение считается duplicate.
+6. Если новое:
+   - создаётся/обновляется conversation в whatsapp_clients;
+   - upsertIncomingMessage() пишет запись в whatsapp_messages с direction='incoming' и processed_at=NULL;
+   - dedupe_key кладётся в processing map.
+
+После успешного ответа:
+
+   FinishMessageProcessing(ctx, dedupeKey, true)
+
+делает:
+
+- удаляет ключ из processing;
+- добавляет ключ в processed map;
+- markMessageProcessedLocked() обновляет whatsapp_messages.processed_at.
+
+Если обработка неуспешна:
+
+- processed_at не ставится;
+- notification не удаляется из GreenAPI;
+- GreenAPI сможет доставить сообщение повторно.
+
+Как сохраняется исходящее сообщение
+-----------------------------------
+
+Для текста:
+
+1. sendAndRemember() вызывает GreenAPI SendMessage().
+2. После успешной отправки вызывает LogOutgoingMessage(chatID, "text", message).
+3. LogOutgoingMessage() вставляет запись:
+   - direction='outgoing';
+   - green_api_message_id='';
+   - dedupe_key формата out|chatID|unixnano|hash;
+   - message_type='text';
+   - text=message;
+   - processed_at=created_at=now.
+
+Для видео:
+
+1. sendVideos() вызывает GreenAPI SendFileByUpload().
+2. После успешной отправки вызывает LogOutgoingMessage(chatID, "file", caption).
+3. Затем MarkVideoSent() обновляет состояние conversation:
+   - SentVideoFiles[fileName]=now;
+   - SentVideos[level]=true;
+   - Lead.PortfolioSent=true;
+   - SentPortfolio=true.
+
+Как сохраняется состояние клиента
+---------------------------------
+
+ConversationStore обновляет состояние через методы:
+
+- Update();
+- MarkIncoming();
+- MarkAskedFields();
+- AppendMessage();
+- UpdateState();
+- UpdateLead();
+- UpdateLanguage();
+- MarkReplySent();
+- MarkVideoSent();
+- MarkAdminNotified();
+- MarkAdminOperatorNotified();
+- MarkProcessedMessage().
+
+Почти каждый метод делает:
+
+1. Берёт lock.
+2. Достаёт conversation через getOrCreateLocked().
+3. Обновляет нужные поля.
+4. Вызывает refreshConversationDerivedState().
+5. Ставит UpdatedAt/LastUpdated.
+6. Вызывает persistConversationLocked().
+
+persistConversationLocked() делает INSERT INTO whatsapp_clients ... ON CONFLICT(chat_id) DO UPDATE.
+
+То есть запись по одному клиенту всегда upsertится по chat_id.
+
+Что хранится в Conversation
+---------------------------
+
+Основные поля Conversation:
+
+- ChatID, Phone, DisplayName;
+- Language;
+- Stage;
+- LeadStatus;
+- Lead - структура LeadState;
+- Messages - последние сообщения диалога, ограничены historyLimit=10;
+- ProcessedMessageIDs - обработанные message/dedupe IDs;
+- LastIncomingText/At;
+- LastReplyText/At;
+- AskedFields;
+- CompletedFields;
+- SentVideos;
+- SentVideoFiles;
+- SentPortfolio;
+- BriefAsked;
+- BriefCollected;
+- InitialMessageSent;
+- PackagesSent;
+- QuestionnaireOfferSent;
+- QuestionnaireSent;
+- HandedOffToOwner;
+- WantsQuestionnaire;
+- AutomationClosed;
+- Stopped;
+- OptOut;
+- LastProcessedMessageID;
+- AdminNotifiedAt;
+- AdminOperatorNotifiedAt;
+- TransferredAt;
+- ConversationSummary;
+- MissingFields;
+- SelectedLevel;
+- CreatedAt;
+- UpdatedAt;
+- LastUpdated.
+
+Что хранится в LeadState
+------------------------
+
+LeadState:
+
+- HasBeenGreeted;
+- Niche;
+- Goal;
+- Platform;
+- Platforms;
+- Deadline;
+- PreviousAIAds;
+- AIExperience;
+- Budget;
+- PriceInterest;
+- SelectedPackage;
+- WantsQuestionnaire;
+- ClientName;
+- TargetAudience;
+- Notes;
+- FreeText;
+- PortfolioSent;
+- OfferSent;
+- BriefRequested;
+- BriefCompleted;
+- ContactBriefReady;
+- LeadStatus.
+
+LeadStatus
+----------
+
+Возможные lead_status:
+
+- neutral - нет активной квалификации;
+- new - новый лид;
+- warm - тёплый: есть часть данных, портфолио или оффер;
+- hot - горячий: выбран пакет или клиент хочет продолжить;
+- handoff_required - нужно передать менеджеру;
+- closed - отказ/закрыт;
+- muted - не писать автоматически.
+
+refreshLeadStatus() пересчитывает статус на основе полей лида и stage.
+
+Дедупликация
+------------
+
+Есть два уровня дедупликации.
+
+1. In-memory:
+
+- processed map хранит успешно обработанные dedupe/message IDs;
+- processing map хранит сообщения, которые сейчас обрабатываются;
+- messageTTL = 24 часа;
+- cleanupLocked() чистит старые записи.
+
+2. SQLite:
+
+- whatsapp_messages.dedupe_key уникальный;
+- green_api_message_id уникальный, если заполнен;
+- processed_at показывает, что сообщение уже успешно обработано.
+
+Решения дедупликации:
+
+- no_id - нет ключа, дедупликация невозможна;
+- new - новое сообщение, можно обрабатывать;
+- duplicate - уже обработано;
+- in_flight - сейчас обрабатывается.
+
+Защита от повторных ответов
+---------------------------
+
+Даже если новое сообщение привело к тому же тексту ответа, sendAndRemember() проверяет RecentlySentReply() за окно 2 минуты. Если такой же текст уже отправлялся недавно:
+
+- повторно клиенту не отправляет;
+- state и asked_fields всё равно обновляет;
+- уведомление менеджеру при необходимости всё равно проверяет.
+
+Защита от старых сообщений
+--------------------------
+
+shouldProcessNotification() отбрасывает:
+
+- сообщения старше BOT_MAX_MESSAGE_AGE_SECONDS;
+- сообщения, которые старше времени старта сервиса минус startupGracePeriod.
+
+startupGracePeriod = 2 минуты. Это защита от старой очереди GreenAPI после рестарта.
+
+Видео и портфолио
+-----------------
+
+Ожидаемые файлы:
+
+- video/video_level_1.mp4 - Test;
+- video/video_level_2.mp4 - Basic;
+- video/video_level_3.mp4 - Standard.
+
+На старте checkPortfolioVideos() проверяет наличие этих файлов и пишет warning, если чего-то нет.
+
+Если в .env заданы PORTFOLIO_TEST_URL/PORTFOLIO_BASIC_URL/PORTFOLIO_STANDARD_URL, бот может отправлять ссылки. Если ссылок нет, использует локальные видео.
+
+Повторная отправка видео:
+
+- по умолчанию не отправляет файл повторно, если он уже был отправлен этому chatID;
+- если клиент явно просит "ещё раз", "повторно", "again" и т.п., allowRepeat=true.
+
+Legacy Meta webhook
+-------------------
+
+В проекте есть старый HTTP/Meta путь:
+
+- internal/http/router.go;
+- internal/http/handler/webhook.go;
+- internal/meta/client.go;
+- internal/bot/manager.go;
+- internal/storage/memory.go.
+
+Он умеет:
+
+- GET /webhook для Meta verify challenge;
+- POST /webhook для Meta WhatsApp webhook;
+- проверять X-Hub-Signature-256;
+- вытаскивать text messages;
+- отвечать через Meta API.
+
+Но текущий cmd/main.go не создаёт HTTP router и не запускает HTTP server. Поэтому в боевом запуске через go run ./cmd этот путь не используется. Актуальная интеграция - GreenAPI polling.
+
+Как посмотреть данные в SQLite
+------------------------------
+
+Если DATABASE_PATH=./data/stone.sqlite3:
+
+   sqlite3 ./data/stone.sqlite3
+
+Полезные команды:
+
+   .tables
+   .schema whatsapp_clients
+   .schema whatsapp_messages
+
+Посмотреть клиентов:
+
+   SELECT chat_id, phone, display_name, state, lead_status, language, niche, goal, deadline, selected_package, updated_at
+   FROM whatsapp_clients
+   ORDER BY updated_at DESC;
+
+Посмотреть сообщения конкретного клиента:
+
+   SELECT direction, message_type, text, processed_at, created_at
+   FROM whatsapp_messages
+   WHERE chat_id = '77000000000@c.us'
+   ORDER BY created_at;
+
+Посмотреть лидов, переданных менеджеру:
+
+   SELECT chat_id, phone, niche, goal, deadline, selected_package, transferred_at
+   FROM whatsapp_clients
+   WHERE handed_off_to_owner = 1
+   ORDER BY transferred_at DESC;
+
+Посмотреть неполные лиды:
+
+   SELECT chat_id, state, missing_fields_json, conversation_summary, updated_at
+   FROM whatsapp_clients
+   WHERE missing_fields_json <> '[]'
+   ORDER BY updated_at DESC;
+
+Типичный путь одного клиента
+----------------------------
+
+Пример:
+
+1. Клиент пишет: "Здравствуйте".
+2. GreenAPI отдаёт notification.
+3. processNotification() принимает его, пишет incoming в whatsapp_messages.
+4. Conversation создаётся в whatsapp_clients:
+   - state=neutral_new;
+   - lead_status=neutral/new;
+   - language=ru.
+5. Service отправляет приветствие с вопросами про нишу/цель/сроки.
+6. В БД:
+   - whatsapp_messages получает outgoing text;
+   - whatsapp_clients обновляется: state=awaiting_qualification, initial_message_sent=1.
+7. Клиент пишет: "Салон красоты, нужны заявки в Instagram на этой неделе".
+8. AnalyzeCustomerMessage() извлекает:
+   - niche=салон красоты;
+   - goal=получать заявки;
+   - platform=Instagram;
+   - deadline=на этой неделе.
+9. Store сохраняет LeadState.
+10. Бот отправляет портфолио/видео и пакеты.
+11. whatsapp_clients обновляется:
+   - state=packages_presented;
+   - portfolio_sent=1;
+   - packages_sent=1;
+   - lead_status=warm.
+12. Клиент пишет: "Берём basic".
+13. Анализ определяет selected_package=basic.
+14. Если все обязательные поля есть, бот отправляет бриф и переводит в handed_off.
+15. Менеджеру уходит сообщение "New qualified WhatsApp lead".
+16. whatsapp_clients обновляется:
+   - state=handed_off;
+   - lead_status=handoff_required;
+   - selected_package=basic;
+   - questionnaire_sent=1;
+   - handed_off_to_owner=1;
+   - automation_closed=1;
+   - stopped=1;
+   - transferred_at заполнен.
+17. Дальше клиент может писать в чат, сообщения сохраняются, но бот больше не отвечает.
+
+Что будет при рестарте
+----------------------
+
+На старте NewSQLiteConversationStore() вызывает loadConversations().
+
+Это означает:
+
+- состояние клиентов восстанавливается из whatsapp_clients.conversation_json;
+- бот не начинает диалог заново для существующего chatID;
+- дедупликация сообщений переживает рестарт через whatsapp_messages.processed_at;
+- если клиент уже handed_off/automation_closed, после рестарта автоматические ответы не возобновятся.
+
+Тестами это покрыто:
+
+- TestSQLiteRestartContinuesSavedState;
+- TestSQLiteMessageDedupeSurvivesRestart;
+- TestExistingProcessedClientContinuesFromSavedState.
+
+Логи
+----
+
+Логгер zap создаётся в internal/logger.
+
+В логах важные события:
+
+- stone greenapi bot started;
+- receiveNotification failed;
+- incoming notification accepted;
+- incoming message dedupe decision;
+- incoming text analyzed;
+- whatsapp reply sent;
+- portfolio video sent;
+- admin notification sent;
+- incoming message processing completed;
+- deleteNotification failed;
+- storage close failed.
+
+Для приватности chatID логируется как hash, а не полный номер.
+
+Что важно при эксплуатации
+--------------------------
+
+1. BOT_AUTO_REPLY_ENABLED должен быть true только когда бот реально должен отвечать клиентам.
+2. GreenAPI incomingWebhook должен быть включён в кабинете/API GreenAPI.
+3. DATABASE_PATH должен указывать на постоянное хранилище. Если контейнер пересоздаётся без volume для ./data, SQLite файл может потеряться.
+4. PORTFOLIO_VIDEO_DIR должен содержать video_level_1.mp4, video_level_2.mp4, video_level_3.mp4, если не используются PORTFOLIO_*_URL.
+5. ADMIN_CHAT_IDS лучше задавать в формате 77000000000@c.us или просто номером, код нормализует.
+6. Если клиент передан менеджеру, бот специально замолкает, чтобы не мешать ручной продаже.
+7. Если отправка ответа упала, GreenAPI receipt не удаляется, и сообщение может прийти повторно.
+8. Если ответ был отправлен, но сохранение в БД упало, обработка считается ошибочной и receipt может не удалиться. В нормальном режиме SQLite должен быть доступен.
+9. Сейчас OpenAI не участвует в генерации ответа, несмотря на наличие конфигурации и клиента.
+
+Краткая схема потока
+--------------------
+
+WhatsApp клиент
+  -> GreenAPI receiveNotification
+  -> cmd/main.go processNotification
+  -> SQLite BeginIncomingMessageProcessing
+  -> bot.Service.ProcessIncomingWhatsAppMessage
+  -> AnalyzeCustomerMessage
+  -> ConversationStore.UpdateLead / UpdateState
+  -> GreenAPI sendMessage или sendFileByUpload
+  -> SQLite LogOutgoingMessage / persistConversationLocked
+  -> GreenAPI deleteNotification
+
+Краткая схема БД
+----------------
+
+whatsapp_clients:
+  одна строка = один WhatsApp chatID и текущее состояние воронки.
+
+whatsapp_messages:
+  много строк = журнал входящих и исходящих сообщений, плюс дедупликация.
+
+conversation_json:
+  полный снимок Conversation, из которого бот восстанавливает состояние после рестарта.
+
+processed_at:
+  если заполнен у incoming сообщения, значит сообщение успешно обработано и повторно отвечать не нужно.
+

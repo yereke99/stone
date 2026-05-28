@@ -63,6 +63,7 @@ type Conversation struct {
 	BriefAsked              bool
 	BriefCollected          bool
 	InitialMessageSent      bool
+	InitialGreetingSentAt   time.Time
 	PackagesSent            bool
 	QuestionnaireOfferSent  bool
 	QuestionnaireSent       bool
@@ -78,6 +79,16 @@ type Conversation struct {
 	ConversationSummary     string
 	MissingFields           []string
 	SelectedLevel           int
+	HistoryCheckedAt        time.Time
+	HistoryDetected         bool
+	HistoryMessageCount     int
+	HistoryClassification   string
+	HistorySummary          string
+	DoNotAutoStart          bool
+	LegacyExisting          bool
+	LegacyProcessed         bool
+	LegacyReengagement      bool
+	AutoPackagesSentAt      time.Time
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	LastUpdated             time.Time
@@ -173,6 +184,21 @@ func (s *ConversationStore) MarkProcessed(ctx context.Context, messageID string)
 	}
 	s.processed[messageID] = now
 	return true, nil
+}
+
+func (s *ConversationStore) ConversationExists(ctx context.Context, chatID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false, nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, exists := s.conversations[chatID]
+	return exists, nil
 }
 
 func (s *ConversationStore) GetOrCreate(chatID string) *Conversation {
@@ -493,6 +519,107 @@ func (s *ConversationStore) Snapshot(ctx context.Context, chatID string) (Conver
 	return cloneConversation(*conversation), nil
 }
 
+func (s *ConversationStore) ApplyHistoryGuardDecision(ctx context.Context, chatID string, decision HistoryGuardDecision) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	if decision.CheckedAt.IsZero() {
+		decision.CheckedAt = now
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	classification := normalizeHistoryClassification(decision.Classification)
+	conversation.HistoryCheckedAt = decision.CheckedAt.UTC()
+	conversation.HistoryDetected = decision.HistoryDetected
+	conversation.HistoryMessageCount = decision.HistoryMessageCount
+	conversation.HistoryClassification = classification
+	conversation.HistorySummary = strings.TrimSpace(decision.Summary)
+	conversation.DoNotAutoStart = decision.DoNotAutoStart
+	conversation.LegacyExisting = classification == HistoryClassificationLegacyExisting
+	conversation.LegacyProcessed = classification == HistoryClassificationLegacyProcessed
+	conversation.LegacyReengagement = classification == HistoryClassificationLegacyReengagement
+	switch classification {
+	case HistoryClassificationLegacyExisting:
+		conversation.Stage = ClientStateLegacyExisting
+	case HistoryClassificationLegacyProcessed:
+		conversation.Stage = ClientStateLegacyProcessed
+	case HistoryClassificationHistoryCheckFailed:
+		conversation.Stage = ClientStateHistoryCheckFailed
+	}
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
+func (s *ConversationStore) MarkAutoPackagesSent(ctx context.Context, chatID string, sentAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	if sentAt.IsZero() {
+		sentAt = time.Now().UTC()
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.AutoPackagesSentAt = sentAt.UTC()
+	conversation.PackagesSent = true
+	conversation.SentPortfolio = true
+	conversation.Lead.OfferSent = true
+	conversation.Lead.PortfolioSent = true
+	conversation.Stage = ClientStatePackagesPresented
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
+func (s *ConversationStore) DelayedPackageCandidates(ctx context.Context, now time.Time, after time.Duration, limit int) ([]Conversation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if after <= 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupLocked(now)
+
+	candidates := make([]Conversation, 0)
+	for _, conversation := range s.conversations {
+		if conversation == nil || !shouldSendDelayedPackages(*conversation, now, after) {
+			continue
+		}
+		candidates = append(candidates, cloneConversation(*conversation))
+		if len(candidates) >= limit {
+			break
+		}
+	}
+	return candidates, nil
+}
+
 func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stage string, selectedLevel int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -507,6 +634,9 @@ func (s *ConversationStore) UpdateState(ctx context.Context, chatID string, stag
 	requestedStage := strings.TrimSpace(stage)
 	if requestedStage != "" {
 		conversation.Stage = requestedStage
+	}
+	if requestedStage == ClientStateAwaitingQualification && conversation.InitialGreetingSentAt.IsZero() {
+		conversation.InitialGreetingSentAt = now
 	}
 	if stageSelectsPackage(requestedStage) && selectedLevel > 0 && selectedLevel <= 3 {
 		conversation.SelectedLevel = selectedLevel

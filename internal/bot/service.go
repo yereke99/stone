@@ -39,6 +39,7 @@ type IncomingMessage struct {
 	QuotedCaption   string
 	QuotedType      string
 	QuotedFileName  string
+	LocalChatKnown  bool
 }
 
 type GreenSender interface {
@@ -60,6 +61,8 @@ type Service struct {
 	adminChatIDs []string
 	logger       *zap.Logger
 	chatLocks    sync.Map
+	historyGuard historyGuardRuntime
+	autoPackages delayedPackageRuntime
 }
 
 func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoDir string, portfolio PortfolioLinks, languageMode string, logger *zap.Logger, adminChatIDs ...string) *Service {
@@ -207,6 +210,15 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if err := s.store.MarkIncoming(ctx, chatID, text); err != nil {
 		return err
 	}
+	if handled, err := s.maybeApplyHistoryGuard(ctx, msg, text, language, conversation); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	conversation, err = s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
 	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.Stage == ClientStateHandedOff {
 		postHandoffAnalysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
 		if shouldAcknowledgePostHandoffBrief(text, language, conversation, postHandoffAnalysis) {
@@ -275,6 +287,14 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		fields := automationSilenceFields(chatID, conversation, "state_machine_stopped")
 		fields = append(fields, zap.String("computed_state", state))
 		s.info("state machine automatic reply stopped", fields...)
+		return nil
+	}
+	if shouldSilenceForStoredHistory(conversation) {
+		s.info("state machine automatic reply stopped by history guard",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("classification", conversation.HistoryClassification),
+			zap.String("computed_state", state),
+		)
 		return nil
 	}
 	if shouldSuppressRapidFollowup(conversation, analysis) {

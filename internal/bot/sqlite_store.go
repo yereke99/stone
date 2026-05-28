@@ -100,6 +100,7 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			deadline TEXT,
 			selected_package TEXT,
 			initial_message_sent INTEGER NOT NULL DEFAULT 0,
+			initial_greeting_sent_at TEXT,
 			portfolio_sent INTEGER NOT NULL DEFAULT 0,
 			packages_sent INTEGER NOT NULL DEFAULT 0,
 			questionnaire_offer_sent INTEGER NOT NULL DEFAULT 0,
@@ -113,6 +114,16 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			conversation_summary TEXT,
 			missing_fields_json TEXT,
 			transferred_at TEXT,
+			history_checked_at TEXT,
+			history_detected INTEGER NOT NULL DEFAULT 0,
+			history_message_count INTEGER NOT NULL DEFAULT 0,
+			history_classification TEXT,
+			history_summary TEXT,
+			do_not_auto_start INTEGER NOT NULL DEFAULT 0,
+			legacy_existing INTEGER NOT NULL DEFAULT 0,
+			legacy_processed INTEGER NOT NULL DEFAULT 0,
+			legacy_reengagement INTEGER NOT NULL DEFAULT 0,
+			auto_packages_sent_at TEXT,
 			conversation_json TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -148,11 +159,22 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 
 func (s *ConversationStore) ensureWhatsAppClientColumns(ctx context.Context) error {
 	columns := map[string]string{
-		"wants_questionnaire":  "INTEGER NOT NULL DEFAULT 0",
-		"automation_closed":    "INTEGER NOT NULL DEFAULT 0",
-		"conversation_summary": "TEXT",
-		"missing_fields_json":  "TEXT",
-		"transferred_at":       "TEXT",
+		"wants_questionnaire":      "INTEGER NOT NULL DEFAULT 0",
+		"automation_closed":        "INTEGER NOT NULL DEFAULT 0",
+		"conversation_summary":     "TEXT",
+		"missing_fields_json":      "TEXT",
+		"transferred_at":           "TEXT",
+		"initial_greeting_sent_at": "TEXT",
+		"history_checked_at":       "TEXT",
+		"history_detected":         "INTEGER NOT NULL DEFAULT 0",
+		"history_message_count":    "INTEGER NOT NULL DEFAULT 0",
+		"history_classification":   "TEXT",
+		"history_summary":          "TEXT",
+		"do_not_auto_start":        "INTEGER NOT NULL DEFAULT 0",
+		"legacy_existing":          "INTEGER NOT NULL DEFAULT 0",
+		"legacy_processed":         "INTEGER NOT NULL DEFAULT 0",
+		"legacy_reengagement":      "INTEGER NOT NULL DEFAULT 0",
+		"auto_packages_sent_at":    "TEXT",
 	}
 
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(whatsapp_clients)`)
@@ -286,10 +308,12 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 	_, err = s.db.ExecContext(ctx, `INSERT INTO whatsapp_clients (
 			chat_id, phone, display_name, first_seen_at, last_seen_at, last_incoming_at, last_outgoing_at,
 			state, lead_status, language, niche, goal, deadline, selected_package,
-			initial_message_sent, portfolio_sent, packages_sent, questionnaire_offer_sent, questionnaire_sent,
+			initial_message_sent, initial_greeting_sent_at, portfolio_sent, packages_sent, questionnaire_offer_sent, questionnaire_sent,
 			handed_off_to_owner, wants_questionnaire, automation_closed, stopped, opt_out, last_processed_message_id,
-			conversation_summary, missing_fields_json, transferred_at, conversation_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			conversation_summary, missing_fields_json, transferred_at, history_checked_at, history_detected,
+			history_message_count, history_classification, history_summary, do_not_auto_start, legacy_existing,
+			legacy_processed, legacy_reengagement, auto_packages_sent_at, conversation_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id) DO UPDATE SET
 			phone = excluded.phone,
 			display_name = excluded.display_name,
@@ -304,6 +328,7 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 			deadline = excluded.deadline,
 			selected_package = excluded.selected_package,
 			initial_message_sent = excluded.initial_message_sent,
+			initial_greeting_sent_at = excluded.initial_greeting_sent_at,
 			portfolio_sent = excluded.portfolio_sent,
 			packages_sent = excluded.packages_sent,
 			questionnaire_offer_sent = excluded.questionnaire_offer_sent,
@@ -317,6 +342,16 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 			conversation_summary = excluded.conversation_summary,
 			missing_fields_json = excluded.missing_fields_json,
 			transferred_at = excluded.transferred_at,
+			history_checked_at = excluded.history_checked_at,
+			history_detected = excluded.history_detected,
+			history_message_count = excluded.history_message_count,
+			history_classification = excluded.history_classification,
+			history_summary = excluded.history_summary,
+			do_not_auto_start = excluded.do_not_auto_start,
+			legacy_existing = excluded.legacy_existing,
+			legacy_processed = excluded.legacy_processed,
+			legacy_reengagement = excluded.legacy_reengagement,
+			auto_packages_sent_at = excluded.auto_packages_sent_at,
 			conversation_json = excluded.conversation_json,
 			updated_at = excluded.updated_at`,
 		conversation.ChatID,
@@ -334,6 +369,7 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 		strings.TrimSpace(conversation.Lead.Deadline),
 		strings.TrimSpace(conversation.Lead.SelectedPackage),
 		boolInt(conversation.InitialMessageSent || conversation.Lead.HasBeenGreeted),
+		timeText(conversation.InitialGreetingSentAt),
 		boolInt(conversation.SentPortfolio || conversation.Lead.PortfolioSent),
 		boolInt(conversation.PackagesSent || conversation.Lead.OfferSent),
 		boolInt(conversation.QuestionnaireOfferSent),
@@ -347,6 +383,16 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 		strings.TrimSpace(conversation.ConversationSummary),
 		missingFieldsJSONString(conversation.MissingFields),
 		timeText(conversation.TransferredAt),
+		timeText(conversation.HistoryCheckedAt),
+		boolInt(conversation.HistoryDetected),
+		conversation.HistoryMessageCount,
+		strings.TrimSpace(conversation.HistoryClassification),
+		strings.TrimSpace(conversation.HistorySummary),
+		boolInt(conversation.DoNotAutoStart),
+		boolInt(conversation.LegacyExisting),
+		boolInt(conversation.LegacyProcessed),
+		boolInt(conversation.LegacyReengagement),
+		timeText(conversation.AutoPackagesSentAt),
 		string(raw),
 		timeText(conversation.CreatedAt),
 		timeText(conversation.UpdatedAt),
@@ -515,7 +561,11 @@ func clientStateForConversation(conversation *Conversation) string {
 		ClientStateAwaitingQuestionnaireConfirm,
 		ClientStateHandedOff,
 		ClientStateStopped,
-		ClientStateOptOut:
+		ClientStateOptOut,
+		ClientStateLegacyExisting,
+		ClientStateLegacyProcessed,
+		ClientStateLegacyReengagement,
+		ClientStateHistoryCheckFailed:
 		return state
 	}
 	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() {

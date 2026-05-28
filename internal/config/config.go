@@ -31,6 +31,8 @@ type Config struct {
 	AppPort               string
 	Meta                  MetaConfig
 	Portfolio             PortfolioConfig
+	HistoryGuard          HistoryGuardConfig
+	NewLeadAutoPackages   NewLeadAutoPackagesConfig
 }
 
 type GreenAPIConfig struct {
@@ -48,6 +50,22 @@ type OpenAIConfig struct {
 
 type DatabaseConfig struct {
 	Path string
+}
+
+type HistoryGuardConfig struct {
+	Enabled              bool
+	LookbackCount        int
+	Timeout              time.Duration
+	FailClosed           bool
+	AIEnabled            bool
+	AIMessageLimit       int
+	AIMaxCharsPerMessage int
+	AIMaxTotalChars      int
+}
+
+type NewLeadAutoPackagesConfig struct {
+	Enabled bool
+	After   time.Duration
 }
 
 // MetaConfig is kept so the previous webhook packages continue to compile.
@@ -118,6 +136,46 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	historyGuardEnabled, err := optionalBool("HISTORY_GUARD_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardLookbackCount, err := optionalPositiveInt("HISTORY_GUARD_LOOKBACK_COUNT", 10)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardTimeoutSeconds, err := optionalPositiveInt("HISTORY_GUARD_TIMEOUT_SECONDS", 8)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardFailClosed, err := optionalBool("HISTORY_GUARD_FAIL_CLOSED", true)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardAIEnabled, err := optionalBool("HISTORY_GUARD_AI_ENABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardAIMessageLimit, err := optionalPositiveInt("HISTORY_GUARD_AI_MESSAGE_LIMIT", 3)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardAIMaxCharsPerMessage, err := optionalPositiveInt("HISTORY_GUARD_AI_MAX_CHARS_PER_MESSAGE", 400)
+	if err != nil {
+		return nil, err
+	}
+	historyGuardAIMaxTotalChars, err := optionalPositiveInt("HISTORY_GUARD_AI_MAX_TOTAL_CHARS", 1200)
+	if err != nil {
+		return nil, err
+	}
+	autoPackagesAfterMinutes, err := optionalPositiveInt("NEW_LEAD_AUTO_PACKAGES_AFTER_MINUTES", 15)
+	if err != nil {
+		return nil, err
+	}
+	autoPackagesEnabled, err := optionalBool("NEW_LEAD_AUTO_PACKAGES_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		GreenAPI: GreenAPIConfig{
@@ -143,6 +201,20 @@ func Load() (*Config, error) {
 		MaxOpenAIOutputTokens: maxOutputTokens,
 		AdminChatIDs:          append(splitCSV(os.Getenv("OWNER_WA_CHAT_ID")), splitCSV(os.Getenv("ADMIN_CHAT_IDS"))...),
 		AppEnv:                required("APP_ENV"),
+		HistoryGuard: HistoryGuardConfig{
+			Enabled:              historyGuardEnabled,
+			LookbackCount:        historyGuardLookbackCount,
+			Timeout:              time.Duration(historyGuardTimeoutSeconds) * time.Second,
+			FailClosed:           historyGuardFailClosed,
+			AIEnabled:            historyGuardAIEnabled,
+			AIMessageLimit:       historyGuardAIMessageLimit,
+			AIMaxCharsPerMessage: historyGuardAIMaxCharsPerMessage,
+			AIMaxTotalChars:      historyGuardAIMaxTotalChars,
+		},
+		NewLeadAutoPackages: NewLeadAutoPackagesConfig{
+			Enabled: autoPackagesEnabled,
+			After:   time.Duration(autoPackagesAfterMinutes) * time.Minute,
+		},
 	}
 	cfg.Env = cfg.AppEnv
 

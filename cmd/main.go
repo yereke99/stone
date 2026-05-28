@@ -93,6 +93,20 @@ func main() {
 		zapLogger,
 		cfg.AdminChatIDs...,
 	)
+	botService.SetHistoryGuard(greenClient, bot.HistoryGuardOptions{
+		Enabled:              cfg.HistoryGuard.Enabled,
+		LookbackCount:        cfg.HistoryGuard.LookbackCount,
+		Timeout:              cfg.HistoryGuard.Timeout,
+		FailClosed:           cfg.HistoryGuard.FailClosed,
+		AIEnabled:            cfg.HistoryGuard.AIEnabled,
+		AIMessageLimit:       cfg.HistoryGuard.AIMessageLimit,
+		AIMaxCharsPerMessage: cfg.HistoryGuard.AIMaxCharsPerMessage,
+		AIMaxTotalChars:      cfg.HistoryGuard.AIMaxTotalChars,
+	})
+	botService.SetDelayedPackageOptions(bot.DelayedPackageOptions{
+		Enabled: cfg.NewLeadAutoPackages.Enabled,
+		After:   cfg.NewLeadAutoPackages.After,
+	})
 
 	checkPortfolioVideos(cfg.PortfolioVideoDir, zapLogger)
 	if !cfg.BotAutoReplyEnabled {
@@ -105,6 +119,7 @@ func main() {
 
 	serviceStartedAt := time.Now().UTC()
 	zapLogger.Info("stone greenapi bot started", zap.String("env", cfg.AppEnv))
+	botService.StartDelayedPackageScheduler(ctx)
 	runPolling(ctx, greenClient, botService, conversationStore, cfg.BotMaxMessageAge, cfg.BotAutoReplyEnabled, serviceStartedAt, zapLogger)
 	zapLogger.Info("application stopped")
 }
@@ -219,6 +234,15 @@ func processNotification(
 		zap.String("quoted_type", notification.QuotedType()),
 	)
 
+	localChatKnown, err := conversationStore.ConversationExists(ctx, chatID)
+	if err != nil {
+		zapLogger.Warn("conversation existence check failed",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+			zap.Error(err),
+		)
+		return
+	}
 	dedupeDecision, err := conversationStore.BeginIncomingMessageProcessing(ctx, bot.WhatsAppMessageLog{
 		ChatID:            chatID,
 		DisplayName:       notification.SenderName(),
@@ -261,6 +285,7 @@ func processNotification(
 		QuotedCaption:   notification.QuotedCaption(),
 		QuotedType:      notification.QuotedType(),
 		QuotedFileName:  notification.QuotedFileName(),
+		LocalChatKnown:  localChatKnown,
 	}
 	if err := botService.HandleIncomingMessage(ctx, msg); err != nil {
 		zapLogger.Warn("incoming message handling failed",

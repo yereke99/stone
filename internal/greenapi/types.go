@@ -68,6 +68,83 @@ type QuotedExtendedTextMessage struct {
 	Title       string `json:"title"`
 }
 
+type ChatHistoryMessage struct {
+	Type                    string                       `json:"type"`
+	IDMessage               string                       `json:"idMessage"`
+	Timestamp               int64                        `json:"timestamp"`
+	TypeMessage             string                       `json:"typeMessage"`
+	ChatID                  string                       `json:"chatId"`
+	TextMessage             string                       `json:"textMessage"`
+	Caption                 string                       `json:"caption"`
+	ExtendedTextMessage     ChatHistoryExtendedText      `json:"extendedTextMessage"`
+	ExtendedTextMessageData ChatHistoryExtendedText      `json:"extendedTextMessageData"`
+	QuotedMessage           ChatHistoryQuotedMessageData `json:"quotedMessage"`
+	DeletedMessageID        string                       `json:"deletedMessageId"`
+	EditedMessageID         string                       `json:"editedMessageId"`
+	IsDeleted               bool                         `json:"isDeleted"`
+	IsEdited                bool                         `json:"isEdited"`
+}
+
+type ChatHistoryExtendedText struct {
+	Text        string `json:"text"`
+	Description string `json:"description"`
+	Title       string `json:"title"`
+	StanzaID    string `json:"stanzaId"`
+	Participant string `json:"participant"`
+}
+
+type ChatHistoryQuotedMessageData struct {
+	StanzaID            string                  `json:"stanzaId"`
+	Participant         string                  `json:"participant"`
+	TypeMessage         string                  `json:"typeMessage"`
+	TextMessage         string                  `json:"textMessage"`
+	Caption             string                  `json:"caption"`
+	FileName            string                  `json:"fileName"`
+	ExtendedTextMessage ChatHistoryExtendedText `json:"extendedTextMessage"`
+}
+
+func (m ChatHistoryMessage) Direction() string {
+	switch strings.TrimSpace(m.Type) {
+	case "incoming":
+		return "incoming"
+	case "outgoing":
+		return "outgoing"
+	default:
+		return ""
+	}
+}
+
+func (m ChatHistoryMessage) Text() string {
+	if text := strings.TrimSpace(m.TextMessage); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.ExtendedTextMessage.Text); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.ExtendedTextMessage.Description); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.ExtendedTextMessage.Title); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.Caption); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.QuotedMessage.TextMessage); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.QuotedMessage.Caption); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.QuotedMessage.ExtendedTextMessage.Text); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(m.QuotedMessage.ExtendedTextMessage.Description); text != "" {
+		return text
+	}
+	return strings.TrimSpace(m.QuotedMessage.ExtendedTextMessage.Title)
+}
+
 func (n *Notification) IsIncomingMessage() bool {
 	return n != nil && n.Body.TypeWebhook == TypeWebhookIncomingMessage
 }

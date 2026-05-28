@@ -47,6 +47,10 @@ const (
 	ClientStateHandedOff                    = "handed_off"
 	ClientStateStopped                      = "stopped"
 	ClientStateOptOut                       = "opt_out"
+	ClientStateLegacyExisting               = "legacy_existing"
+	ClientStateLegacyProcessed              = "legacy_processed"
+	ClientStateLegacyReengagement           = "legacy_reengagement"
+	ClientStateHistoryCheckFailed           = "history_check_failed"
 )
 
 const (

@@ -107,6 +107,61 @@ func (c *Client) DeleteNotification(ctx context.Context, receiptID int) error {
 	return nil
 }
 
+func (c *Client) GetChatHistory(ctx context.Context, chatID string, count int) ([]ChatHistoryMessage, error) {
+	payload := struct {
+		ChatID string `json:"chatId"`
+		Count  int    `json:"count,omitempty"`
+	}{
+		ChatID: strings.TrimSpace(chatID),
+		Count:  count,
+	}
+	if payload.ChatID == "" {
+		return nil, fmt.Errorf("chat id is required")
+	}
+	if payload.Count <= 0 {
+		payload.Count = 0
+	}
+
+	requestBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal getChatHistory payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/waInstance%s/getChatHistory/%s", c.apiURL, c.idInstance, c.apiToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("create getChatHistory request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call getChatHistory: %w", err)
+	}
+	defer closeBody(resp.Body)
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read getChatHistory response: %w", err)
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if len(data) > maxErrorBodyBytes {
+			data = data[:maxErrorBodyBytes]
+		}
+		return nil, c.statusError("getChatHistory", resp.StatusCode, data)
+	}
+
+	if strings.TrimSpace(string(data)) == "" {
+		return []ChatHistoryMessage{}, nil
+	}
+	var messages []ChatHistoryMessage
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return nil, fmt.Errorf("decode getChatHistory response: %w", err)
+	}
+	return messages, nil
+}
+
 func (c *Client) SendMessage(ctx context.Context, chatID string, message string) error {
 	payload := map[string]string{
 		"chatId":  strings.TrimSpace(chatID),

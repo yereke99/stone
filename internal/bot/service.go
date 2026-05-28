@@ -243,6 +243,9 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		analysis.PackageInterest = stringPointer(replyPackage)
 		analysis.Intent = IntentPackageSelection
 	}
+	if conversationIsWaitingForBrief(conversation) {
+		analysis = normalizeBriefRequestedAnalysis(text, analysis, conversation)
+	}
 	if isBriefAnswerForConversation(text, analysis, conversation) {
 		analysis.Intent = IntentBriefAnswer
 	}
@@ -1720,6 +1723,10 @@ func selectedLevelFromConversation(conversation Conversation) int {
 	}
 }
 
+func conversationIsWaitingForBrief(conversation Conversation) bool {
+	return conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested
+}
+
 func isPackageSuggestionStage(stage string) bool {
 	switch stage {
 	case StagePackageSuggested, StageOffer, StageAIExperienceChecked:
@@ -1729,8 +1736,53 @@ func isPackageSuggestionStage(stage string) bool {
 	}
 }
 
+func normalizeBriefRequestedAnalysis(text string, analysis CustomerAnalysis, conversation Conversation) CustomerAnalysis {
+	if !conversationIsWaitingForBrief(conversation) {
+		return analysis
+	}
+	if isExplicitOptOutText(text) || analysis.Intent == IntentMute || analysis.Intent == IntentHumanRequest {
+		return analysis
+	}
+	normalized := normalizeForAnalysis(text)
+	if analysis.Intent == IntentFAQ && !hasExplicitBriefTextSignal(normalized) {
+		return analysis
+	}
+	looksLikeBrief := looksLikeBriefAnswerInRequestedState(text, analysis, conversation)
+	if !looksLikeBrief {
+		return analysis
+	}
+	if briefCompletionStatusWithIncoming(conversation, text).complete {
+		analysis.Intent = IntentBriefAnswer
+		return analysis
+	}
+	if analysis.Intent == IntentRefusal || analysis.Intent == IntentFAQ {
+		analysis.Intent = IntentAnswer
+	}
+	return analysis
+}
+
+func hasExplicitBriefTextSignal(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "http") || strings.Contains(normalized, "www") || strings.Contains(normalized, "instagram") || strings.Contains(normalized, "@") {
+		return true
+	}
+	return hasNumberedBriefStructure(normalized) ||
+		isNoOfferBriefAnswer(normalized) ||
+		hasBriefSpecificSignal(normalized) ||
+		isBriefLikeBusinessText(normalized)
+}
+
+func briefCompletionStatusWithIncoming(conversation Conversation, text string) briefStatus {
+	conversation.Lead.FreeText = appendBriefText(conversation.Lead.FreeText, text)
+	conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, text)
+	conversation.LastIncomingText = strings.TrimSpace(text)
+	return briefCompletionStatus(conversation)
+}
+
 func isBriefAnswerForConversation(text string, analysis CustomerAnalysis, conversation Conversation) bool {
-	if conversation.Stage != StageBriefRequested && !conversation.Lead.BriefRequested {
+	if !conversationIsWaitingForBrief(conversation) {
 		return false
 	}
 	if analysis.Intent == IntentNegativeReaction ||
@@ -1738,12 +1790,19 @@ func isBriefAnswerForConversation(text string, analysis CustomerAnalysis, conver
 		analysis.Intent == IntentPriceQuestion ||
 		analysis.Intent == IntentPackageSelection ||
 		analysis.Intent == IntentObjection ||
-		analysis.Intent == IntentRefusal ||
 		analysis.Intent == IntentReadyToOrder ||
 		analysis.Intent == IntentAgreement {
 		return false
 	}
 
+	return looksLikeBriefAnswerInRequestedState(text, analysis, conversation) &&
+		briefCompletionStatusWithIncoming(conversation, text).complete
+}
+
+func looksLikeBriefAnswerInRequestedState(text string, analysis CustomerAnalysis, conversation Conversation) bool {
+	if !conversationIsWaitingForBrief(conversation) {
+		return false
+	}
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" || isAgreement(normalized) {
 		return false
@@ -1754,7 +1813,13 @@ func isBriefAnswerForConversation(text string, analysis CustomerAnalysis, conver
 	if hasNumberedBriefStructure(normalized) {
 		return true
 	}
-	return hasBriefSpecificSignal(normalized) && len(strings.Fields(normalized)) >= 4
+	if isNoOfferBriefAnswer(normalized) {
+		return true
+	}
+	if hasBriefSpecificSignal(normalized) && len(strings.Fields(normalized)) >= 2 {
+		return true
+	}
+	return analysis.HasBusinessSignal() || isBriefLikeBusinessText(normalized)
 }
 
 func hasNumberedBriefStructure(normalized string) bool {
@@ -1764,11 +1829,12 @@ func hasNumberedBriefStructure(normalized string) bool {
 }
 
 func hasBriefSpecificSignal(normalized string) bool {
-	hasProduct := containsAny(normalized, []string{"рекламируем", "рекламировать", "продвигаем", "продвигать", "что реклам", "товар", "услуг", "продукт", "курс", "advertise", "product", "service"})
-	hasValue := containsAny(normalized, []string{"ценность", "преимуществ", "почему", "отлич", "уникаль", "value", "benefit"})
-	hasAudience := containsAny(normalized, []string{"аудитор", "клиент", "покупател", "бизнесмен", "блогер", "инфлю", "target audience", "audience"})
+	hasProduct := containsAny(normalized, []string{"рекламируем", "рекламировать", "продвигаем", "продвигать", "что реклам", "товар", "услуг", "продукт", "курс", "прода", "магазин", "салон", "мебель", "обув", "одежд", "advertise", "product", "service"})
+	hasValue := containsAny(normalized, []string{"ценность", "преимуществ", "почему", "отлич", "уникаль", "качество", "быстро", "преми", "premium", "value", "benefit"})
+	hasAudience := containsAny(normalized, []string{"аудитор", "клиент", "покупател", "бизнесмен", "предпринимател", "муж", "жен", "девуш", "блогер", "инфлю", "target audience", "audience"})
 	hasPain := containsAny(normalized, []string{"боль", "желан", "сомнева", "хотят", "нужно", "проблем", "pain", "desire"})
-	hasOffer := containsAny(normalized, []string{"оффер", "скидк", "акци", "бонус", "подар", "рассроч", "заявк", "offer", "discount", "bonus"})
+	hasOffer := containsAny(normalized, []string{"оффер", "офер", "скидк", "акци", "бонус", "подар", "рассроч", "заявк", "offer", "discount", "bonus"}) ||
+		isNoOfferBriefAnswer(normalized)
 	return (hasProduct && (hasValue || hasAudience || hasPain || hasOffer)) ||
 		(hasOffer && (hasValue || hasAudience || hasPain))
 }
@@ -1948,17 +2014,38 @@ func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {
 }
 
 func isOptOutText(text string) bool {
+	return isExplicitOptOutText(text)
+}
+
+func isExplicitOptOutText(text string) bool {
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" {
 		return false
 	}
 	clean := strings.Trim(normalized, " .,!?:;")
-	if clean == "стоп" || clean == "stop" || clean == "unsubscribe" {
+	if clean == "стоп" || clean == "stop" || clean == "unsubscribe" || clean == "отмена" || clean == "cancel" {
 		return true
 	}
 	return containsAny(normalized, []string{
-		"не пишите", "не надо", "не интересно", "не актуально", "отстан", "отпиш", "unsubscribe", "stop messaging",
+		"не пишите", "больше не пишите", "не надо", "не интересно", "не актуально", "передумал",
+		"передумали", "не хочу", "отстан", "отпиш", "unsubscribe", "stop messaging",
 		"жазбаңыз", "мазаламаңыз", "керек емес", "not interested", "do not message",
+	})
+}
+
+func isNoOfferBriefAnswer(normalized string) bool {
+	normalized = strings.Trim(normalizeForAnalysis(normalized), " .,!?:;")
+	if normalized == "" {
+		return false
+	}
+	switch normalized {
+	case "нет", "нету", "жок", "no", "не знаю", "пока нет", "акции нет", "нет акции", "оффера нет", "нет оффера", "офера нет", "нет офера":
+		return true
+	}
+	return containsAny(normalized, []string{
+		"акции нет", "нет акции", "оффера нет", "нет оффера", "офера нет", "нет офера",
+		"пока нет акции", "пока нет оффера", "пока нет офера", "оффер пока не", "офер пока не",
+		"не знаю акции", "не знаю, акции", "акцию не", "оффер не придум", "офер не придум",
 	})
 }
 

@@ -72,7 +72,7 @@ func (s *Service) handleBriefRequested(ctx context.Context, chatID string, text 
 	if analysis.Intent == IntentHumanRequest {
 		return s.completeBriefAndHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
 	}
-	if isSoftNo(text) || analysis.Intent == IntentRefusal {
+	if isExplicitOptOutText(text) || analysis.Intent == IntentMute {
 		return s.stopClient(ctx, chatID, false)
 	}
 
@@ -159,22 +159,38 @@ func briefHasProduct(text string, conversation Conversation) bool {
 	if isValidNiche(conversation.Lead.Niche) {
 		return true
 	}
-	return containsAny(text, []string{"прода", "рекламируем", "продвигаем", "товар", "услуг", "продукт", "мебель", "одежд", "курс", "салон", "клиник", "стоматолог"})
+	if knownNicheFromText(text) != "" {
+		return true
+	}
+	return containsAny(text, []string{
+		"прода", "рекламируем", "продвигаем", "товар", "услуг", "продукт", "мебель", "одежд",
+		"обув", "курс", "салон", "магазин", "клиник", "стоматолог", "окрашиван", "делаем",
+	})
 }
 
 func briefHasStrength(text string) bool {
-	return containsAny(text, []string{"сильн", "преимущ", "ценность", "отлич", "качество", "быстро", "на заказ", "опыт", "гарант", "premium", "премиум"})
+	return containsAny(text, []string{
+		"сильн", "преимущ", "ценность", "отлич", "качество", "быстро", "на заказ", "опыт",
+		"гарант", "premium", "преми", "эксклюзив", "уникаль", "высокий чек",
+	})
 }
 
 func briefHasClient(text string) bool {
-	return containsAny(text, []string{"клиент", "аудитор", "покупател", "семьи", "женщ", "мужчин", "бизнес", "новые квартиры", "для тех", "ца "})
+	return containsAny(text, []string{
+		"клиент", "аудитор", "покупател", "семьи", "семь", "женщ", "девуш", "мужчин", "муж",
+		"предпринимател", "бизнес", "новые квартиры", "для тех", "ца ", "чек", "20-35",
+	})
 }
 
 func briefHasOffer(text string) bool {
 	if strings.Contains(text, "http") || strings.Contains(text, "www") || strings.Contains(text, "instagram") || strings.Contains(text, "@") {
 		return true
 	}
-	return containsAny(text, []string{"акци", "оффер", "скид", "бонус", "подар", "рассроч", "нет акции", "нет оффера", "сайт"})
+	return containsAny(text, []string{
+		"акци", "оффер", "офер", "скид", "бонус", "подар", "рассроч", "сайт",
+		"нету", "нет акции", "акции нет", "нет оффера", "оффера нет", "пока нет", "не знаю",
+		"не придумали", "жок", "no",
+	})
 }
 
 func briefMissingQuestion(field string) string {

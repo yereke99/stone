@@ -190,7 +190,7 @@ func isBusinessRelevantMessage(text string, analysis CustomerAnalysis, faqDetect
 	if conversation.Stage == ClientStateAwaitingQualification {
 		return true
 	}
-	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
+	if conversationIsWaitingForBrief(conversation) {
 		return isBriefLikeBusinessText(normalized)
 	}
 	return containsAny(normalized, []string{
@@ -206,8 +206,13 @@ func isBriefLikeBusinessText(normalized string) bool {
 	if strings.Contains(normalized, "http") || strings.Contains(normalized, "www") || strings.Contains(normalized, "instagram") || strings.Contains(normalized, "@") {
 		return true
 	}
+	if isNoOfferBriefAnswer(normalized) {
+		return true
+	}
 	return containsAny(normalized, []string{
 		"прода", "услуг", "товар", "продукт", "делаем", "клиент", "аудитор", "семьи", "бизнес",
-		"оффер", "акци", "скид", "сильн", "сторона", "преимущ", "качество", "заказ",
+		"предпринимател", "муж", "жен", "девуш", "чек", "преми", "обув", "одежд", "мебель",
+		"магазин", "салон", "стоматолог", "оффер", "офер", "акци", "скид", "сильн",
+		"сторона", "преимущ", "качество", "заказ",
 	})
 }

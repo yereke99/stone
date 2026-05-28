@@ -139,6 +139,9 @@ func TestBriefRequestedFAQStaysInBriefState(t *testing.T) {
 	if !strings.Contains(got, FAQAnswerText(faqOnline, "ru")) || !strings.Contains(got, BriefContextReturnText("ru")) {
 		t.Fatalf("brief FAQ reply mismatch:\n%s", got)
 	}
+	if len(sender.files) != 0 || strings.Contains(got, FormatQuestionText("ru")) || strings.Contains(got, QualificationGreetingText("ru")) {
+		t.Fatalf("brief FAQ restarted package/qualification flow: messages=%#v files=%#v", sender.messages, sender.files)
+	}
 }
 
 func TestBriefRequestedCompleteAnswerHandsOff(t *testing.T) {
@@ -165,6 +168,223 @@ func TestBriefRequestedCompleteAnswerHandsOff(t *testing.T) {
 	}
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
 		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
+	}
+}
+
+func TestBriefRequestedObservedAnswerWithNetuHandsOff(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-brief-netu"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "обувь"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+		conversation.FollowupStage = followupStageQuestionnaireReminder
+		conversation.FollowupReferenceAt = time.Now().UTC().Add(-25 * time.Hour)
+		conversation.NextFollowupAt = time.Now().UTC().Add(-time.Minute)
+	})
+
+	sendText(t, service, chatID, "Обувь\nУ нас премильная обувь\nПредприниматели, муж/жен, высокий чек\nНету")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateHandedOff || conversation.Stage == ClientStateStopped || conversation.OptOut || conversation.SelectedLevel != 3 {
+		t.Fatalf("brief with netu was not handed off correctly: stage=%q optout=%v level=%d", conversation.Stage, conversation.OptOut, conversation.SelectedLevel)
+	}
+	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusClosed || normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusClosed {
+		t.Fatalf("brief with netu was classified as closed: conversation=%q lead=%q", conversation.LeadStatus, conversation.Lead.LeadStatus)
+	}
+	if !strings.Contains(conversation.Lead.FreeText, "Нету") {
+		t.Fatalf("brief was not saved: %#v", conversation.Lead.FreeText)
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
+		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
+	}
+	if !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
+		t.Fatalf("follow-up was not cancelled after handoff: next=%v stage=%q", conversation.NextFollowupAt, conversation.FollowupStage)
+	}
+
+	beforeMessages := len(sender.messages)
+	beforeFiles := len(sender.files)
+	sendText(t, service, chatID, "Спасибо, жду")
+	if len(sender.messages) != beforeMessages || len(sender.files) != beforeFiles {
+		t.Fatalf("handoff did not stay silent: new messages=%#v new files=%#v", sender.messages[beforeMessages:], sender.files[beforeFiles:])
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
+		t.Fatalf("admin notification repeated after handoff: %d messages=%#v", got, sender.messages)
+	}
+}
+
+func TestBriefRequestedAkciiNetIsBriefAnswer(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-brief-akcii-net"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "мебель"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.SelectedPackage = "basic"
+		conversation.SelectedLevel = 2
+	})
+
+	sendText(t, service, chatID, "Продаем мебель. Сильная сторона — качество. Клиенты — семьи. Акции нет.")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage == ClientStateStopped || conversation.OptOut {
+		t.Fatalf("акции нет was treated as stop: stage=%q optout=%v", conversation.Stage, conversation.OptOut)
+	}
+	if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusClosed || normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusClosed {
+		t.Fatalf("акции нет was classified as closed: conversation=%q lead=%q", conversation.LeadStatus, conversation.Lead.LeadStatus)
+	}
+	if !strings.Contains(conversation.Lead.FreeText, "Акции нет") {
+		t.Fatalf("brief was not saved: %#v", conversation.Lead.FreeText)
+	}
+}
+
+func TestBriefRequestedRealOptOutStopsWithoutHandoff(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-brief-real-optout"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "мебель"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+		conversation.FollowupStage = followupStageQuestionnaireReminder
+		conversation.FollowupReferenceAt = time.Now().UTC().Add(-25 * time.Hour)
+		conversation.NextFollowupAt = time.Now().UTC().Add(-time.Minute)
+	})
+
+	sendText(t, service, chatID, "Не интересно, больше не пишите")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.Stopped {
+		t.Fatalf("real opt-out state = stage=%q optout=%v stopped=%v", conversation.Stage, conversation.OptOut, conversation.Stopped)
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
+		t.Fatalf("admin was notified for opt-out: %d messages=%#v", got, sender.messages)
+	}
+	if !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
+		t.Fatalf("follow-up was not cancelled after opt-out: next=%v stage=%q", conversation.NextFollowupAt, conversation.FollowupStage)
+	}
+}
+
+func TestBriefRequestedPartialProductIsSavedWithoutRestart(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-brief-partial-shoes"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "обувь"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+	})
+
+	sendText(t, service, chatID, "Продаем обувь")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != StageBriefRequested || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.OptOut {
+		t.Fatalf("partial brief changed state incorrectly: stage=%q handed=%v closed=%v optout=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.OptOut)
+	}
+	if !strings.Contains(conversation.Lead.FreeText, "Продаем обувь") {
+		t.Fatalf("partial brief was not saved: %#v", conversation.Lead.FreeText)
+	}
+	if len(sender.files) != 0 {
+		t.Fatalf("partial brief resent videos: %#v", sender.files)
+	}
+	got := sender.messages[len(sender.messages)-1]
+	if strings.Contains(got, FormatQuestionText("ru")) || strings.Contains(got, QualificationGreetingText("ru")) {
+		t.Fatalf("partial brief restarted funnel: %q", got)
+	}
+}
+
+func TestBriefRequestedNoOfferOnlyIsSavedWithoutStop(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-brief-netu-only"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.Lead.BriefRequested = true
+	})
+
+	sendText(t, service, chatID, "Нету")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != StageBriefRequested || conversation.Stopped || conversation.OptOut || conversation.HandedOffToOwner {
+		t.Fatalf("no-offer brief answer stopped or handed off incorrectly: stage=%q stopped=%v optout=%v handed=%v", conversation.Stage, conversation.Stopped, conversation.OptOut, conversation.HandedOffToOwner)
+	}
+	if !strings.Contains(conversation.Lead.FreeText, "Нету") {
+		t.Fatalf("no-offer answer was not saved: %#v", conversation.Lead.FreeText)
+	}
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
+		t.Fatalf("admin was notified for no-offer-only partial: %d messages=%#v", got, sender.messages)
+	}
+}
+
+func TestBriefHandoffSkipsStaleFollowup(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	service.SetDelayedPackageOptions(DelayedPackageOptions{Enabled: true, After: 15 * time.Minute})
+	chatID := "chat-brief-stale-followup"
+	now := time.Now().UTC()
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "мебель"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.Deadline = "на этой неделе"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+		conversation.FollowupStage = followupStageQuestionnaireReminder
+		conversation.FollowupReferenceAt = now.Add(-25 * time.Hour)
+		conversation.NextFollowupAt = now.Add(-time.Minute)
+		conversation.LastIncomingAt = now.Add(-26 * time.Hour)
+	})
+
+	sendText(t, service, chatID, "Продаем мебель. Сильная сторона — качество. Клиенты — семьи. Акции нет.")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != ClientStateHandedOff || !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
+		t.Fatalf("brief handoff did not cancel stale follow-up: stage=%q next=%v followup=%q", conversation.Stage, conversation.NextFollowupAt, conversation.FollowupStage)
+	}
+	beforeMessages := len(sender.messages)
+	beforeFiles := len(sender.files)
+	if err := service.ProcessDueFollowups(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatalf("ProcessDueFollowups() error = %v", err)
+	}
+	if len(sender.messages) != beforeMessages || len(sender.files) != beforeFiles {
+		t.Fatalf("stale follow-up sent after handoff: messages=%#v files=%#v", sender.messages[beforeMessages:], sender.files[beforeFiles:])
 	}
 }
 

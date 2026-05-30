@@ -158,6 +158,61 @@ func TestQualificationReplySendsPortfolioAndPackagesOnce(t *testing.T) {
 	}
 }
 
+func TestQuotedNumberedQualificationReplyUsesCurrentText(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-quoted-numbered-qualification"
+
+	sendText(t, service, chatID, "Здравствуйте")
+
+	currentText := "1. Фитнес обучение\n2. Заявки+продажи+узнаваемость\n3. К 10 июня"
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "quoted-numbered-qualification",
+		ChatID:          chatID,
+		TypeMessage:     "quotedMessage",
+		Text:            currentText,
+		QuotedMessageID: "old-qualification-greeting",
+		QuotedType:      "textMessage",
+		QuotedText:      QualificationGreetingText("ru"),
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "Фитнес обучение" {
+		t.Fatalf("niche = %q, want current numbered answer", conversation.Lead.Niche)
+	}
+	for _, want := range []string{"Заявки", "продажи", "узнаваемость"} {
+		if !strings.Contains(conversation.Lead.Goal, want) {
+			t.Fatalf("goal = %q, want it to include %q", conversation.Lead.Goal, want)
+		}
+	}
+	if conversation.Lead.Deadline != "К 10 июня" {
+		t.Fatalf("deadline = %q, want current numbered answer", conversation.Lead.Deadline)
+	}
+	for _, missing := range conversation.MissingFields {
+		switch missing {
+		case fieldNiche, fieldGoal, fieldDeadline:
+			t.Fatalf("missing fields = %#v, must not include %q", conversation.MissingFields, missing)
+		}
+	}
+	if conversation.Stage != ClientStatePackagesPresented {
+		t.Fatalf("stage = %q, want packages_presented", conversation.Stage)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want all package examples", sender.files)
+	}
+	for _, reply := range sender.messages[1:] {
+		if strings.Contains(reply, "В какой нише") ||
+			strings.Contains(reply, "нишу, цель") ||
+			strings.Contains(reply, "цель и сроки") ||
+			strings.Contains(reply, "сроки запуска") {
+			t.Fatalf("bot repeated qualification question after numbered answer: %q", reply)
+		}
+	}
+}
+
 func TestReplyToPackageVideoSelectsPackageByQuotedID(t *testing.T) {
 	tests := []struct {
 		name      string

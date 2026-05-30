@@ -193,8 +193,19 @@ func (n *Notification) Text() string {
 	switch n.TypeMessage() {
 	case TypeMessageText:
 		return strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage)
-	case TypeMessageExtendedText, TypeMessageQuoted:
+	case TypeMessageExtendedText:
 		if text := strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Text); text != "" {
+			return text
+		}
+		if text := strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage); text != "" {
+			return text
+		}
+		return strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Description)
+	case TypeMessageQuoted:
+		if text := strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Text); text != "" {
+			return text
+		}
+		if text := strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage); text != "" {
 			return text
 		}
 		return strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Description)

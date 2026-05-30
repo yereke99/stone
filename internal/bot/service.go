@@ -191,6 +191,13 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		zap.Bool("package_detected", replyPackageDetected),
 		zap.String("package_key", replyPackage),
 	)
+	if strings.TrimSpace(msg.TypeMessage) == "quotedMessage" && text != "" {
+		s.info("quoted_message_current_text_used",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+			zap.Bool("has_reply_context", hasReplyContext),
+		)
+	}
 
 	if err := s.store.AppendMessage(ctx, chatID, "user", text); err != nil {
 		return err
@@ -234,6 +241,23 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	}
 
 	analysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
+	if analysis.NumberedQualificationAnswer {
+		extracted := make([]string, 0, 3)
+		if analysis.Niche != nil {
+			extracted = append(extracted, fieldNiche)
+		}
+		if analysis.Goal != nil {
+			extracted = append(extracted, fieldGoal)
+		}
+		if analysis.Deadline != nil {
+			extracted = append(extracted, fieldDeadline)
+		}
+		s.info("numbered_qualification_answer_detected",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("state", conversation.Stage),
+			zap.Strings("qualification_fields_extracted", extracted),
+		)
+	}
 	if faqKey, ok := detectFAQIntent(text); ok {
 		analysis.Intent = IntentFAQ
 		analysis.FAQKey = faqKey

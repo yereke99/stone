@@ -9,6 +9,9 @@ func detectPackageFromReplyContext(conversation Conversation, msg IncomingMessag
 	if !incomingHasReplyContext(msg) {
 		return "", false
 	}
+	if isQuotedQualificationPrompt(msg.QuotedText) {
+		return "", false
+	}
 
 	if quotedID := strings.TrimSpace(msg.QuotedMessageID); quotedID != "" {
 		if metadata, ok := conversation.OutgoingPackageMessages[quotedID]; ok {
@@ -29,6 +32,17 @@ func detectPackageFromReplyContext(conversation Conversation, msg IncomingMessag
 	}
 
 	return "", false
+}
+
+func isQuotedQualificationPrompt(value string) bool {
+	normalized := normalizeForAnalysis(value)
+	if normalized == "" {
+		return false
+	}
+	hasNicheQuestion := containsAny(normalized, []string{"в какой нише", "кай нишада", "what niche"})
+	hasGoalQuestion := containsAny(normalized, []string{"какая цель", "максат", "goal"})
+	hasDeadlineQuestion := containsAny(normalized, []string{"в какие сроки", "кашан иске", "when do you need"})
+	return hasNicheQuestion && (hasGoalQuestion || hasDeadlineQuestion)
 }
 
 func incomingHasReplyContext(msg IncomingMessage) bool {

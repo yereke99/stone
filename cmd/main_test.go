@@ -222,6 +222,39 @@ func TestShouldProcessNotificationRequiresAutoReplyAndText(t *testing.T) {
 	}
 }
 
+func TestQuotedNotificationUsesCurrentTextNotQuotedText(t *testing.T) {
+	now := time.Now().UTC()
+	currentText := "1. Фитнес обучение\n2. Заявки+продажи+узнаваемость\n3. К 10 июня"
+	quotedText := bot.QualificationGreetingText("ru")
+	notification := incomingTextNotification(551, "quoted-current-text", "77055000000@c.us", "")
+	notification.Body.MessageData = greenapi.MessageData{
+		TypeMessage: greenapi.TypeMessageQuoted,
+		ExtendedTextMessageData: greenapi.ExtendedTextMessageData{
+			Text:     currentText,
+			StanzaID: "old-qualification-greeting",
+		},
+		QuotedMessage: greenapi.QuotedMessageData{
+			StanzaID:    "old-qualification-greeting",
+			TypeMessage: greenapi.TypeMessageText,
+			TextMessage: quotedText,
+		},
+	}
+
+	chatID, text, ok, reason := shouldProcessNotification(notification, now, time.Hour, time.Time{}, true)
+	if !ok || reason != "accepted" {
+		t.Fatalf("shouldProcessNotification ok=%v reason=%q, want accepted", ok, reason)
+	}
+	if chatID != "77055000000@c.us" {
+		t.Fatalf("chatID = %q", chatID)
+	}
+	if text != currentText {
+		t.Fatalf("text = %q, want current quoted reply text", text)
+	}
+	if notification.QuotedText() != quotedText {
+		t.Fatalf("quoted text = %q, want old bot message", notification.QuotedText())
+	}
+}
+
 func TestQuotedNotificationIsAcceptedAndPassesReplyContext(t *testing.T) {
 	client := &fakeNotificationClient{}
 	handler := &fakeIncomingHandler{}

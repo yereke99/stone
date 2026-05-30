@@ -37,6 +37,7 @@ const (
 )
 
 var prefixedValuePattern = regexp.MustCompile(`(?i)(?:^|\s)(%s)\s*[:=\-—]?\s*([^,.!?;]+)`)
+var numberedQualificationLinePattern = regexp.MustCompile(`(?m)^\s*([123])\s*[\).:\-—]\s*(.+?)\s*$`)
 
 type LeadState struct {
 	HasBeenGreeted     bool     `json:"has_been_greeted,omitempty"`
@@ -78,6 +79,8 @@ type CustomerAnalysis struct {
 	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
 	FAQKey             string   `json:"faq_key,omitempty"`
 	MissingFields      []string `json:"missing_fields"`
+
+	NumberedQualificationAnswer bool `json:"-"`
 }
 
 func AnalyzeCustomerMessage(text string, current LeadState, language string) CustomerAnalysis {
@@ -110,6 +113,18 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	}
 	if audience := extractTargetAudience(text); audience != "" {
 		analysis.TargetAudience = stringPointer(audience)
+	}
+	if numbered := extractNumberedQualificationAnswers(text); numbered.found {
+		analysis.NumberedQualificationAnswer = true
+		if numbered.niche != "" {
+			analysis.Niche = stringPointer(numbered.niche)
+		}
+		if numbered.goal != "" {
+			analysis.Goal = stringPointer(numbered.goal)
+		}
+		if numbered.deadline != "" {
+			analysis.Deadline = stringPointer(numbered.deadline)
+		}
 	}
 	analysis.SelectedLevel = extractSelectedLevel(text)
 	if packageInterest := extractPackageInterest(text, current, analysis.SelectedLevel); packageInterest != "" {
@@ -459,6 +474,52 @@ func extractDeadline(text string, current LeadState) string {
 	return ""
 }
 
+type numberedQualificationAnswers struct {
+	found    bool
+	niche    string
+	goal     string
+	deadline string
+}
+
+func extractNumberedQualificationAnswers(text string) numberedQualificationAnswers {
+	matches := numberedQualificationLinePattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return numberedQualificationAnswers{}
+	}
+	answers := numberedQualificationAnswers{}
+	seen := make(map[string]bool, 3)
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		number := strings.TrimSpace(match[1])
+		if seen[number] {
+			continue
+		}
+		value := cleanNumberedQualificationValue(match[2])
+		if value == "" {
+			continue
+		}
+		seen[number] = true
+		switch number {
+		case "1":
+			answers.niche = value
+		case "2":
+			answers.goal = value
+		case "3":
+			answers.deadline = value
+		}
+	}
+	answers.found = answers.niche != "" || answers.goal != "" || answers.deadline != ""
+	return answers
+}
+
+func cleanNumberedQualificationValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, " \t\r\n-—:;,.!?")
+	return strings.Join(strings.Fields(value), " ")
+}
+
 func extractPreviousAIAds(text string, current LeadState) *bool {
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" {
@@ -705,6 +766,7 @@ func normalizeDeadline(value string) string {
 	value = normalizeForAnalysis(value)
 	weekday := deadlineWeekday(value)
 	concreteDate := concreteDatePhrase(value)
+	monthDate := concreteMonthDatePhrase(value)
 	switch {
 	case containsAny(value, []string{"без срока", "без строгого срока", "нет срока", "не срочно", "срок не важен", "no strict deadline", "no deadline"}):
 		return "без строгого срока"
@@ -724,6 +786,8 @@ func normalizeDeadline(value string) string {
 		return "через неделю"
 	case concreteDate != "":
 		return concreteDate
+	case monthDate != "":
+		return monthDate
 	case containsAny(value, []string{"месяц", "ай", "month"}):
 		return "в течение месяца"
 	case containsAny(value, []string{"день", "дня", "дней", "күн", "days"}):
@@ -775,6 +839,20 @@ func concreteDatePhrase(value string) string {
 		date += "." + match[3]
 	}
 	return "до " + date
+}
+
+func concreteMonthDatePhrase(value string) string {
+	months := []string{
+		"января", "январь", "февраля", "февраль", "марта", "март", "апреля", "апрель",
+		"мая", "май", "июня", "июнь", "июля", "июль", "августа", "август",
+		"сентября", "сентябрь", "октября", "октябрь", "ноября", "ноябрь", "декабря", "декабрь",
+	}
+	pattern := regexp.MustCompile(`(?:до|к|by)?\s*(\d{1,2})\s+(` + strings.Join(months, "|") + `)`)
+	match := pattern.FindStringSubmatch(value)
+	if len(match) < 3 {
+		return ""
+	}
+	return "до " + match[1] + " " + match[2]
 }
 
 func firstDeadlinePhrase(value string) string {

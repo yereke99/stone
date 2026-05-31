@@ -281,6 +281,9 @@ func buildConversationSummary(conversation Conversation) string {
 	if isValidNiche(lead.Niche) {
 		parts = append(parts, "ниша: "+strings.TrimSpace(lead.Niche))
 	}
+	if strings.TrimSpace(lead.City) != "" {
+		parts = append(parts, "город: "+strings.TrimSpace(lead.City))
+	}
 	if isValidGoal(lead.Goal) {
 		parts = append(parts, "цель: "+strings.TrimSpace(lead.Goal))
 	}

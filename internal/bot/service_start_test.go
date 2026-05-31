@@ -33,7 +33,8 @@ func (s *fakeSender) SendFileByUpload(ctx context.Context, chatID string, filePa
 }
 
 type fakeAI struct {
-	called bool
+	called         bool
+	analysisCalled bool
 }
 
 func (ai *fakeAI) GenerateSalesReply(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.SalesResponse, error) {
@@ -42,6 +43,15 @@ func (ai *fakeAI) GenerateSalesReply(ctx context.Context, systemPrompt string, m
 		Reply:    "Спасибо, уточню детали.",
 		Language: "ru",
 		Stage:    "diagnosis",
+	}, nil
+}
+
+func (ai *fakeAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error) {
+	ai.analysisCalled = true
+	return openai.CustomerUnderstanding{
+		Language:   "ru",
+		Intent:     "other",
+		Confidence: 1,
 	}, nil
 }
 
@@ -58,8 +68,11 @@ func TestFirstRussianMessageSendsQualificationGreeting(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage() error = %v", err)
 	}
 
+	if !ai.analysisCalled {
+		t.Fatal("OpenAI understanding must be called before choosing the first qualification reply")
+	}
 	if ai.called {
-		t.Fatal("OpenAI must not be called for the first qualification greeting")
+		t.Fatal("OpenAI sales reply generation must not be called for the first qualification greeting")
 	}
 	if len(sender.messages) != 1 {
 		t.Fatalf("sent messages = %d, want 1", len(sender.messages))

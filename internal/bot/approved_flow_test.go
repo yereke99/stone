@@ -276,11 +276,14 @@ func TestBriefRequestedRealOptOutStopsWithoutHandoff(t *testing.T) {
 	sendText(t, service, chatID, "Не интересно, больше не пишите")
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.Stopped {
-		t.Fatalf("real opt-out state = stage=%q optout=%v stopped=%v", conversation.Stage, conversation.OptOut, conversation.Stopped)
+	if conversation.Stage != ClientStateHandedOff || !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {
+		t.Fatalf("real opt-out handoff state = stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
 	}
-	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
-		t.Fatalf("admin was notified for opt-out: %d messages=%#v", got, sender.messages)
+	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
+		t.Fatalf("admin notification count for opt-out = %d messages=%#v", got, sender.messages)
+	}
+	if got := countMessagesContaining(sender.messages, "неправильно понял"); got != 1 {
+		t.Fatalf("recovery apology count = %d messages=%#v", got, sender.messages)
 	}
 	if !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
 		t.Fatalf("follow-up was not cancelled after opt-out: next=%v stage=%q", conversation.NextFollowupAt, conversation.FollowupStage)

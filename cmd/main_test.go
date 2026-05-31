@@ -103,6 +103,14 @@ func (ai *testAI) GenerateSalesReply(ctx context.Context, systemPrompt string, m
 	return openai.SalesResponse{Reply: "Ок.", Language: "ru", Stage: "diagnosis"}, nil
 }
 
+func (ai *testAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error) {
+	return openai.CustomerUnderstanding{
+		Language:   "ru",
+		Intent:     "other",
+		Confidence: 1,
+	}, nil
+}
+
 func TestDuplicateIncomingMessageIDIsIgnored(t *testing.T) {
 	client := &fakeNotificationClient{}
 	handler := &fakeIncomingHandler{}

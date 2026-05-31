@@ -42,6 +42,45 @@ type SalesResponse struct {
 	AskedFields      []string `json:"asked_fields"`
 }
 
+type CustomerUnderstanding struct {
+	Language    string                         `json:"language"`
+	Intent      string                         `json:"intent"`
+	Extracted   CustomerUnderstandingExtracted `json:"extracted"`
+	Sentiment   CustomerUnderstandingSentiment `json:"sentiment"`
+	StateUpdate CustomerUnderstandingState     `json:"state_update"`
+	ReplyPlan   CustomerUnderstandingReplyPlan `json:"reply_plan"`
+	Confidence  float64                        `json:"confidence"`
+}
+
+type CustomerUnderstandingExtracted struct {
+	Niche           *string `json:"niche"`
+	City            *string `json:"city"`
+	Goal            *string `json:"goal"`
+	Deadline        *string `json:"deadline"`
+	Platform        *string `json:"platform"`
+	TargetAudience  *string `json:"target_audience"`
+	PackageInterest *string `json:"package_interest"`
+}
+
+type CustomerUnderstandingSentiment struct {
+	Negative    bool `json:"negative"`
+	Frustrated  bool `json:"frustrated"`
+	WantsToStop bool `json:"wants_to_stop"`
+}
+
+type CustomerUnderstandingState struct {
+	ShouldSave             bool `json:"should_save"`
+	ShouldHandoffToManager bool `json:"should_handoff_to_manager"`
+	ShouldStopAutomation   bool `json:"should_stop_automation"`
+}
+
+type CustomerUnderstandingReplyPlan struct {
+	AcknowledgeKnownFields bool    `json:"acknowledge_known_fields"`
+	AskOnlyMissingFields   bool    `json:"ask_only_missing_fields"`
+	NextMissingField       *string `json:"next_missing_field"`
+	SafeReply              string  `json:"safe_reply"`
+}
+
 type HistoryGuardResponse struct {
 	ChatType                    string                  `json:"chat_type"`
 	ShouldAutoStartFunnel       bool                    `json:"should_auto_start_funnel"`
@@ -135,6 +174,71 @@ func (c *Client) GenerateSalesReply(ctx context.Context, systemPrompt string, me
 		return SalesResponse{}, fmt.Errorf("parse model json response: %w", err)
 	}
 
+	return result, nil
+}
+
+func (c *Client) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []Message) (CustomerUnderstanding, error) {
+	input := make([]responseInput, 0, len(messages)+1)
+	input = append(input, newInput("system", systemPrompt))
+	for _, message := range messages {
+		role := strings.TrimSpace(message.Role)
+		content := strings.TrimSpace(message.Content)
+		if role == "" || content == "" {
+			continue
+		}
+		input = append(input, newInput(role, content))
+	}
+
+	payload := responseRequest{
+		Model:           c.model,
+		Input:           input,
+		MaxOutputTokens: minPositive(c.maxOutputTokens, 1200),
+		Temperature:     analysisTemperature(c.temperature),
+		Store:           false,
+		Text: responseText{
+			Format: responseFormat{
+				Type:   "json_schema",
+				Name:   "stone_customer_understanding",
+				Strict: true,
+				Schema: customerUnderstandingSchema(),
+			},
+		},
+	}
+
+	requestBody, err := json.Marshal(payload)
+	if err != nil {
+		return CustomerUnderstanding{}, fmt.Errorf("marshal customer understanding request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(requestBody))
+	if err != nil {
+		return CustomerUnderstanding{}, fmt.Errorf("create customer understanding request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return CustomerUnderstanding{}, fmt.Errorf("call openai customer understanding api: %w", err)
+	}
+	defer closeBody(resp.Body)
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CustomerUnderstanding{}, fmt.Errorf("read customer understanding response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return CustomerUnderstanding{}, c.statusError(resp.StatusCode, data)
+	}
+
+	outputText, err := extractOutputText(data)
+	if err != nil {
+		return CustomerUnderstanding{}, err
+	}
+	var result CustomerUnderstanding
+	if err := json.Unmarshal([]byte(outputText), &result); err != nil {
+		return CustomerUnderstanding{}, fmt.Errorf("parse customer understanding json response: %w", err)
+	}
 	return result, nil
 }
 
@@ -352,6 +456,93 @@ func salesResponseSchema() map[string]any {
 	}
 }
 
+func customerUnderstandingSchema() map[string]any {
+	nullableString := func() map[string]any {
+		return map[string]any{"type": []string{"string", "null"}}
+	}
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"language",
+			"intent",
+			"extracted",
+			"sentiment",
+			"state_update",
+			"reply_plan",
+			"confidence",
+		},
+		"properties": map[string]any{
+			"language": map[string]any{
+				"type": "string",
+				"enum": []string{"ru", "kk", "mixed", "unknown"},
+			},
+			"intent": map[string]any{
+				"type": "string",
+				"enum": []string{"provide_info", "ask_question", "choose_package", "request_manager", "negative_reaction", "stop", "other"},
+			},
+			"extracted": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required": []string{
+					"niche",
+					"city",
+					"goal",
+					"deadline",
+					"platform",
+					"target_audience",
+					"package_interest",
+				},
+				"properties": map[string]any{
+					"niche":            nullableString(),
+					"city":             nullableString(),
+					"goal":             nullableString(),
+					"deadline":         nullableString(),
+					"platform":         nullableString(),
+					"target_audience":  nullableString(),
+					"package_interest": nullableString(),
+				},
+			},
+			"sentiment": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"negative", "frustrated", "wants_to_stop"},
+				"properties": map[string]any{
+					"negative":      map[string]any{"type": "boolean"},
+					"frustrated":    map[string]any{"type": "boolean"},
+					"wants_to_stop": map[string]any{"type": "boolean"},
+				},
+			},
+			"state_update": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"should_save", "should_handoff_to_manager", "should_stop_automation"},
+				"properties": map[string]any{
+					"should_save":               map[string]any{"type": "boolean"},
+					"should_handoff_to_manager": map[string]any{"type": "boolean"},
+					"should_stop_automation":    map[string]any{"type": "boolean"},
+				},
+			},
+			"reply_plan": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"acknowledge_known_fields", "ask_only_missing_fields", "next_missing_field", "safe_reply"},
+				"properties": map[string]any{
+					"acknowledge_known_fields": map[string]any{"type": "boolean"},
+					"ask_only_missing_fields":  map[string]any{"type": "boolean"},
+					"next_missing_field":       nullableString(),
+					"safe_reply":               map[string]any{"type": "string"},
+				},
+			},
+			"confidence": map[string]any{
+				"type":    "number",
+				"minimum": 0,
+				"maximum": 1,
+			},
+		},
+	}
+}
+
 func historyGuardResponseSchema() map[string]any {
 	return map[string]any{
 		"type":                 "object",
@@ -408,6 +599,16 @@ func historyGuardResponseSchema() map[string]any {
 			},
 		},
 	}
+}
+
+func analysisTemperature(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 0.2 {
+		return 0.2
+	}
+	return value
 }
 
 func minPositive(a int, b int) int {

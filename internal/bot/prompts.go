@@ -200,6 +200,38 @@ func HumanHandoffText(language string) string {
 	}
 }
 
+func NegativeRecoveryHandoffText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Кешіріңіз, хабарламаңызды дұрыс түсінбедім. Ақпаратты белгілеп, менеджерге беремін — ол қайталанатын сұрақсыз мұқият жалғастырады."
+	case "en":
+		return "Sorry, I misunderstood your message. I have saved the context and will pass it to a manager so they can continue carefully without repeated questions."
+	default:
+		return "Извините, неправильно понял ваше сообщение. Я зафиксировал информацию и передам менеджеру, чтобы он аккуратно продолжил без повторных вопросов."
+	}
+}
+
+func QualifiedLeadHandoffText(language string, lead LeadState) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім, ақпаратты белгілеп алдым. Менеджерге беремін — ол келесі қадамды осы чатта жалғастырады."
+	case "en":
+		return "Got it, I have saved the details. I will pass this to a manager, and they will continue with the next step here."
+	default:
+		prefix := "Понял, зафиксировал"
+		if phrase := leadNicheLocationPhrase(lead); phrase != "по задаче" {
+			prefix += ": " + phrase
+			if lead.Deadline != "" {
+				prefix += ", запуск — " + lead.Deadline
+			}
+			if lead.SelectedPackage != "" {
+				prefix += ", пакет — " + adminPackageLabel(lead.SelectedPackage)
+			}
+		}
+		return prefix + ". Передаю менеджеру, он продолжит и уточнит детали."
+	}
+}
+
 func FormatAdviceText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":

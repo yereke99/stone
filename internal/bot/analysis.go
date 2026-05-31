@@ -8,6 +8,7 @@ import (
 
 const (
 	fieldNiche           = "niche"
+	fieldCity            = "city"
 	fieldGoal            = "goal"
 	fieldPlatform        = "platform"
 	fieldPlatforms       = fieldPlatform
@@ -44,6 +45,7 @@ var numberedQualificationLinePattern = regexp.MustCompile(`(?m)^\s*([123])\s*[\)
 type LeadState struct {
 	HasBeenGreeted     bool     `json:"has_been_greeted,omitempty"`
 	Niche              string   `json:"niche,omitempty"`
+	City               string   `json:"city,omitempty"`
 	Goal               string   `json:"goal,omitempty"`
 	Platform           string   `json:"platform,omitempty"`
 	Platforms          []string `json:"platforms,omitempty"`
@@ -68,6 +70,7 @@ type LeadState struct {
 
 type CustomerAnalysis struct {
 	Niche              *string  `json:"niche"`
+	City               *string  `json:"city,omitempty"`
 	Goal               *string  `json:"goal"`
 	Platforms          []string `json:"platforms"`
 	Deadline           *string  `json:"deadline"`
@@ -80,6 +83,9 @@ type CustomerAnalysis struct {
 	SelectedLevel      int      `json:"selected_level,omitempty"`
 	PackageInterest    *string  `json:"package_interest,omitempty"`
 	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
+	ShouldHandoff      bool     `json:"should_handoff,omitempty"`
+	ShouldStop         bool     `json:"should_stop,omitempty"`
+	Frustrated         bool     `json:"frustrated,omitempty"`
 	FAQKey             string   `json:"faq_key,omitempty"`
 	MissingFields      []string `json:"missing_fields"`
 
@@ -99,6 +105,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 
 	if niche := extractNiche(text, current); niche != "" {
 		analysis.Niche = stringPointer(niche)
+	}
+	if city := extractCity(text); city != "" {
+		analysis.City = stringPointer(city)
 	}
 	if goal := extractGoal(text, current); goal != "" {
 		analysis.Goal = stringPointer(goal)
@@ -145,6 +154,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentMute
 	case isNegativeReaction(normalized):
 		analysis.Intent = IntentNegativeReaction
+		analysis.Frustrated = true
+		analysis.ShouldHandoff = true
+		analysis.ShouldStop = true
 	case containsHumanRequest(normalized):
 		analysis.Intent = IntentHumanRequest
 	case asksWhichFormatWorksBest(normalized):
@@ -192,6 +204,7 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 
 func (a CustomerAnalysis) HasBusinessSignal() bool {
 	return a.Niche != nil ||
+		a.City != nil ||
 		a.Goal != nil ||
 		len(a.Platforms) > 0 ||
 		a.Deadline != nil ||
@@ -208,6 +221,9 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	updateQualificationFields := analysis.Intent != IntentBriefAnswer
 	if updateQualificationFields && analysis.Niche != nil && strings.TrimSpace(*analysis.Niche) != "" {
 		s.Niche = strings.TrimSpace(*analysis.Niche)
+	}
+	if updateQualificationFields && analysis.City != nil && strings.TrimSpace(*analysis.City) != "" {
+		s.City = strings.TrimSpace(*analysis.City)
 	}
 	if updateQualificationFields && analysis.Goal != nil && strings.TrimSpace(*analysis.Goal) != "" {
 		s.Goal = strings.TrimSpace(*analysis.Goal)
@@ -294,6 +310,7 @@ func (s LeadState) PromptJSON(stage string) string {
 	summary := struct {
 		HasBeenGreeted     bool     `json:"has_been_greeted"`
 		Niche              *string  `json:"niche"`
+		City               *string  `json:"city"`
 		Goal               *string  `json:"goal"`
 		Platform           *string  `json:"platform"`
 		Platforms          []string `json:"platforms"`
@@ -318,6 +335,7 @@ func (s LeadState) PromptJSON(stage string) string {
 	}{
 		HasBeenGreeted:     s.HasBeenGreeted,
 		Niche:              nullableString(s.Niche),
+		City:               nullableString(s.City),
 		Goal:               nullableString(s.Goal),
 		Platform:           nullableString(s.platformSummary()),
 		Platforms:          append([]string(nil), s.Platforms...),
@@ -390,30 +408,72 @@ func (a CustomerAnalysis) JSON() string {
 
 func extractNiche(text string, current LeadState) string {
 	normalized := normalizeForAnalysis(text)
+	switch {
+	case strings.Contains(normalized, "стирка ковров"):
+		return "стирка ковров"
+	case strings.Contains(normalized, "химчистка ковров"):
+		return "химчистка ковров"
+	case strings.Contains(normalized, "чистка ковров"):
+		return "чистка ковров"
+	case strings.Contains(normalized, "копирайтинг"):
+		return "копирайтинг"
+	}
 	if value := extractPrefixedValue(normalized, []string{
 		"ниша", "сфера", "бизнес", "направление", "сала", "niche", "industry",
 	}, []string{
 		"цель", "максат", "goal", "срок", "сроки", "мерзим", "deadline", "площад", "platform",
 	}); value != "" {
-		return normalizeNiche(value)
+		return normalizeNiche(cleanNicheSource(value))
+	}
+
+	cleaned := cleanNicheSource(normalized)
+	if value := knownNicheFromText(cleaned); value != "" {
+		return value
 	}
 
 	if hasGoalMarker(normalized) || hasDeadlineMarker(normalized) || len(extractPlatforms(text)) > 0 {
-		if value := knownNicheFromText(normalized); value != "" {
+		if value := knownNicheFromText(cleaned); value != "" {
 			return value
 		}
 		return ""
 	}
 
-	if value := productNicheFromText(normalized); value != "" {
+	if value := productNicheFromText(cleaned); value != "" {
 		return value
 	}
 
-	if isLikelyShortAnswerFor(fieldNiche, current, normalized) {
-		return normalizeNiche(normalized)
+	if isLikelyShortAnswerFor(fieldNiche, current, cleaned) {
+		return normalizeNiche(cleaned)
 	}
 
-	return knownNicheFromText(normalized)
+	return knownNicheFromText(cleaned)
+}
+
+func extractCity(text string) string {
+	normalized := normalizeForAnalysis(text)
+	if normalized == "" {
+		return ""
+	}
+	cities := []struct {
+		value    string
+		variants []string
+	}{
+		{value: "Алматы", variants: []string{"алматы", "алмате", "алмата"}},
+		{value: "Астана", variants: []string{"астана", "астане", "нур султан", "нурсултан"}},
+		{value: "Шымкент", variants: []string{"шымкент", "шимкент", "шымкенте", "шимкенте"}},
+		{value: "Караганда", variants: []string{"караганда", "караганде", "қарағанды"}},
+		{value: "Актобе", variants: []string{"актобе", "ақтөбе"}},
+		{value: "Атырау", variants: []string{"атырау"}},
+		{value: "Актау", variants: []string{"актау", "ақтау"}},
+	}
+	for _, city := range cities {
+		for _, variant := range city.variants {
+			if containsWordOrPhrase(normalized, variant) {
+				return city.value
+			}
+		}
+	}
+	return ""
 }
 
 func extractGoal(text string, current LeadState) string {
@@ -646,7 +706,9 @@ func containsDeadlineQuestion(normalized string) bool {
 func isNegativeReaction(normalized string) bool {
 	return containsAny(normalized, []string{
 		"надоел", "достал", "отстан", "отвали", "иди ты", "пошел", "пошёл", "тупой",
-		"шаршатты", "мазалама", "жоғал", "annoying", "stop asking",
+		"желание пропало", "пропало желание", "уже не интересно", "вообще не понимаете",
+		"не понимаете", "бот тупит", "бот тупой", "оставьте", "не надо", "стоп",
+		"шаршатты", "мазалама", "жоғал", "annoying", "stop asking", "not interested",
 	})
 }
 
@@ -825,6 +887,7 @@ func normalizeDeadline(value string) string {
 	weekday := deadlineWeekday(value)
 	concreteDate := concreteDatePhrase(value)
 	monthDate := concreteMonthDatePhrase(value)
+	wordNumberDate := wordNumberDeadlinePhrase(value)
 	switch {
 	case containsAny(value, []string{"без срока", "без строгого срока", "нет срока", "не срочно", "срок не важен", "no strict deadline", "no deadline"}):
 		return "без строгого срока"
@@ -846,8 +909,10 @@ func normalizeDeadline(value string) string {
 		return concreteDate
 	case monthDate != "":
 		return monthDate
-	case containsAny(value, []string{"месяц", "ай", "month"}):
+	case containsAny(value, []string{"месяц", "month", "бир ай"}) || containsWordOrPhrase(value, "ай"):
 		return "в течение месяца"
+	case wordNumberDate != "":
+		return wordNumberDate
 	case containsAny(value, []string{"день", "дня", "дней", "күн", "days"}):
 		return firstDeadlinePhrase(value)
 	default:
@@ -926,19 +991,45 @@ func firstDeadlinePhrase(value string) string {
 	return "в ближайшие дни"
 }
 
+func wordNumberDeadlinePhrase(value string) string {
+	numbers := map[string]string{
+		"один": "1", "одну": "1", "одного": "1",
+		"два": "2", "две": "2",
+		"три": "3", "четыре": "4", "пять": "5",
+		"шесть": "6", "семь": "7", "восемь": "8", "девять": "9", "десять": "10",
+	}
+	parts := strings.Fields(value)
+	for i, part := range parts {
+		number := numbers[strings.Trim(part, " .,!?:;")]
+		if number == "" || i+1 >= len(parts) {
+			continue
+		}
+		next := strings.Trim(parts[i+1], " .,!?:;")
+		if strings.HasPrefix(next, "д") || strings.HasPrefix(next, "к") {
+			return "за " + number + " " + next
+		}
+	}
+	return ""
+}
+
 func knownNicheFromText(normalized string) string {
 	candidates := []string{
+		"стирка ковров", "чистка ковров", "химчистка ковров", "копирайтинг",
+		"доставка еды", "магазин одежды", "барбер", "барбершоп",
 		"спорт", "фитнес", "йога", "стоматология", "медицина", "косметология",
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
 		"недвижимость", "ремонт", "строительство", "образование", "курсы",
 		"мебель", "авто", "туризм", "отель", "барбершоп", "маркетинг",
-		"бад", "бады", "бад для похудения", "нутрицевтик", "биодобав",
+		"бад для похудения", "бад", "бады", "нутрицевтик", "биодобав",
 		"онлайн курс", "online course", "real estate", "beauty salon", "expert blog",
 		"clothing brand", "education", "fitness", "construction", "medical clinic",
 		"медицинская клиника", "клиника", "экспертный блог", "бренд одежды",
 	}
 	for _, candidate := range candidates {
-		if strings.Contains(normalized, candidate) {
+		if containsWordOrPhrase(normalized, candidate) {
+			if strings.Contains(candidate, " ") {
+				return candidate
+			}
 			if len(strings.Fields(normalized)) <= 4 {
 				return normalizeNiche(normalized)
 			}
@@ -946,6 +1037,64 @@ func knownNicheFromText(normalized string) string {
 		}
 	}
 	return ""
+}
+
+func cleanNicheSource(value string) string {
+	value = normalizeForAnalysis(value)
+	replacer := strings.NewReplacer(
+		"!", " ",
+		"?", " ",
+		".", " ",
+		",", " ",
+		";", " ",
+		":", " ",
+		"—", " ",
+		"-", " ",
+	)
+	value = replacer.Replace(value)
+	value = removeKnownCityPhrases(value)
+	noise := []string{
+		"здравствуйте", "здраствуйте", "добрый день", "добрый вечер", "привет", "салам",
+		"ниша", "сфера", "направление",
+		"у нас", "у меня", "моя", "мой", "наша", "наш", "работа", "занимаюсь", "занимаемся",
+	}
+	for _, item := range noise {
+		value = strings.ReplaceAll(value, item, " ")
+	}
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func removeKnownCityPhrases(value string) string {
+	replacements := []string{
+		"в алматы", "г алматы", "город алматы", "алматы", "алмате", "алмата",
+		"в астане", "астана", "астане", "нур султан", "нурсултан",
+		"в шымкенте", "в шимкенте", "шымкент", "шимкент",
+		"караганда", "караганде", "актобе", "атырау", "актау",
+	}
+	for _, item := range replacements {
+		value = strings.ReplaceAll(value, item, " ")
+	}
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func containsWordOrPhrase(text string, phrase string) bool {
+	clean := func(value string) string {
+		value = normalizeForAnalysis(value)
+		value = strings.NewReplacer(
+			"!", " ",
+			"?", " ",
+			".", " ",
+			",", " ",
+			";", " ",
+			":", " ",
+			"—", " ",
+			"-", " ",
+		).Replace(value)
+		return strings.Join(strings.Fields(value), " ")
+	}
+	text = " " + clean(text) + " "
+	phrase = " " + clean(phrase) + " "
+	return strings.Contains(text, phrase)
 }
 
 func productNicheFromText(normalized string) string {

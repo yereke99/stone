@@ -1130,6 +1130,9 @@ func completedFieldsForLead(lead LeadState) map[string]bool {
 	if isValidNiche(lead.Niche) {
 		completed[fieldNiche] = true
 	}
+	if strings.TrimSpace(lead.City) != "" {
+		completed[fieldCity] = true
+	}
 	if isValidGoal(lead.Goal) {
 		completed[fieldGoal] = true
 	}
@@ -1176,7 +1179,7 @@ func normalizeFieldName(field string) string {
 		return fieldPreviousAIAds
 	case fieldPackage:
 		return fieldPackageInterest
-	case fieldNiche, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds, fieldPackageInterest, fieldBrief:
+	case fieldNiche, fieldCity, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds, fieldPackageInterest, fieldBrief:
 		return strings.TrimSpace(field)
 	default:
 		return ""

@@ -1115,12 +1115,15 @@ func TestOptOutStopsMarketingReplies(t *testing.T) {
 	sendText(t, service, chatID, "не интересно")
 	sendText(t, service, chatID, "алло")
 
-	if len(sender.messages) != 1 {
-		t.Fatalf("sent messages after opt-out = %#v, want only opening", sender.messages)
+	if len(sender.messages) != 2 {
+		t.Fatalf("sent messages after opt-out = %#v, want opening plus recovery handoff", sender.messages)
+	}
+	if !strings.Contains(sender.messages[1], "неправильно понял") {
+		t.Fatalf("opt-out recovery reply = %q", sender.messages[1])
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.Stopped {
-		t.Fatalf("opt-out state = stage=%q optout=%v stopped=%v", conversation.Stage, conversation.OptOut, conversation.Stopped)
+	if conversation.Stage != ClientStateHandedOff || !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {
+		t.Fatalf("opt-out handoff state = stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
 	}
 }
 

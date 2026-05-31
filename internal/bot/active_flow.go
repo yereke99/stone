@@ -58,7 +58,8 @@ func faqContinuation(language string, conversation Conversation) (string, string
 	if sameFields(missing, []string{fieldNiche, fieldGoal, fieldDeadline}) {
 		return QualificationQuestionsText(language), ClientStateAwaitingQualification, 0, missing
 	}
-	return qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, missing
+	reply := qualificationFollowupText(language, conversation)
+	return reply, ClientStateAwaitingQualification, 0, qualificationFollowupAskedFields(reply, missing)
 }
 
 func (s *Service) handleBriefRequested(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {

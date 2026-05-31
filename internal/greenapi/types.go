@@ -8,6 +8,12 @@ const (
 	TypeMessageText         = "textMessage"
 	TypeMessageExtendedText = "extendedTextMessage"
 	TypeMessageQuoted       = "quotedMessage"
+	TypeMessageImage        = "imageMessage"
+	TypeMessageVideo        = "videoMessage"
+	TypeMessageAudio        = "audioMessage"
+	TypeMessageVoice        = "voiceMessage"
+	TypeMessageDocument     = "documentMessage"
+	TypeMessageSticker      = "stickerMessage"
 )
 
 type Notification struct {
@@ -185,6 +191,15 @@ func (n *Notification) IsTextMessage() bool {
 	return messageType == TypeMessageText || messageType == TypeMessageExtendedText || messageType == TypeMessageQuoted
 }
 
+func (n *Notification) IsMediaMessage() bool {
+	switch n.TypeMessage() {
+	case TypeMessageImage, TypeMessageVideo, TypeMessageAudio, TypeMessageVoice, TypeMessageDocument, TypeMessageSticker:
+		return true
+	default:
+		return false
+	}
+}
+
 func (n *Notification) Text() string {
 	if n == nil {
 		return ""
@@ -209,6 +224,8 @@ func (n *Notification) Text() string {
 			return text
 		}
 		return strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Description)
+	case TypeMessageImage, TypeMessageVideo, TypeMessageAudio, TypeMessageVoice, TypeMessageDocument, TypeMessageSticker:
+		return strings.TrimSpace(n.Body.MessageData.FileMessageData.Caption)
 	default:
 		return ""
 	}

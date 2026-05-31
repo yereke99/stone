@@ -175,6 +175,10 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		}
 	}
 
+	if isIncomingMediaContext(msg) {
+		return s.handleIncomingMediaContext(ctx, chatID, msg, text, language)
+	}
+
 	if text == "" {
 		return s.sendAndRemember(ctx, chatID, fallbackForLead(language, conversation.Lead), StageDiagnosis, 0)
 	}
@@ -337,11 +341,24 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	if isReplyAfterWeeklyFollowup(conversation) {
 		return s.completeFollowupReplyHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
 	}
+	if analysis.Intent == IntentHumanRequest {
+		level := analysis.SelectedLevel
+		if level == 0 {
+			level = selectedLevelFromConversation(conversation)
+		}
+		return s.sendHumanHandoff(ctx, chatID, language, level)
+	}
 	if analysis.Intent == IntentFAQ && strings.TrimSpace(analysis.FAQKey) != "" {
 		return s.handleFAQ(ctx, chatID, language, conversation, analysis)
 	}
 	if state == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
 		return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
+	}
+	if analysis.Intent == IntentFormatAdvice {
+		return s.handleFormatAdvice(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentBusinessLink {
+		return s.handleBusinessLink(ctx, chatID, text, language, conversation, analysis)
 	}
 	if shouldSuppressRapidFollowup(conversation, analysis) {
 		s.info("rapid follow-up suppressed",
@@ -423,10 +440,10 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 				return s.sendQuestionnaireOffer(ctx, chatID, language, level)
 			}
 		}
-		if len(conversation.Lead.MissingCoreFields()) > 0 && shouldClarifyWeakQualificationAnswer(analysis) {
-			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
+		if analysis.Intent == IntentPriceQuestion || analysis.Intent == IntentPortfolioRequest {
+			return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
 		}
-		if !hasQualificationSignal(conversation, analysis) {
+		if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
 			return s.sendAndRemember(ctx, chatID, qualificationFollowupText(language, conversation), ClientStateAwaitingQualification, 0, qualificationMissingFields(conversation.Lead)...)
 		}
 		return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
@@ -507,6 +524,12 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		}
 		return s.sendAndRemember(ctx, chatID, shortPriceReminderText(language), ClientStatePackagesPresented, 0)
 	}
+	if analysis.Intent == IntentFormatAdvice {
+		return s.handleFormatAdvice(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentBusinessLink {
+		return s.handleBusinessLink(ctx, chatID, text, language, conversation, analysis)
+	}
 	if analysis.Intent == IntentObjection || hasAny(normalized, []string{"дорого", "қымбат", "expensive"}) {
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStatePackagesPresented, 0)
 	}
@@ -547,6 +570,12 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 	}
 	if analysis.Intent == IntentPortfolioRequest {
 		return s.sendAndRemember(ctx, chatID, portfolioAlreadySentText(language), ClientStateAwaitingQuestionnaireConfirm, level)
+	}
+	if analysis.Intent == IntentFormatAdvice {
+		return s.handleFormatAdvice(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentBusinessLink {
+		return s.handleBusinessLink(ctx, chatID, text, language, conversation, analysis)
 	}
 	if analysis.Intent == IntentObjection || hasAny(normalized, []string{"дорого", "қымбат", "expensive"}) {
 		return s.sendAndRemember(ctx, chatID, ObjectionText(language), ClientStateAwaitingQuestionnaireConfirm, 0)
@@ -638,8 +667,15 @@ func (s *Service) sendQuestionnaireAndAwaitBrief(ctx context.Context, chatID str
 	}
 
 	text := BriefText(language)
+	if leadHasBusinessLink(conversation.Lead) {
+		text = BriefTextAfterLink(language)
+	}
 	if level > 0 {
-		text = BriefTextForPackage(language, level)
+		if leadHasBusinessLink(conversation.Lead) {
+			text = BriefTextAfterLink(language)
+		} else {
+			text = BriefTextForPackage(language, level)
+		}
 	}
 	if err := s.sendAndRemember(ctx, chatID, text, StageBriefRequested, level); err != nil {
 		return err
@@ -689,6 +725,24 @@ func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language 
 		if level > 0 {
 			conversation.SelectedLevel = level
 			conversation.Lead.SelectedPackage = packageKey(level)
+		} else if !isValidPackageInterest(conversation.Lead.SelectedPackage) {
+			conversation.Lead.SelectedPackage = packageNeedsManagerRecommendation
+		}
+		handoffNote := "Запрос менеджера"
+		if text := strings.TrimSpace(conversation.LastIncomingText); text != "" {
+			handoffNote += ": " + text
+		}
+		conversation.Lead.FreeText = appendBriefText(conversation.Lead.FreeText, handoffNote)
+		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, handoffNote)
+		conversation.Lead.BriefCompleted = true
+		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+		conversation.LeadStatus = LeadStatusHandoffRequired
+		conversation.HandedOffToOwner = true
+		conversation.AutomationClosed = true
+		conversation.Stopped = true
+		if conversation.TransferredAt.IsZero() {
+			conversation.TransferredAt = time.Now().UTC()
 		}
 	})
 	conversation, err := s.store.Snapshot(ctx, chatID)
@@ -697,9 +751,6 @@ func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language 
 	}
 	if level == 0 {
 		level = selectedLevelFromConversation(conversation)
-	}
-	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
-		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
 	}
 	return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
 }
@@ -762,6 +813,31 @@ func (s *Service) HandleNonTextMessage(ctx context.Context, chatID string, langu
 		language = "ru"
 	}
 	return s.sendAndRemember(ctx, chatID, NonTextFallbackText(language), StageDiagnosis, 0)
+}
+
+func (s *Service) handleIncomingMediaContext(ctx context.Context, chatID string, msg IncomingMessage, text string, language string) error {
+	placeholder := mediaIncomingText(msg.TypeMessage, text)
+	if err := s.store.AppendMessage(ctx, chatID, "user", placeholder); err != nil {
+		return err
+	}
+	if err := s.store.MarkIncoming(ctx, chatID, placeholder); err != nil {
+		return err
+	}
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if isConversationClosedForAutomation(conversation) {
+		s.info("incoming media saved without automation reply",
+			automationSilenceFields(chatID, conversation, "protected_conversation_state_media")...,
+		)
+		return nil
+	}
+	reply := NonTextFallbackText(language)
+	if strings.TrimSpace(conversation.LastReplyText) == reply {
+		return nil
+	}
+	return s.sendAndRemember(ctx, chatID, reply, mediaFallbackStage(conversation), selectedLevelFromConversation(conversation), qualificationMissingFields(conversation.Lead)...)
 }
 
 func (s *Service) handleLocalCommand(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) (bool, error) {
@@ -1751,6 +1827,41 @@ func conversationIsWaitingForBrief(conversation Conversation) bool {
 	return conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested
 }
 
+func isIncomingMediaContext(msg IncomingMessage) bool {
+	messageType := strings.TrimSpace(msg.TypeMessage)
+	switch messageType {
+	case "imageMessage", "videoMessage", "audioMessage", "voiceMessage", "documentMessage", "stickerMessage":
+		return true
+	default:
+		return false
+	}
+}
+
+func mediaIncomingText(messageType string, text string) string {
+	text = strings.TrimSpace(text)
+	if text != "" {
+		return text
+	}
+	messageType = strings.TrimSpace(messageType)
+	if messageType == "" {
+		messageType = "media"
+	}
+	return "[" + messageType + "]"
+}
+
+func mediaFallbackStage(conversation Conversation) string {
+	switch {
+	case conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested:
+		return StageBriefRequested
+	case conversation.QuestionnaireOfferSent:
+		return ClientStateAwaitingQuestionnaireConfirm
+	case conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent:
+		return ClientStatePackagesPresented
+	default:
+		return ClientStateAwaitingQualification
+	}
+}
+
 func isPackageSuggestionStage(stage string) bool {
 	switch stage {
 	case StagePackageSuggested, StageOffer, StageAIExperienceChecked:
@@ -1948,6 +2059,9 @@ func qualificationFollowupText(language string, conversation Conversation) strin
 			return "Понял вас. Подскажите, пожалуйста, нишу и главную цель ролика?"
 		}
 		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
+			if isValidNiche(conversation.Lead.Niche) {
+				return fmt.Sprintf("Понял, %s. Подскажите, пожалуйста, цель ролика: заявки, продажи или узнаваемость? И когда нужно запустить?", conversation.Lead.Niche)
+			}
 			return "Понял вас. Подскажите, пожалуйста, цель и сроки запуска?"
 		}
 		return "Понял вас. Подскажите, пожалуйста, нишу, цель и сроки запуска одним сообщением."
@@ -2037,6 +2151,72 @@ func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {
 	}
 }
 
+func (s *Service) handleFormatAdvice(ctx context.Context, chatID string, language string, conversation Conversation) error {
+	message := FormatAdviceText(language)
+	if followup := formatAdviceFollowupText(language, conversation); strings.TrimSpace(followup) != "" {
+		message += "\n\n" + followup
+	}
+	stage := ClientStateAwaitingQualification
+	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+		stage = ClientStatePackagesPresented
+	}
+	if conversation.QuestionnaireOfferSent {
+		stage = ClientStateAwaitingQuestionnaireConfirm
+	}
+	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
+		stage = StageBriefRequested
+	}
+	return s.sendAndRemember(ctx, chatID, message, stage, selectedLevelFromConversation(conversation), qualificationMissingFields(conversation.Lead)...)
+}
+
+func formatAdviceFollowupText(language string, conversation Conversation) string {
+	lead := conversation.Lead
+	missing := qualificationMissingFields(lead)
+	if len(missing) == 0 {
+		switch normalizeLanguageCode(language) {
+		case "kk":
+			return "Аудитория мен қазіргі офферді қысқаша жазсаңыз, нақты формат ұсынамын."
+		case "en":
+			return "Send the audience and current offer briefly, and I will suggest the exact format."
+		default:
+			return "Напишите кратко аудиторию и текущий оффер — под это предложим точный формат."
+		}
+	}
+	if isValidNiche(lead.Niche) && !isValidGoal(lead.Goal) {
+		return singleMissingQuestion(language, fieldGoal, lead)
+	}
+	if !isValidNiche(lead.Niche) {
+		switch normalizeLanguageCode(language) {
+		case "kk":
+			return "Нені продвигаем және мақсат қандай: өтінім, сату немесе танымалдық?"
+		case "en":
+			return "What exactly are we promoting, and what is the goal: leads, sales, or awareness?"
+		default:
+			return "Что именно продвигаем и какая цель: заявки, продажи или узнаваемость?"
+		}
+	}
+	return askMissingFieldsReply(language, lead, limitFieldsToAsk(missing, 2))
+}
+
+func (s *Service) handleBusinessLink(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested || conversation.QuestionnaireOfferSent {
+		s.recordBriefMessage(chatID, text, analysis)
+		return s.sendAndRemember(ctx, chatID, LinkReceivedBriefText(language), StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
+	}
+	stage := ClientStateAwaitingQualification
+	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+		stage = ClientStatePackagesPresented
+	}
+	if len(qualificationMissingFields(conversation.Lead)) == 0 {
+		return s.sendAndRemember(ctx, chatID, LinkReceivedBriefText(language), stage, selectedLevelFromConversation(conversation), fieldBrief)
+	}
+	return s.sendAndRemember(ctx, chatID, LinkReceivedQualificationText(language), stage, selectedLevelFromConversation(conversation), qualificationMissingFields(conversation.Lead)...)
+}
+
+func leadHasBusinessLink(lead LeadState) bool {
+	return extractBusinessLink(strings.Join([]string{lead.Notes, lead.FreeText}, " ")) != ""
+}
+
 func isOptOutText(text string) bool {
 	return isExplicitOptOutText(text)
 }
@@ -2077,10 +2257,22 @@ func isPositiveConfirmation(text string) bool {
 	normalized := normalizeForAnalysis(text)
 	clean := strings.Trim(normalized, " .,!?:;")
 	switch clean {
-	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "давайте", "жду", "конечно", "иә", "иа", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
+	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "отправляйте", "давайте", "жду", "конечно", "иә", "иа", "жарайды", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
 		return true
 	default:
 		return containsAny(normalized, []string{"отправьте", "скиньте", "сбросьте", "жду", "жибер", "жібер", "send it", "send me"})
+	}
+}
+
+func isGenericAcknowledgement(text string) bool {
+	normalized := normalizeForAnalysis(text)
+	clean := strings.Trim(normalized, " .,!?:;")
+	switch clean {
+	case "да", "ок", "окей", "хорошо", "понял", "поняла", "принял", "приняла", "спасибо", "рахмет",
+		"иә", "иа", "жарайды", "жаксы", "жақсы", "yes", "ok", "okay", "thanks", "thank you":
+		return true
+	default:
+		return false
 	}
 }
 

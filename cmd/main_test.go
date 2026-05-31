@@ -222,6 +222,22 @@ func TestShouldProcessNotificationRequiresAutoReplyAndText(t *testing.T) {
 	}
 }
 
+func TestShouldProcessNotificationAcceptsMediaWithoutCaption(t *testing.T) {
+	now := time.Now().UTC()
+	notification := incomingTextNotification(525, "media-1", "77052500000@c.us", "")
+	notification.Body.MessageData = greenapi.MessageData{
+		TypeMessage: greenapi.TypeMessageImage,
+	}
+
+	chatID, text, ok, reason := shouldProcessNotification(notification, now, time.Hour, time.Time{}, true)
+	if !ok || reason != "accepted" {
+		t.Fatalf("media ok=%v reason=%q, want accepted", ok, reason)
+	}
+	if chatID != "77052500000@c.us" || text != "" {
+		t.Fatalf("media chatID=%q text=%q", chatID, text)
+	}
+}
+
 func TestQuotedNotificationUsesCurrentTextNotQuotedText(t *testing.T) {
 	now := time.Now().UTC()
 	currentText := "1. Фитнес обучение\n2. Заявки+продажи+узнаваемость\n3. К 10 июня"

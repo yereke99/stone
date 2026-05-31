@@ -33,6 +33,8 @@ const (
 	IntentHumanRequest     = "human_request"
 	IntentMute             = "mute"
 	IntentFAQ              = "faq"
+	IntentBusinessLink     = "business_link"
+	IntentFormatAdvice     = "asks_which_format_is_best"
 	IntentOther            = "other"
 )
 
@@ -73,6 +75,7 @@ type CustomerAnalysis struct {
 	AIExperience       *string  `json:"ai_experience,omitempty"`
 	Budget             *string  `json:"budget,omitempty"`
 	TargetAudience     *string  `json:"target_audience,omitempty"`
+	BusinessLink       *string  `json:"business_link,omitempty"`
 	Intent             string   `json:"intent"`
 	SelectedLevel      int      `json:"selected_level,omitempty"`
 	PackageInterest    *string  `json:"package_interest,omitempty"`
@@ -114,6 +117,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	if audience := extractTargetAudience(text); audience != "" {
 		analysis.TargetAudience = stringPointer(audience)
 	}
+	if link := extractBusinessLink(text); link != "" {
+		analysis.BusinessLink = stringPointer(link)
+	}
 	if numbered := extractNumberedQualificationAnswers(text); numbered.found {
 		analysis.NumberedQualificationAnswer = true
 		if numbered.niche != "" {
@@ -139,10 +145,14 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentMute
 	case isNegativeReaction(normalized):
 		analysis.Intent = IntentNegativeReaction
-	case analysis.PackageInterest != nil:
-		analysis.Intent = IntentPackageSelection
 	case containsHumanRequest(normalized):
 		analysis.Intent = IntentHumanRequest
+	case asksWhichFormatWorksBest(normalized):
+		analysis.Intent = IntentFormatAdvice
+	case analysis.BusinessLink != nil:
+		analysis.Intent = IntentBusinessLink
+	case analysis.PackageInterest != nil:
+		analysis.Intent = IntentPackageSelection
 	case containsPortfolioRequest(text):
 		analysis.Intent = IntentPortfolioRequest
 	case containsDeadlineQuestion(normalized):
@@ -190,6 +200,7 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 		a.TargetAudience != nil ||
 		a.SelectedLevel > 0 ||
 		a.PackageInterest != nil ||
+		a.BusinessLink != nil ||
 		a.WantsQuestionnaire
 }
 
@@ -222,6 +233,9 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	if analysis.TargetAudience != nil && strings.TrimSpace(*analysis.TargetAudience) != "" {
 		s.TargetAudience = strings.TrimSpace(*analysis.TargetAudience)
 	}
+	if analysis.BusinessLink != nil && strings.TrimSpace(*analysis.BusinessLink) != "" {
+		s.Notes = appendBriefText(s.Notes, "Ссылка: "+strings.TrimSpace(*analysis.BusinessLink))
+	}
 	if updateQualificationFields && analysis.PackageInterest != nil && isValidPackageInterest(*analysis.PackageInterest) {
 		s.SelectedPackage = normalizePackageInterest(*analysis.PackageInterest)
 		s.LeadStatus = LeadStatusHot
@@ -243,6 +257,9 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	}
 	if analysis.Intent == IntentHumanRequest {
 		s.WantsQuestionnaire = true
+		if !isValidPackageInterest(s.SelectedPackage) {
+			s.SelectedPackage = packageNeedsManagerRecommendation
+		}
 		if strings.TrimSpace(s.LeadStatus) == "" || normalizeLeadStatus(s.LeadStatus) == LeadStatusNew {
 			s.LeadStatus = LeadStatusHot
 		}
@@ -386,6 +403,10 @@ func extractNiche(text string, current LeadState) string {
 			return value
 		}
 		return ""
+	}
+
+	if value := productNicheFromText(normalized); value != "" {
+		return value
 	}
 
 	if isLikelyShortAnswerFor(fieldNiche, current, normalized) {
@@ -589,6 +610,27 @@ func extractTargetAudience(text string) string {
 	return ""
 }
 
+func extractBusinessLink(text string) string {
+	normalized := strings.TrimSpace(text)
+	if normalized == "" {
+		return ""
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bhttps?://[^\s<>"']+`),
+		regexp.MustCompile(`(?i)\bwww\.[^\s<>"']+`),
+		regexp.MustCompile(`(?i)\b(?:instagram|instagr\.am|tiktok|wa|taplink|linktr|2gis)\.[^\s<>"']+`),
+		regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+\.[a-z]{2,}(?:/[^\s<>"']*)?`),
+		regexp.MustCompile(`(?i)(?:^|\s)@[a-z0-9_.]{3,}`),
+	}
+	for _, pattern := range patterns {
+		match := pattern.FindString(normalized)
+		if strings.TrimSpace(match) != "" {
+			return strings.Trim(strings.TrimSpace(match), ".,;!?)(")
+		}
+	}
+	return ""
+}
+
 func containsPriceQuestion(normalized string) bool {
 	return containsAny(normalized, []string{
 		"цена", "стоимость", "сколько", "прайс", "тариф", "қанша", "баға", "price", "cost",
@@ -613,9 +655,25 @@ func containsHumanRequest(normalized string) bool {
 		"оператор", "менеджер", "админ", "администратор", "живой человек", "специалист",
 		"свяжите", "соедините", "подключите", "позвоните", "напишите админу", "пишите к админу",
 		"нужен оператор", "нужен менеджер", "где оператор", "где менеджер", "передайте менеджеру",
+		"передай менеджеру", "на менеджера", "отправь на менеджера", "отправьте на менеджера",
+		"менеджер пусть", "пусть менеджер", "без ии", "без ai", "без бота", "не бот",
+		"пусть человек", "человек ответит", "живой менеджер", "живой консультант",
 		"срочно менеджер", "срочно оператор", "manager", "operator", "human", "real person", "admin",
 		"connect me", "call me", "need a manager", "need operator", "менеджер керек", "оператор керек",
 	})
+}
+
+func asksWhichFormatWorksBest(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	hasFormat := containsAny(normalized, []string{"формат", "ролик", "креатив", "подача", "угс", "ugc", "format", "creative"})
+	hasBest := containsAny(normalized, []string{
+		"лучше", "лучший", "заходит", "работает", "эффектив", "конверт", "продает", "продаёт",
+		"какой выбрать", "что выбрать", "кайсы жаксы", "жаксы отеди", "best", "works best", "converts",
+	})
+	hasAds := containsAny(normalized, []string{"реклам", "жарнама", "ads", "performance"})
+	return hasFormat && hasBest || hasAds && hasBest && containsAny(normalized, []string{"какой", "что", "қай", "which", "what"})
 }
 
 func isMuteRequest(normalized string) bool {
@@ -874,6 +932,7 @@ func knownNicheFromText(normalized string) string {
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
 		"недвижимость", "ремонт", "строительство", "образование", "курсы",
 		"мебель", "авто", "туризм", "отель", "барбершоп", "маркетинг",
+		"бад", "бады", "бад для похудения", "нутрицевтик", "биодобав",
 		"онлайн курс", "online course", "real estate", "beauty salon", "expert blog",
 		"clothing brand", "education", "fitness", "construction", "medical clinic",
 		"медицинская клиника", "клиника", "экспертный блог", "бренд одежды",
@@ -887,6 +946,40 @@ func knownNicheFromText(normalized string) string {
 		}
 	}
 	return ""
+}
+
+func productNicheFromText(normalized string) string {
+	if normalized == "" || strings.Contains(normalized, "?") || strings.Contains(normalized, "http") || strings.Contains(normalized, "www") {
+		return ""
+	}
+	if normalizeGoal(normalized) != "" || normalizeDeadline(normalized) != "" {
+		return ""
+	}
+	words := strings.Fields(normalized)
+	if len(words) == 0 || len(words) > 8 {
+		return ""
+	}
+	productMarkers := []string{
+		"продаю", "продаем", "продаём", "продвигаю", "продвигаем", "рекламирую", "рекламируем",
+		"занимаюсь", "занимаемся", "у меня", "у нас", "сатамын", "сатамыз", "sell", "selling",
+	}
+	value := normalized
+	found := false
+	for _, marker := range productMarkers {
+		if strings.Contains(value, marker) {
+			value = strings.ReplaceAll(value, marker, " ")
+			found = true
+		}
+	}
+	if !found && knownNicheFromText(normalized) == "" {
+		return ""
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.Trim(value, " -—:;,.!?")
+	if value == "" {
+		return knownNicheFromText(normalized)
+	}
+	return normalizeNiche(value)
 }
 
 func isLikelyShortAnswerFor(field string, current LeadState, normalized string) bool {

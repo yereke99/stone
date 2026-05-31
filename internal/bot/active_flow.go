@@ -75,6 +75,16 @@ func (s *Service) handleBriefRequested(ctx context.Context, chatID string, text 
 	if isExplicitOptOutText(text) || analysis.Intent == IntentMute {
 		return s.stopClient(ctx, chatID, false)
 	}
+	if isGenericAcknowledgement(text) {
+		return nil
+	}
+	if analysis.Intent == IntentFormatAdvice {
+		return s.handleFormatAdvice(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentBusinessLink {
+		s.recordBriefMessage(chatID, text, analysis)
+		return s.sendAndRemember(ctx, chatID, LinkReceivedBriefText(language), StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
+	}
 
 	s.recordBriefMessage(chatID, text, analysis)
 	conversation, err := s.store.Snapshot(ctx, chatID)

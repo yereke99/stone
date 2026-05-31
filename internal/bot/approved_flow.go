@@ -180,6 +180,8 @@ func isBusinessRelevantMessage(text string, analysis CustomerAnalysis, faqDetect
 		IntentNegativeReaction,
 		IntentBriefAnswer,
 		IntentHumanRequest,
+		IntentBusinessLink,
+		IntentFormatAdvice,
 		IntentMute:
 		return true
 	}

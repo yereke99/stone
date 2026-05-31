@@ -309,7 +309,7 @@ func shouldProcessNotification(notification *greenapi.Notification, now time.Tim
 	if isStaleNotification(notification, maxMessageAge, now) {
 		return "", "", false, "older_than_max_age"
 	}
-	if !notification.IsTextMessage() {
+	if !notification.IsTextMessage() && !notification.IsMediaMessage() {
 		return "", "", false, "unsupported_message_type"
 	}
 	chatID = notification.ChatID()
@@ -317,7 +317,7 @@ func shouldProcessNotification(notification *greenapi.Notification, now time.Tim
 		return "", "", false, "empty_chat_id"
 	}
 	text = strings.TrimSpace(notification.Text())
-	if text == "" {
+	if notification.IsTextMessage() && text == "" {
 		return "", "", false, "empty_text"
 	}
 	return chatID, text, true, "accepted"
@@ -330,7 +330,7 @@ func notificationMessageKeys(notification *greenapi.Notification, chatID string,
 	}
 	normalizedText := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(text))), " ")
 	timestamp := strconv.FormatInt(notification.Body.Timestamp, 10)
-	sum := sha256.Sum256([]byte(chatID + "|" + timestamp + "|" + normalizedText))
+	sum := sha256.Sum256([]byte(chatID + "|" + timestamp + "|" + notification.TypeMessage() + "|" + normalizedText))
 	return "", chatID + "|fallback|" + timestamp + "|" + hex.EncodeToString(sum[:])[:16]
 }
 

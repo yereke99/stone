@@ -78,11 +78,11 @@ func FallbackText(language string) string {
 func NonTextFallbackText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Өтінемін, нишаны, мақсатты және іске қосу мерзімін мәтінмен жазыңыз."
+		return "Материал алдым. Чатта медианы әрдайым дұрыс талдай алмаймын, сондықтан қысқаша мәтінмен жазыңыз: нені продвигаем және ролик мақсаты қандай. Немесе менеджерге беремін."
 	case "en":
-		return "Please send text: niche, video goal, platform, and launch timeline."
+		return "I received the material. I cannot always parse media correctly in chat, so please write briefly in text: what we are promoting and the video goal. Or I can pass it to a manager."
 	default:
-		return "Пожалуйста, напишите текстом нишу, цель ролика, площадку и сроки запуска."
+		return "Материал получил. Я не всегда могу корректно разобрать медиа в чате, поэтому напишите, пожалуйста, коротко текстом: что продвигаем и какая цель ролика. Либо передам менеджеру."
 	}
 }
 
@@ -134,6 +134,17 @@ func BriefText(language string) string {
 	}
 }
 
+func BriefTextAfterLink(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Сілтемені алдым, рақмет. Команда парақшаны қарайды.\n\nСценарий үшін қысқаша жазыңыз:\n— Не сатасыз?\n— Күшті жағыңыз қандай?\n— Клиентіңіз кім?\n— Қазір акция / оффер бар ма?"
+	case "en":
+		return "Got the link, thank you. The team will review the page.\n\nFor the script, please write briefly:\n— What do you sell?\n— What is your strongest side?\n— Who is your customer?\n— Do you have a current promo / offer?"
+	default:
+		return "Ссылку получил, спасибо. Команда посмотрит страницу.\n\nДля сценария ещё напишите кратко:\n— Что продаёте?\n— В чём ваша сильная сторона?\n— Кто ваш клиент?\n— Есть ли сейчас акция / оффер?"
+	}
+}
+
 func BriefTextForPackage(language string, level int) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
@@ -181,12 +192,38 @@ func BriefCollectedText(language string) string {
 func HumanHandoffText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Түсіндім, менеджерді қосамын. Ол осы чатта жауап беріп, тапсырысты нақтылайды."
+		return "Түсіндім. Менеджерге беремін, ол өніміңізге ыңғайлы форматты ұсынады. Әзірге Instagram/сайт немесе қысқа сипаттама жіберсеңіз болады — ұсынысты тезірек дайындауға көмектеседі."
 	case "en":
-		return "Got it, I am connecting a manager. They will reply here and help with the order."
+		return "Got it. I will pass this to a manager so they can recommend the right format for your product. Meanwhile, you can send Instagram/website or a short description to speed up the proposal."
 	default:
-		return "Понял, подключаю менеджера Stone production. Он ответит в этом чате и поможет с заказом."
+		return "Понял вас. Передам менеджеру, чтобы он предложил подходящий формат под ваш продукт. Пока можете отправить Instagram/сайт или короткое описание — это поможет быстрее подготовить предложение."
 	}
+}
+
+func FormatAdviceText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Рекламада көбіне қысқа әрі түсінікті роликтер жақсы өтеді: UGC, problem-solution, нәтиже демонстрациясы немесе before/after. Нақты форматты таңдау үшін өнімді, аудиторияны және іске қосу мақсатын түсіну керек."
+	case "en":
+		return "For ads, short videos with a clear pain, solution, and offer usually work best: UGC, problem-solution, result demo, or before/after. To choose the exact format, we need to understand the product, audience, and launch goal."
+	default:
+		return "Для рекламы чаще всего лучше заходят короткие ролики с понятной болью, решением и оффером: UGC, problem-solution, демонстрация результата или before/after. Чтобы точно выбрать формат, нужно понять продукт, аудиторию и цель запуска."
+	}
+}
+
+func LinkReceivedQualificationText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Сілтемені алдым, рақмет. Дәл формат ұсыну үшін қысқаша жазыңыз: нені продвигаем, аудитория кім және мақсат қандай — өтінім, сату немесе танымалдық?"
+	case "en":
+		return "Got the link, thank you. To suggest the right format, please write briefly what we are promoting, who the audience is, and the goal: leads, sales, or awareness."
+	default:
+		return "Ссылку получил, спасибо. Чтобы предложить точный формат, напишите, пожалуйста, что именно продвигаем, кто ваша аудитория и какая цель: заявки, продажи или узнаваемость."
+	}
+}
+
+func LinkReceivedBriefText(language string) string {
+	return BriefTextAfterLink(language)
 }
 
 func ObjectionText(language string) string {

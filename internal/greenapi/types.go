@@ -1,6 +1,11 @@
 package greenapi
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/yereke99/stone/internal/whatsapp"
+)
 
 const (
 	TypeWebhookIncomingMessage = "incomingMessageReceived"
@@ -19,6 +24,22 @@ const (
 type Notification struct {
 	ReceiptID int              `json:"receiptId"`
 	Body      NotificationBody `json:"body"`
+	RawJSON   json.RawMessage  `json:"-"`
+}
+
+func (n *Notification) UnmarshalJSON(data []byte) error {
+	type notificationAlias struct {
+		ReceiptID int              `json:"receiptId"`
+		Body      NotificationBody `json:"body"`
+	}
+	var decoded notificationAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	n.ReceiptID = decoded.ReceiptID
+	n.Body = decoded.Body
+	n.RawJSON = append(n.RawJSON[:0], data...)
+	return nil
 }
 
 type NotificationBody struct {
@@ -38,6 +59,10 @@ type SenderData struct {
 
 type MessageData struct {
 	TypeMessage             string                  `json:"typeMessage"`
+	ChatID                  string                  `json:"chatId"`
+	Chat                    string                  `json:"chat"`
+	RemoteJID               string                  `json:"remoteJid"`
+	From                    string                  `json:"from"`
 	TextMessageData         TextMessageData         `json:"textMessageData"`
 	ExtendedTextMessageData ExtendedTextMessageData `json:"extendedTextMessageData"`
 	FileMessageData         FileMessageData         `json:"fileMessageData"`
@@ -167,6 +192,81 @@ func (n *Notification) ChatID() string {
 		return ""
 	}
 	return strings.TrimSpace(n.Body.SenderData.ChatID)
+}
+
+func (n *Notification) IsWhatsAppGroupMessage() bool {
+	if n == nil {
+		return false
+	}
+	for _, candidate := range []string{
+		n.Body.SenderData.ChatID,
+		n.Body.SenderData.Sender,
+		n.Body.MessageData.ChatID,
+		n.Body.MessageData.Chat,
+		n.Body.MessageData.RemoteJID,
+		n.Body.MessageData.From,
+	} {
+		if whatsapp.IsWhatsAppGroupChatID(candidate) {
+			return true
+		}
+	}
+	if rawPayloadIndicatesGroup(n.RawJSON) {
+		return true
+	}
+	chatID := n.ChatID()
+	return chatID != "" && !whatsapp.IsPrivateWhatsAppCustomerChatID(chatID)
+}
+
+func rawPayloadIndicatesGroup(data json.RawMessage) bool {
+	if len(data) == 0 {
+		return false
+	}
+	var payload any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return false
+	}
+	return valueIndicatesWhatsAppGroup(payload)
+}
+
+func valueIndicatesWhatsAppGroup(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(key), "_", ""), "-", ""))
+			if normalizedKey == "isgroup" {
+				if group, ok := nested.(bool); ok && group {
+					return true
+				}
+			}
+			if strings.Contains(normalizedKey, "group") {
+				switch groupValue := nested.(type) {
+				case bool:
+					if groupValue {
+						return true
+					}
+				case string:
+					if strings.TrimSpace(groupValue) != "" &&
+						!strings.EqualFold(strings.TrimSpace(groupValue), "false") &&
+						strings.TrimSpace(groupValue) != "0" {
+						return true
+					}
+				}
+			}
+			if valueIndicatesWhatsAppGroup(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if valueIndicatesWhatsAppGroup(nested) {
+				return true
+			}
+		}
+	case string:
+		value := strings.ToLower(strings.TrimSpace(typed))
+		return whatsapp.IsWhatsAppGroupChatID(value) || strings.Contains(value, "@g.us")
+	}
+	return false
 }
 
 func (n *Notification) SenderName() string {

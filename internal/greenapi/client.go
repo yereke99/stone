@@ -13,9 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/yereke99/stone/internal/whatsapp"
 )
 
 const maxErrorBodyBytes = 4096
+
+var ErrBlockedWhatsAppGroupChat = errors.New("outgoing WhatsApp message blocked because recipient is a group chat")
 
 type Client struct {
 	apiURL                string
@@ -163,8 +167,16 @@ func (c *Client) GetChatHistory(ctx context.Context, chatID string, count int) (
 }
 
 func (c *Client) SendMessage(ctx context.Context, chatID string, message string) error {
+	return c.SendMessageWithPurpose(ctx, chatID, message, whatsapp.PurposeCustomerAutomation, nil)
+}
+
+func (c *Client) SendMessageWithPurpose(ctx context.Context, chatID string, message string, purpose string, allowedGroupChatIDs []string) error {
+	chatID = strings.TrimSpace(chatID)
+	if !whatsapp.CanSendToWhatsAppChat(chatID, purpose, allowedGroupChatIDs) {
+		return fmt.Errorf("%w: %s", ErrBlockedWhatsAppGroupChat, chatID)
+	}
 	payload := map[string]string{
-		"chatId":  strings.TrimSpace(chatID),
+		"chatId":  chatID,
 		"message": strings.TrimSpace(message),
 	}
 
@@ -172,6 +184,14 @@ func (c *Client) SendMessage(ctx context.Context, chatID string, message string)
 }
 
 func (c *Client) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
+	return c.SendFileByUploadWithPurpose(ctx, chatID, filePath, caption, whatsapp.PurposeCustomerAutomation, nil)
+}
+
+func (c *Client) SendFileByUploadWithPurpose(ctx context.Context, chatID string, filePath string, caption string, purpose string, allowedGroupChatIDs []string) (string, error) {
+	chatID = strings.TrimSpace(chatID)
+	if !whatsapp.CanSendToWhatsAppChat(chatID, purpose, allowedGroupChatIDs) {
+		return "", fmt.Errorf("%w: %s", ErrBlockedWhatsAppGroupChat, chatID)
+	}
 	filePath = filepath.Clean(filePath)
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -183,7 +203,7 @@ func (c *Client) SendFileByUpload(ctx context.Context, chatID string, filePath s
 	writer := multipart.NewWriter(&body)
 
 	fields := map[string]string{
-		"chatId":  strings.TrimSpace(chatID),
+		"chatId":  chatID,
 		"caption": strings.TrimSpace(caption),
 	}
 	for key, value := range fields {
@@ -298,8 +318,16 @@ func (c *Client) UploadFile(ctx context.Context, filePath string) (string, error
 }
 
 func (c *Client) SendFileByURL(ctx context.Context, chatID string, urlFile string, fileName string, caption string) error {
+	return c.SendFileByURLWithPurpose(ctx, chatID, urlFile, fileName, caption, whatsapp.PurposeCustomerAutomation, nil)
+}
+
+func (c *Client) SendFileByURLWithPurpose(ctx context.Context, chatID string, urlFile string, fileName string, caption string, purpose string, allowedGroupChatIDs []string) error {
+	chatID = strings.TrimSpace(chatID)
+	if !whatsapp.CanSendToWhatsAppChat(chatID, purpose, allowedGroupChatIDs) {
+		return fmt.Errorf("%w: %s", ErrBlockedWhatsAppGroupChat, chatID)
+	}
 	payload := map[string]string{
-		"chatId":   strings.TrimSpace(chatID),
+		"chatId":   chatID,
 		"urlFile":  strings.TrimSpace(urlFile),
 		"fileName": strings.TrimSpace(fileName),
 		"caption":  strings.TrimSpace(caption),

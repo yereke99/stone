@@ -14,10 +14,12 @@ import (
 	"strings"
 
 	"github.com/yereke99/stone/internal/config"
+	"github.com/yereke99/stone/internal/whatsapp"
 	"go.uber.org/zap"
 )
 
 var ErrNotConfigured = errors.New("meta whatsapp client is not fully configured")
+var ErrBlockedWhatsAppGroupChat = errors.New("outgoing WhatsApp message blocked because recipient is a group chat")
 
 type Client struct {
 	cfg        config.MetaConfig
@@ -51,6 +53,12 @@ func NewClient(cfg config.MetaConfig, logger *zap.Logger) *Client {
 func (c *Client) SendTextMessage(ctx context.Context, to string, body string) error {
 	if c.cfg.APIBaseURL == "" || c.cfg.AccessToken == "" || c.cfg.PhoneNumberID == "" {
 		return ErrNotConfigured
+	}
+	if whatsapp.IsWhatsAppGroupChatID(to) {
+		if c.logger != nil {
+			c.logger.Warn("outgoing WhatsApp message blocked because recipient is a group chat", zap.String("to", to))
+		}
+		return ErrBlockedWhatsAppGroupChat
 	}
 
 	payload := SendTextRequest{

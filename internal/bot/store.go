@@ -239,6 +239,7 @@ func (s *ConversationStore) Update(chatID string, fn func(*Conversation)) {
 	conversation.BriefAsked = conversation.Lead.BriefRequested
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
 	refreshConversationDerivedState(conversation)
+	disableGroupConversationAutomation(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	_ = s.persistConversationLocked(context.Background(), conversation)
@@ -619,7 +620,7 @@ func (s *ConversationStore) DelayedPackageCandidates(ctx context.Context, now ti
 
 	candidates := make([]Conversation, 0)
 	for _, conversation := range s.conversations {
-		if conversation == nil || !shouldSendDelayedPackages(*conversation, now, after) {
+		if conversation == nil || isUnsafeCustomerWhatsAppChatID(conversation.ChatID) || !shouldSendDelayedPackages(*conversation, now, after) {
 			continue
 		}
 		candidates = append(candidates, cloneConversation(*conversation))
@@ -647,7 +648,7 @@ func (s *ConversationStore) DueFollowupCandidates(ctx context.Context, now time.
 
 	candidates := make([]Conversation, 0)
 	for _, conversation := range s.conversations {
-		if conversation == nil || strings.TrimSpace(conversation.FollowupStage) == "" || conversation.NextFollowupAt.IsZero() {
+		if conversation == nil || isUnsafeCustomerWhatsAppChatID(conversation.ChatID) || strings.TrimSpace(conversation.FollowupStage) == "" || conversation.NextFollowupAt.IsZero() {
 			continue
 		}
 		if conversation.NextFollowupAt.After(now) {
@@ -668,6 +669,9 @@ func (s *ConversationStore) ScheduleFollowup(ctx context.Context, chatID string,
 	chatID = strings.TrimSpace(chatID)
 	stage = strings.TrimSpace(stage)
 	if chatID == "" || stage == "" || dueAt.IsZero() {
+		return nil
+	}
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
 		return nil
 	}
 	if referenceAt.IsZero() {
@@ -1017,6 +1021,7 @@ func (s *ConversationStore) getOrCreateLocked(chatID string, now time.Time) *Con
 	if conversation.Stage == "" {
 		conversation.Stage = ClientStateNeutralNew
 	}
+	disableGroupConversationAutomation(conversation)
 	return conversation
 }
 

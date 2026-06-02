@@ -47,6 +47,11 @@ type GreenSender interface {
 	SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error)
 }
 
+type purposeGreenSender interface {
+	SendMessageWithPurpose(ctx context.Context, chatID string, message string, purpose string, allowedGroupChatIDs []string) error
+	SendFileByUploadWithPurpose(ctx context.Context, chatID string, filePath string, caption string, purpose string, allowedGroupChatIDs []string) (string, error)
+}
+
 type SalesAI interface {
 	GenerateSalesReply(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.SalesResponse, error)
 	AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error)
@@ -87,6 +92,20 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	chatID := strings.TrimSpace(msg.ChatID)
 	if chatID == "" {
 		return fmt.Errorf("chat id is required")
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("incoming message skipped because chat is in automation suppression list",
+			chatID,
+			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+		)
+		return nil
+	}
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.info("incoming WhatsApp group message skipped; automation disabled for groups",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+		)
+		return nil
 	}
 	unlock, err := s.lockChat(ctx, chatID)
 	if err != nil {
@@ -1101,6 +1120,39 @@ func (s *Service) sendBriefForPackage(ctx context.Context, chatID string, level 
 	return s.sendAndRemember(ctx, chatID, BriefTextForPackage(language, level), StageBriefRequested, level)
 }
 
+func (s *Service) sendCustomerWhatsAppMessage(ctx context.Context, chatID string, message string) error {
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
+		return nil
+	}
+	if sender, ok := s.sender.(purposeGreenSender); ok {
+		return sender.SendMessageWithPurpose(ctx, chatID, message, WhatsAppPurposeCustomerAutomation, nil)
+	}
+	return s.sender.SendMessage(ctx, chatID, message)
+}
+
+func (s *Service) sendCustomerWhatsAppFile(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
+		return "", nil
+	}
+	if sender, ok := s.sender.(purposeGreenSender); ok {
+		return sender.SendFileByUploadWithPurpose(ctx, chatID, filePath, caption, WhatsAppPurposeCustomerAutomation, nil)
+	}
+	return s.sender.SendFileByUpload(ctx, chatID, filePath, caption)
+}
+
+func (s *Service) sendManagerWhatsAppMessage(ctx context.Context, chatID string, message string) error {
+	if !canSendToWhatsAppChat(chatID, WhatsAppPurposeManagerNotification, s.adminChatIDs) {
+		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeManagerNotification)
+		return nil
+	}
+	if sender, ok := s.sender.(purposeGreenSender); ok {
+		return sender.SendMessageWithPurpose(ctx, chatID, message, WhatsAppPurposeManagerNotification, s.adminChatIDs)
+	}
+	return s.sender.SendMessage(ctx, chatID, message)
+}
+
 func (s *Service) sendAndRemember(ctx context.Context, chatID string, message string, stage string, selectedLevel int, askedFields ...string) error {
 	message = strings.TrimSpace(message)
 	if message == "" {
@@ -1108,6 +1160,17 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
+		return nil
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("outgoing whatsapp reply skipped because chat is in automation suppression list",
+			chatID,
+			zap.String("stage", stage),
+		)
+		return nil
 	}
 	latest, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
@@ -1141,7 +1204,7 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		return nil
 	}
 
-	if err := s.sender.SendMessage(ctx, chatID, message); err != nil {
+	if err := s.sendCustomerWhatsAppMessage(ctx, chatID, message); err != nil {
 		return err
 	}
 	incrementOutgoingCount(ctx)
@@ -1171,6 +1234,14 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 }
 
 func (s *Service) sendVideos(ctx context.Context, chatID string, files []string, language string, allowRepeat bool) error {
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
+		return nil
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("portfolio video skipped because chat is in automation suppression list", chatID)
+		return nil
+	}
 	latest, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
 		return err
@@ -1211,7 +1282,7 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 			caption = "Stone production"
 		}
 
-		messageID, err := s.sender.SendFileByUpload(ctx, chatID, filePath, caption)
+		messageID, err := s.sendCustomerWhatsAppFile(ctx, chatID, filePath, caption)
 		if err != nil {
 			s.warn("portfolio video send failed", zap.String("file_name", fileName), zap.Error(err))
 			return err
@@ -1239,6 +1310,20 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 
 func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage string) {
 	if len(s.adminChatIDs) == 0 {
+		return
+	}
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.info("admin notification skipped because source chat is a WhatsApp group",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+		)
+		return
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("admin notification skipped because chat is in automation suppression list",
+			chatID,
+			zap.String("stage", stage),
+		)
 		return
 	}
 	if stage != StageHandoffRequired && stage != StageBriefCollected && stage != ClientStateHandedOff {
@@ -1303,8 +1388,13 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 	}
 
 	message := adminLeadNotificationText(conversation)
+	sentAny := false
 	for _, adminChatID := range s.adminChatIDs {
-		if err := s.sender.SendMessage(ctx, adminChatID, message); err != nil {
+		if !canSendToWhatsAppChat(adminChatID, WhatsAppPurposeManagerNotification, s.adminChatIDs) {
+			s.blockOutgoingWhatsAppGroupMessage(adminChatID, WhatsAppPurposeManagerNotification)
+			continue
+		}
+		if err := s.sendManagerWhatsAppMessage(ctx, adminChatID, message); err != nil {
 			s.warn("admin notification send failed",
 				zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
 				zap.String("client_chat_hash", chatFingerprint(chatID)),
@@ -1324,6 +1414,10 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 			zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
 			zap.String("client_chat_hash", chatFingerprint(chatID)),
 		)
+		sentAny = true
+	}
+	if !sentAny {
+		return
 	}
 
 	if operatorRequest {

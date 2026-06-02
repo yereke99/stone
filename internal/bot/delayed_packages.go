@@ -111,6 +111,20 @@ func (s *Service) processDueFollowupForConversation(ctx context.Context, convers
 	if chatID == "" {
 		return nil
 	}
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.info("delayed follow-up skipped because chat is a WhatsApp group",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", strings.TrimSpace(conversation.FollowupStage)),
+		)
+		return s.store.CancelFollowup(context.WithoutCancel(ctx), chatID)
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("delayed follow-up skipped because chat is in automation suppression list",
+			chatID,
+			zap.String("stage", strings.TrimSpace(conversation.FollowupStage)),
+		)
+		return s.store.CancelFollowup(context.WithoutCancel(ctx), chatID)
+	}
 	unlock, err := s.lockChat(ctx, chatID)
 	if err != nil {
 		return err

@@ -204,6 +204,16 @@ func processNotification(
 
 	chatID, text, ok, reason := shouldProcessNotification(notification, time.Now(), maxMessageAge, serviceStartedAt, autoReplyEnabled)
 	if !ok {
+		if reason == "whatsapp_group_automation_disabled" {
+			zapLogger.Info("incoming WhatsApp group message skipped; automation disabled for groups",
+				zap.String("message_id", messageID),
+				zap.String("chat_hash", bot.ChatFingerprintForLog(notification.ChatID())),
+				zap.String("type_webhook", notification.Body.TypeWebhook),
+				zap.String("message_type", notification.TypeMessage()),
+			)
+			shouldDelete = true
+			return
+		}
 		zapLogger.Debug("greenapi notification skipped",
 			zap.String("reason", reason),
 			zap.String("type_webhook", notification.Body.TypeWebhook),
@@ -262,6 +272,17 @@ func processNotification(
 	}
 	processingStarted = dedupeDecision == bot.MessageDedupeNew
 
+	if conversationStore.IsSuppressedPhoneOrChatID(chatID, bot.NormalizePhone(chatID)) {
+		zapLogger.Info("incoming message skipped because chat is in automation suppression list",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+		)
+		processingSucceeded = true
+		conversationStore.MarkProcessedMessage(chatID, dedupeMessageID)
+		shouldDelete = true
+		return
+	}
+
 	msg := bot.IncomingMessage{
 		IDMessage:       messageID,
 		DedupeKey:       dedupeMessageID,
@@ -308,6 +329,9 @@ func shouldProcessNotification(notification *greenapi.Notification, now time.Tim
 	}
 	if isStaleNotification(notification, maxMessageAge, now) {
 		return "", "", false, "older_than_max_age"
+	}
+	if notification.IsWhatsAppGroupMessage() {
+		return notification.ChatID(), "", false, "whatsapp_group_automation_disabled"
 	}
 	if !notification.IsTextMessage() && !notification.IsMediaMessage() {
 		return "", "", false, "unsupported_message_type"

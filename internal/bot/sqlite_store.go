@@ -149,6 +149,35 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			ON whatsapp_messages(green_api_message_id)
 			WHERE green_api_message_id IS NOT NULL AND green_api_message_id <> '';`,
 		`CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_chat_created ON whatsapp_messages(chat_id, created_at);`,
+		`CREATE TABLE IF NOT EXISTS whatsapp_automation_suppression (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			raw_phone TEXT NOT NULL,
+			normalized_phone TEXT NOT NULL,
+			chat_id TEXT,
+			reason TEXT NOT NULL DEFAULT 'manual_suppression',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(normalized_phone)
+		);`,
+		`INSERT OR IGNORE INTO whatsapp_automation_suppression
+			(raw_phone, normalized_phone, chat_id, reason)
+		VALUES
+			('87012357383', '77012357383', '77012357383@c.us', 'manual_ignore_from_whatsapp_screenshot'),
+			('8708988877', '7708988877', '7708988877@c.us', 'manual_ignore_from_whatsapp_screenshot'),
+			('87773000200', '77773000200', '77773000200@c.us', 'manual_ignore_from_whatsapp_screenshot');`,
+		`UPDATE whatsapp_clients
+		SET automation_closed = 1,
+			stopped = 1,
+			next_followup_at = NULL,
+			followup_stage = '',
+			followup_reference_at = '',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE lower(trim(chat_id)) LIKE '%@g.us';`,
+		`UPDATE whatsapp_clients
+		SET state = 'stopped',
+			lead_status = 'muted',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE lower(trim(chat_id)) LIKE '%@g.us'
+			AND state NOT IN ('stopped', 'handed_off', 'opt_out');`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -269,6 +298,7 @@ func (s *ConversationStore) loadConversations(ctx context.Context) error {
 		if conversation.Stage == "" {
 			conversation.Stage = ClientStateNeutralNew
 		}
+		disableGroupConversationAutomation(conversation)
 		s.conversations[chatID] = conversation
 	}
 	if err := rows.Err(); err != nil {
@@ -298,6 +328,7 @@ func (s *ConversationStore) persistConversationLocked(ctx context.Context, conve
 	if conversation.Phone == "" {
 		conversation.Phone = phoneFromChatID(conversation.ChatID)
 	}
+	disableGroupConversationAutomation(conversation)
 
 	state := clientStateForConversation(conversation)
 	leadStatus := normalizeLeadStatus(conversation.LeadStatus)

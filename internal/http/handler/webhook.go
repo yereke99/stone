@@ -86,6 +86,13 @@ func (h *WebhookHandler) receiveWebhook(w http.ResponseWriter, r *http.Request) 
 	failedCount := 0
 
 	for _, message := range messages {
+		if bot.IsWhatsAppGroupChatID(message.From) {
+			h.logger.Info("incoming WhatsApp group message skipped; automation disabled for groups",
+				zap.String("from", message.From),
+				zap.String("message_id", message.ID),
+			)
+			continue
+		}
 		replies, err := h.bot.HandleIncoming(r.Context(), message.From, message.Text)
 		if err != nil {
 			failedCount++

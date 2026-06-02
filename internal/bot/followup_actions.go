@@ -3,10 +3,22 @@ package bot
 import (
 	"context"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func (s *Service) scheduleFollowup(ctx context.Context, chatID string, stage string, after time.Duration, referenceAt time.Time) error {
 	if !s.autoPackages.options.Enabled || after <= 0 {
+		return nil
+	}
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.info("follow-up schedule skipped because chat is a WhatsApp group",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+		)
+		return nil
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("follow-up schedule skipped because chat is in automation suppression list", chatID)
 		return nil
 	}
 	if referenceAt.IsZero() {

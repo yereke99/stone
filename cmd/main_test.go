@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/yereke99/stone/internal/greenapi"
 	"github.com/yereke99/stone/internal/openai"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestIsStaleNotification(t *testing.T) {
@@ -86,6 +88,7 @@ func (h *fakeIncomingHandler) HandleIncomingMessage(ctx context.Context, msg bot
 
 type testSender struct {
 	messages []string
+	files    []string
 }
 
 func (s *testSender) SendMessage(ctx context.Context, chatID string, message string) error {
@@ -94,6 +97,7 @@ func (s *testSender) SendMessage(ctx context.Context, chatID string, message str
 }
 
 func (s *testSender) SendFileByUpload(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
+	s.files = append(s.files, filePath)
 	return "", nil
 }
 
@@ -145,6 +149,70 @@ func TestRepeatedSameIDMessageDoesNotSendAgain(t *testing.T) {
 
 	if len(sender.messages) != 1 {
 		t.Fatalf("sent messages = %d, want 1: %#v", len(sender.messages), sender.messages)
+	}
+}
+
+func TestIncomingGroupNotificationSkippedBeforeHandlerAndLogs(t *testing.T) {
+	client := &fakeNotificationClient{}
+	handler := &fakeIncomingHandler{}
+	store := bot.NewConversationStore()
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+	groupChatID := "120363123456789@g.us"
+	notification := incomingTextNotification(221, "group-msg", groupChatID, "Здравствуйте")
+
+	processNotification(context.Background(), client, handler, store, time.Hour, true, time.Time{}, notification, logger)
+
+	if handler.calls != 0 {
+		t.Fatalf("handler calls = %d, want 0", handler.calls)
+	}
+	if len(client.deleted) != 1 {
+		t.Fatalf("deleted receipts = %#v, want one acknowledgement", client.deleted)
+	}
+	if exists, err := store.ConversationExists(context.Background(), groupChatID); err != nil || exists {
+		t.Fatalf("group conversation exists=%v err=%v, want no customer lead row", exists, err)
+	}
+	if logs.FilterMessage("incoming WhatsApp group message skipped; automation disabled for groups").Len() != 1 {
+		t.Fatalf("group skip log not written: %#v", logs.All())
+	}
+}
+
+func TestGroupNotificationDetectedFromMessageDataRemoteJID(t *testing.T) {
+	now := time.Now().UTC()
+	notification := incomingTextNotification(222, "group-remote", "77012345678@c.us", "Здравствуйте")
+	notification.Body.MessageData.RemoteJID = "120363123456789@g.us"
+
+	if _, _, ok, reason := shouldProcessNotification(notification, now, time.Hour, time.Time{}, true); ok || reason != "whatsapp_group_automation_disabled" {
+		t.Fatalf("remoteJID group ok=%v reason=%q, want whatsapp_group_automation_disabled", ok, reason)
+	}
+}
+
+func TestSuppressedIncomingNotificationSkipsBotAndDeletesReceipt(t *testing.T) {
+	client := &fakeNotificationClient{}
+	store, err := bot.NewSQLiteConversationStore(context.Background(), filepath.Join(t.TempDir(), "stone.sqlite3"))
+	if err != nil {
+		t.Fatalf("NewSQLiteConversationStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	sender := &testSender{}
+	service := bot.NewService(sender, &testAI{}, store, "./video", bot.PortfolioLinks{}, "ru", zap.NewNop())
+	notification := incomingTextNotification(231, "suppressed-msg", "77012357383@c.us", "Здравствуйте")
+
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, notification, zap.NewNop())
+
+	if len(sender.messages) != 0 || len(sender.files) != 0 {
+		t.Fatalf("suppressed notification got automation: messages=%#v files=%#v", sender.messages, sender.files)
+	}
+	if len(client.deleted) != 1 {
+		t.Fatalf("deleted receipts = %#v, want one acknowledgement", client.deleted)
+	}
+
+	duplicate := incomingTextNotification(232, "suppressed-msg", "77012357383@c.us", "Здравствуйте")
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, duplicate, zap.NewNop())
+	if len(client.deleted) != 2 {
+		t.Fatalf("duplicate suppressed receipt was not acknowledged: %#v", client.deleted)
 	}
 }
 

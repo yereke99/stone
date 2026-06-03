@@ -213,6 +213,89 @@ func TestQuotedNumberedQualificationReplyUsesCurrentText(t *testing.T) {
 	}
 }
 
+func TestMessyMultilineQualificationDoesNotRepeatNiche(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	ai := &fakeAI{}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
+	chatID := "chat-messy-multiline-qualification"
+
+	sendText(t, service, chatID, "По рекламе\nПылесосы\nПродажи\nЧерез 2 дня")
+
+	if !ai.analysisCalled {
+		t.Fatal("OpenAI understanding was not called")
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "пылесосы" || conversation.Lead.Goal != "продажи" || conversation.Lead.Deadline != "через 2 дня" {
+		t.Fatalf("lead = %#v, want multiline facts extracted", conversation.Lead)
+	}
+	if !conversation.CompletedFields[fieldNiche] || !conversation.CompletedFields[fieldGoal] || !conversation.CompletedFields[fieldDeadline] {
+		t.Fatalf("completed fields = %#v, want niche/goal/deadline", conversation.CompletedFields)
+	}
+	for _, reply := range sender.messages {
+		lower := strings.ToLower(reply)
+		if strings.Contains(lower, "ниши") || strings.Contains(lower, "ниша") {
+			t.Fatalf("bot repeated niche question after multiline answer: %q", reply)
+		}
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want package recommendation examples", sender.files)
+	}
+}
+
+func TestFoodFarmProductsExampleRequestAsksOnlyGoalDeadline(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	ai := &fakeAI{}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
+	chatID := "chat-food-farm-products"
+
+	sendText(t, service, chatID, "С едой есть ролики?\nФермерские продукты.\nsuperferma.kz наш инстаграмм")
+
+	if !ai.analysisCalled {
+		t.Fatal("OpenAI understanding was not called")
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "фермерские продукты" {
+		t.Fatalf("niche = %q, want farm products", conversation.Lead.Niche)
+	}
+	if conversation.Lead.WebsiteOrInstagram != "superferma.kz" {
+		t.Fatalf("website = %q, want superferma.kz", conversation.Lead.WebsiteOrInstagram)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	lower := strings.ToLower(last)
+	if !strings.Contains(lower, "ai-ролики делаем") || !strings.Contains(lower, "цель") || !strings.Contains(lower, "срок") {
+		t.Fatalf("food reply did not answer and ask goal/deadline only: %q", last)
+	}
+	if strings.Contains(lower, "ниша") || strings.Contains(lower, "для какой ниши") {
+		t.Fatalf("food reply asked for known niche: %q", last)
+	}
+}
+
+func TestMoreOptionsRequestSendsPackageOptionsWithoutRestart(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	ai := &fakeAI{}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
+	chatID := "chat-more-options"
+
+	sendText(t, service, chatID, "Добрый день, в целом интересно, давайте еще варианты исполнения подумаем")
+
+	if !ai.analysisCalled {
+		t.Fatal("OpenAI understanding was not called")
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one options reply", sender.messages)
+	}
+	last := sender.messages[0]
+	if !strings.Contains(last, "Test") || !strings.Contains(last, "Basic") || !strings.Contains(last, "Standard") {
+		t.Fatalf("options reply = %q", last)
+	}
+	if strings.Contains(last, "В какой нише") || strings.Contains(last, "Какая цель") {
+		t.Fatalf("options request restarted qualification: %q", last)
+	}
+}
+
 func TestReplyToPackageVideoSelectsPackageByQuotedID(t *testing.T) {
 	tests := []struct {
 		name      string

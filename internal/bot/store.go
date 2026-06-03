@@ -72,6 +72,10 @@ type Conversation struct {
 	AutomationClosed        bool
 	Stopped                 bool
 	OptOut                  bool
+	StoppedAt               time.Time
+	StoppedBy               string
+	StopReason              string
+	StopMessageID           string
 	LastProcessedMessageID  string
 	AdminNotifiedAt         time.Time
 	AdminOperatorNotifiedAt time.Time
@@ -718,6 +722,46 @@ func (s *ConversationStore) CancelFollowup(ctx context.Context, chatID string) e
 	conversation.NextFollowupAt = time.Time{}
 	conversation.FollowupStage = ""
 	conversation.FollowupReferenceAt = time.Time{}
+	conversation.UpdatedAt = now
+	conversation.LastUpdated = now
+	return s.persistConversationLocked(ctx, conversation)
+}
+
+func (s *ConversationStore) MarkManualStop(ctx context.Context, chatID string, messageID string, stoppedAt time.Time, stoppedBy string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	if stoppedAt.IsZero() {
+		stoppedAt = time.Now().UTC()
+	}
+	stoppedBy = strings.TrimSpace(stoppedBy)
+	if stoppedBy == "" {
+		stoppedBy = "moderator_phone"
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupLocked(now)
+	conversation := s.getOrCreateLocked(chatID, now)
+	conversation.Stage = ClientStateStopped
+	conversation.Stopped = true
+	conversation.AutomationClosed = true
+	conversation.StoppedAt = stoppedAt.UTC()
+	conversation.StoppedBy = stoppedBy
+	conversation.StopReason = "manual_override"
+	conversation.StopMessageID = strings.TrimSpace(messageID)
+	conversation.NextFollowupAt = time.Time{}
+	conversation.FollowupStage = ""
+	conversation.FollowupReferenceAt = time.Time{}
+	conversation.Lead.LeadStatus = LeadStatusMuted
+	conversation.LeadStatus = LeadStatusMuted
+	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
 	return s.persistConversationLocked(ctx, conversation)

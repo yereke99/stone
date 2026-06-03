@@ -54,6 +54,8 @@ type LeadState struct {
 	AIExperience       string   `json:"ai_experience,omitempty"`
 	Budget             string   `json:"budget,omitempty"`
 	PriceInterest      bool     `json:"price_interest,omitempty"`
+	ProductOrService   string   `json:"product_or_service,omitempty"`
+	WebsiteOrInstagram string   `json:"website_or_instagram,omitempty"`
 	SelectedPackage    string   `json:"selected_package,omitempty"`
 	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
 	ClientName         string   `json:"client_name,omitempty"`
@@ -69,25 +71,28 @@ type LeadState struct {
 }
 
 type CustomerAnalysis struct {
-	Niche              *string  `json:"niche"`
-	City               *string  `json:"city,omitempty"`
-	Goal               *string  `json:"goal"`
-	Platforms          []string `json:"platforms"`
-	Deadline           *string  `json:"deadline"`
-	PreviousAIAds      *bool    `json:"previous_ai_ads"`
-	AIExperience       *string  `json:"ai_experience,omitempty"`
-	Budget             *string  `json:"budget,omitempty"`
-	TargetAudience     *string  `json:"target_audience,omitempty"`
-	BusinessLink       *string  `json:"business_link,omitempty"`
-	Intent             string   `json:"intent"`
-	SelectedLevel      int      `json:"selected_level,omitempty"`
-	PackageInterest    *string  `json:"package_interest,omitempty"`
-	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
-	ShouldHandoff      bool     `json:"should_handoff,omitempty"`
-	ShouldStop         bool     `json:"should_stop,omitempty"`
-	Frustrated         bool     `json:"frustrated,omitempty"`
-	FAQKey             string   `json:"faq_key,omitempty"`
-	MissingFields      []string `json:"missing_fields"`
+	Niche               *string  `json:"niche"`
+	City                *string  `json:"city,omitempty"`
+	Goal                *string  `json:"goal"`
+	Platforms           []string `json:"platforms"`
+	Deadline            *string  `json:"deadline"`
+	PreviousAIAds       *bool    `json:"previous_ai_ads"`
+	AIExperience        *string  `json:"ai_experience,omitempty"`
+	Budget              *string  `json:"budget,omitempty"`
+	TargetAudience      *string  `json:"target_audience,omitempty"`
+	ProductOrService    *string  `json:"product_or_service,omitempty"`
+	BusinessLink        *string  `json:"business_link,omitempty"`
+	Intent              string   `json:"intent"`
+	SelectedLevel       int      `json:"selected_level,omitempty"`
+	PackageInterest     *string  `json:"package_interest,omitempty"`
+	WantsQuestionnaire  bool     `json:"wants_questionnaire,omitempty"`
+	ShouldHandoff       bool     `json:"should_handoff,omitempty"`
+	ShouldStop          bool     `json:"should_stop,omitempty"`
+	Frustrated          bool     `json:"frustrated,omitempty"`
+	AsksForFoodExamples bool     `json:"asks_for_food_examples,omitempty"`
+	AsksForMoreOptions  bool     `json:"asks_for_more_options,omitempty"`
+	FAQKey              string   `json:"faq_key,omitempty"`
+	MissingFields       []string `json:"missing_fields"`
 
 	NumberedQualificationAnswer bool `json:"-"`
 }
@@ -102,6 +107,8 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.MissingFields = current.MissingCoreFields()
 		return analysis
 	}
+	foodExampleRequest := asksForFoodExamples(normalized)
+	moreOptionsRequest := asksForMoreOptions(normalized)
 
 	if niche := extractNiche(text, current); niche != "" {
 		analysis.Niche = stringPointer(niche)
@@ -109,8 +116,10 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	if city := extractCity(text); city != "" {
 		analysis.City = stringPointer(city)
 	}
-	if goal := extractGoal(text, current); goal != "" {
-		analysis.Goal = stringPointer(goal)
+	if !foodExampleRequest {
+		if goal := extractGoal(text, current); goal != "" {
+			analysis.Goal = stringPointer(goal)
+		}
 	}
 	analysis.Platforms = extractPlatforms(text)
 	if deadline := extractDeadline(text, current); deadline != "" {
@@ -128,6 +137,28 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	}
 	if link := extractBusinessLink(text); link != "" {
 		analysis.BusinessLink = stringPointer(link)
+	}
+	if facts := extractMessyQualificationFacts(text, current); facts.hasAny() {
+		if facts.niche != "" {
+			analysis.Niche = stringPointer(facts.niche)
+		}
+		if facts.goal != "" {
+			analysis.Goal = stringPointer(facts.goal)
+		}
+		if facts.deadline != "" {
+			analysis.Deadline = stringPointer(facts.deadline)
+		}
+		if len(facts.platforms) > 0 {
+			analysis.Platforms = mergePlatforms(analysis.Platforms, facts.platforms)
+		}
+		if facts.productOrService != "" {
+			analysis.ProductOrService = stringPointer(facts.productOrService)
+		}
+	}
+	analysis.AsksForFoodExamples = foodExampleRequest
+	analysis.AsksForMoreOptions = moreOptionsRequest
+	if analysis.AsksForFoodExamples && analysis.Niche == nil {
+		analysis.Niche = stringPointer("еда")
 	}
 	if numbered := extractNumberedQualificationAnswers(text); numbered.found {
 		analysis.NumberedQualificationAnswer = true
@@ -147,6 +178,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	}
 	questionnaireIntent := containsQuestionnaireIntent(normalized)
 	readySignal := containsReadySignal(text)
+	if moreOptionsRequest {
+		readySignal = false
+	}
 	analysis.WantsQuestionnaire = questionnaireIntent || readySignal
 
 	switch {
@@ -159,6 +193,10 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.ShouldStop = true
 	case containsHumanRequest(normalized):
 		analysis.Intent = IntentHumanRequest
+	case analysis.AsksForMoreOptions:
+		analysis.Intent = IntentPackageQuestion
+	case analysis.AsksForFoodExamples:
+		analysis.Intent = IntentPortfolioRequest
 	case asksWhichFormatWorksBest(normalized):
 		analysis.Intent = IntentFormatAdvice
 	case analysis.BusinessLink != nil:
@@ -211,6 +249,7 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 		a.PreviousAIAds != nil ||
 		a.Budget != nil ||
 		a.TargetAudience != nil ||
+		a.ProductOrService != nil ||
 		a.SelectedLevel > 0 ||
 		a.PackageInterest != nil ||
 		a.BusinessLink != nil ||
@@ -249,8 +288,15 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	if analysis.TargetAudience != nil && strings.TrimSpace(*analysis.TargetAudience) != "" {
 		s.TargetAudience = strings.TrimSpace(*analysis.TargetAudience)
 	}
+	if analysis.ProductOrService != nil && strings.TrimSpace(*analysis.ProductOrService) != "" {
+		s.ProductOrService = strings.TrimSpace(*analysis.ProductOrService)
+		if !isValidNiche(s.Niche) && isValidNiche(s.ProductOrService) {
+			s.Niche = s.ProductOrService
+		}
+	}
 	if analysis.BusinessLink != nil && strings.TrimSpace(*analysis.BusinessLink) != "" {
-		s.Notes = appendBriefText(s.Notes, "Ссылка: "+strings.TrimSpace(*analysis.BusinessLink))
+		s.WebsiteOrInstagram = strings.TrimSpace(*analysis.BusinessLink)
+		s.Notes = appendBriefText(s.Notes, "Ссылка: "+s.WebsiteOrInstagram)
 	}
 	if updateQualificationFields && analysis.PackageInterest != nil && isValidPackageInterest(*analysis.PackageInterest) {
 		s.SelectedPackage = normalizePackageInterest(*analysis.PackageInterest)
@@ -323,6 +369,8 @@ func (s LeadState) PromptJSON(stage string) string {
 		WantsQuestionnaire bool     `json:"wants_questionnaire"`
 		ClientName         *string  `json:"client_name"`
 		TargetAudience     *string  `json:"target_audience"`
+		ProductOrService   *string  `json:"product_or_service"`
+		WebsiteOrInstagram *string  `json:"website_or_instagram"`
 		Notes              *string  `json:"notes"`
 		FreeText           *string  `json:"free_text"`
 		PortfolioSent      bool     `json:"portfolio_sent"`
@@ -348,6 +396,8 @@ func (s LeadState) PromptJSON(stage string) string {
 		WantsQuestionnaire: s.WantsQuestionnaire,
 		ClientName:         nullableString(s.ClientName),
 		TargetAudience:     nullableString(s.TargetAudience),
+		ProductOrService:   nullableString(s.ProductOrService),
+		WebsiteOrInstagram: nullableString(s.WebsiteOrInstagram),
 		Notes:              nullableString(s.Notes),
 		FreeText:           nullableString(s.FreeText),
 		PortfolioSent:      s.PortfolioSent,
@@ -516,7 +566,7 @@ func extractPlatforms(text string) []string {
 	if containsAny(normalized, []string{"stories", "story", "сторис", "стори"}) {
 		add("Stories")
 	}
-	if containsAny(normalized, []string{"таргет", "target", "targeted ads", "рекламага", "жарнама"}) {
+	if containsAny(normalized, []string{"таргет", "target", "targeted ads", "по рекламе", "для рекламы", "рекламага", "жарнама"}) {
 		add("таргетированная реклама")
 	}
 	if containsAny(normalized, []string{"youtube", "ютуб", "shorts", "шортс"}) {
@@ -679,7 +729,7 @@ func extractBusinessLink(text string) string {
 		regexp.MustCompile(`(?i)\bhttps?://[^\s<>"']+`),
 		regexp.MustCompile(`(?i)\bwww\.[^\s<>"']+`),
 		regexp.MustCompile(`(?i)\b(?:instagram|instagr\.am|tiktok|wa|taplink|linktr|2gis)\.[^\s<>"']+`),
-		regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+\.[a-z]{2,}(?:/[^\s<>"']*)?`),
+		regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?:/[^\s<>"']*)?`),
 		regexp.MustCompile(`(?i)(?:^|\s)@[a-z0-9_.]{3,}`),
 	}
 	for _, pattern := range patterns {
@@ -689,6 +739,178 @@ func extractBusinessLink(text string) string {
 		}
 	}
 	return ""
+}
+
+type messyQualificationFacts struct {
+	niche            string
+	goal             string
+	deadline         string
+	productOrService string
+	platforms        []string
+}
+
+func (f messyQualificationFacts) hasAny() bool {
+	return f.niche != "" || f.goal != "" || f.deadline != "" || f.productOrService != "" || len(f.platforms) > 0
+}
+
+func extractMessyQualificationFacts(text string, current LeadState) messyQualificationFacts {
+	lines := meaningfulMessageLines(text)
+	if len(lines) == 0 {
+		return messyQualificationFacts{}
+	}
+
+	facts := messyQualificationFacts{}
+	lineCurrent := current
+	for _, line := range lines {
+		normalized := normalizeForAnalysis(line)
+		if normalized == "" || isGreeting(normalized) {
+			continue
+		}
+		if link := extractBusinessLink(line); link != "" {
+			continue
+		}
+		if platform := shortPlatformContext(normalized); platform != "" {
+			facts.platforms = mergePlatforms(facts.platforms, []string{platform})
+			continue
+		}
+		if len(extractPlatforms(line)) > 0 {
+			facts.platforms = mergePlatforms(facts.platforms, extractPlatforms(line))
+			continue
+		}
+		if strings.Contains(normalized, "?") {
+			continue
+		}
+		if facts.deadline == "" {
+			if isValidDeadline(normalized) && len(strings.Fields(normalized)) <= 4 {
+				facts.deadline = normalized
+				lineCurrent.Deadline = normalized
+				continue
+			}
+			if deadline := normalizeDeadline(normalized); deadline != "" {
+				facts.deadline = deadline
+				lineCurrent.Deadline = deadline
+				continue
+			}
+		}
+		if facts.goal == "" {
+			if isValidGoal(normalized) && len(strings.Fields(normalized)) <= 3 && !looksLikeOnlyPlatformContext(normalized) {
+				facts.goal = normalized
+				lineCurrent.Goal = normalized
+				continue
+			}
+			if goal := normalizeGoal(normalized); goal != "" && !looksLikeOnlyPlatformContext(normalized) {
+				facts.goal = goal
+				lineCurrent.Goal = goal
+				continue
+			}
+		}
+		if facts.niche == "" {
+			if niche := shortProductOrNicheLine(line, lineCurrent); niche != "" {
+				facts.niche = niche
+				facts.productOrService = niche
+				lineCurrent.Niche = niche
+				continue
+			}
+		}
+	}
+
+	if facts.niche == "" && asksForFoodExamples(normalizeForAnalysis(text)) {
+		facts.niche = "еда"
+		facts.productOrService = "еда"
+	}
+	return facts
+}
+
+func meaningfulMessageLines(text string) []string {
+	rawLines := strings.FieldsFunc(text, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	result := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, " \t-—:;,.!")
+		if line == "" {
+			continue
+		}
+		result = append(result, line)
+	}
+	return result
+}
+
+func shortPlatformContext(normalized string) string {
+	clean := strings.Trim(normalized, " .,!?:;")
+	switch clean {
+	case "по рекламе", "для рекламы", "в рекламу", "реклама", "жарнама", "ads", "advertising":
+		return "реклама"
+	default:
+		return ""
+	}
+}
+
+func looksLikeOnlyPlatformContext(normalized string) bool {
+	return shortPlatformContext(normalized) != ""
+}
+
+func shortProductOrNicheLine(line string, current LeadState) string {
+	normalized := normalizeForAnalysis(line)
+	if normalized == "" ||
+		isNonNicheShortReply(normalized) ||
+		strings.Contains(normalized, "?") ||
+		strings.Contains(normalized, "http") ||
+		strings.Contains(normalized, "www") ||
+		strings.Contains(normalized, "@") ||
+		normalizeGoal(normalized) != "" ||
+		normalizeDeadline(normalized) != "" ||
+		shortPlatformContext(normalized) != "" ||
+		len(extractPlatforms(line)) > 0 {
+		return ""
+	}
+	if value := knownNicheFromText(normalized); value != "" {
+		return value
+	}
+	words := strings.Fields(normalized)
+	if len(words) == 0 || len(words) > 5 {
+		return ""
+	}
+	if isLikelyShortAnswerFor(fieldNiche, current, normalized) || len(words) <= 3 {
+		return normalizeNiche(normalized)
+	}
+	return ""
+}
+
+func isNonNicheShortReply(normalized string) bool {
+	clean := strings.Trim(normalized, " .,!?:;")
+	switch clean {
+	case "вот этот", "вот эта", "этот", "эта", "это", "тот", "та", "да", "ок", "окей",
+		"хорошо", "супер", "анкета", "анкету", "бриф", "заявка", "заявку", "давайте",
+		"отправьте", "пришлите", "жду", "ага", "угу":
+		return true
+	default:
+		return false
+	}
+}
+
+func asksForFoodExamples(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	asksVideoOrExample := containsAny(normalized, []string{
+		"ролик", "ролики", "видео", "пример", "примеры", "мысал", "example", "examples", "video",
+	})
+	mentionsFood := containsAny(normalized, []string{
+		"еда", "едой", "еды", "продукт", "фермер", "food", "farm product", "farm products",
+	})
+	return asksVideoOrExample && mentionsFood
+}
+
+func asksForMoreOptions(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"варианты исполнения", "еще варианты", "ещё варианты", "другие варианты", "варианты подумаем",
+		"варианты формата", "package options", "more options", "other options",
+	})
 }
 
 func containsPriceQuestion(normalized string) bool {
@@ -1016,6 +1238,7 @@ func knownNicheFromText(normalized string) string {
 	candidates := []string{
 		"стирка ковров", "чистка ковров", "химчистка ковров", "копирайтинг",
 		"доставка еды", "магазин одежды", "барбер", "барбершоп",
+		"фермерские продукты", "пылесосы", "еда",
 		"спорт", "фитнес", "йога", "стоматология", "медицина", "косметология",
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
 		"недвижимость", "ремонт", "строительство", "образование", "курсы",

@@ -43,13 +43,29 @@ type SalesResponse struct {
 }
 
 type CustomerUnderstanding struct {
-	Language    string                         `json:"language"`
-	Intent      string                         `json:"intent"`
-	Extracted   CustomerUnderstandingExtracted `json:"extracted"`
-	Sentiment   CustomerUnderstandingSentiment `json:"sentiment"`
-	StateUpdate CustomerUnderstandingState     `json:"state_update"`
-	ReplyPlan   CustomerUnderstandingReplyPlan `json:"reply_plan"`
-	Confidence  float64                        `json:"confidence"`
+	Language              string   `json:"language"`
+	Intent                string   `json:"intent"`
+	Niche                 *string  `json:"niche"`
+	Goal                  *string  `json:"goal"`
+	Deadline              *string  `json:"deadline"`
+	Platform              *string  `json:"platform"`
+	ProductOrService      *string  `json:"product_or_service"`
+	WebsiteOrInstagram    *string  `json:"website_or_instagram"`
+	PackageInterest       *string  `json:"package_interest"`
+	AsksForFoodExamples   bool     `json:"asks_for_food_examples"`
+	AsksForMoreOptions    bool     `json:"asks_for_more_options"`
+	ReadyForQuestionnaire bool     `json:"ready_for_questionnaire"`
+	NeedsManager          bool     `json:"needs_manager"`
+	MissingFields         []string `json:"missing_fields"`
+	Confidence            float64  `json:"confidence"`
+
+	// Legacy fields are kept for old tests and deployments that still return the
+	// previous nested analyzer shape. The live schema below now asks for the flat
+	// lead-analyzer contract.
+	Extracted   CustomerUnderstandingExtracted `json:"extracted,omitempty"`
+	Sentiment   CustomerUnderstandingSentiment `json:"sentiment,omitempty"`
+	StateUpdate CustomerUnderstandingState     `json:"state_update,omitempty"`
+	ReplyPlan   CustomerUnderstandingReplyPlan `json:"reply_plan,omitempty"`
 }
 
 type CustomerUnderstandingExtracted struct {
@@ -466,72 +482,60 @@ func customerUnderstandingSchema() map[string]any {
 		"required": []string{
 			"language",
 			"intent",
-			"extracted",
-			"sentiment",
-			"state_update",
-			"reply_plan",
+			"niche",
+			"goal",
+			"deadline",
+			"platform",
+			"product_or_service",
+			"website_or_instagram",
+			"package_interest",
+			"asks_for_food_examples",
+			"asks_for_more_options",
+			"ready_for_questionnaire",
+			"needs_manager",
+			"missing_fields",
 			"confidence",
 		},
 		"properties": map[string]any{
 			"language": map[string]any{
 				"type": "string",
-				"enum": []string{"ru", "kk", "mixed", "unknown"},
+				"enum": []string{"ru", "kk", "en", "mixed", "unknown"},
 			},
 			"intent": map[string]any{
 				"type": "string",
-				"enum": []string{"provide_info", "ask_question", "choose_package", "request_manager", "negative_reaction", "stop", "other"},
-			},
-			"extracted": map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"required": []string{
-					"niche",
-					"city",
-					"goal",
-					"deadline",
-					"platform",
-					"target_audience",
-					"package_interest",
-				},
-				"properties": map[string]any{
-					"niche":            nullableString(),
-					"city":             nullableString(),
-					"goal":             nullableString(),
-					"deadline":         nullableString(),
-					"platform":         nullableString(),
-					"target_audience":  nullableString(),
-					"package_interest": nullableString(),
+				"enum": []string{
+					"greeting",
+					"qualification_answer",
+					"asks_examples",
+					"asks_packages",
+					"asks_price",
+					"asks_discount",
+					"asks_deadline",
+					"asks_human",
+					"ready_to_order",
+					"unclear",
+					"irrelevant",
 				},
 			},
-			"sentiment": map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"required":             []string{"negative", "frustrated", "wants_to_stop"},
-				"properties": map[string]any{
-					"negative":      map[string]any{"type": "boolean"},
-					"frustrated":    map[string]any{"type": "boolean"},
-					"wants_to_stop": map[string]any{"type": "boolean"},
-				},
+			"niche":                nullableString(),
+			"goal":                 nullableString(),
+			"deadline":             nullableString(),
+			"platform":             nullableString(),
+			"product_or_service":   nullableString(),
+			"website_or_instagram": nullableString(),
+			"package_interest": map[string]any{
+				"type": []string{"string", "null"},
+				"enum": []any{"test", "basic", "standard", "unknown", nil},
 			},
-			"state_update": map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"required":             []string{"should_save", "should_handoff_to_manager", "should_stop_automation"},
-				"properties": map[string]any{
-					"should_save":               map[string]any{"type": "boolean"},
-					"should_handoff_to_manager": map[string]any{"type": "boolean"},
-					"should_stop_automation":    map[string]any{"type": "boolean"},
-				},
-			},
-			"reply_plan": map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"required":             []string{"acknowledge_known_fields", "ask_only_missing_fields", "next_missing_field", "safe_reply"},
-				"properties": map[string]any{
-					"acknowledge_known_fields": map[string]any{"type": "boolean"},
-					"ask_only_missing_fields":  map[string]any{"type": "boolean"},
-					"next_missing_field":       nullableString(),
-					"safe_reply":               map[string]any{"type": "string"},
+			"asks_for_food_examples":  map[string]any{"type": "boolean"},
+			"asks_for_more_options":   map[string]any{"type": "boolean"},
+			"ready_for_questionnaire": map[string]any{"type": "boolean"},
+			"needs_manager":           map[string]any{"type": "boolean"},
+			"missing_fields": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "string",
+					"enum": []string{"niche", "goal", "deadline"},
 				},
 			},
 			"confidence": map[string]any{

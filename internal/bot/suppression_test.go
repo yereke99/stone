@@ -17,6 +17,9 @@ func TestNormalizePhone(t *testing.T) {
 		{name: "formatted kz phone", raw: "+7 (701) 235-73-83", want: "77012357383"},
 		{name: "leading eight eleven digits", raw: "87012357383", want: "77012357383"},
 		{name: "leading eight ten digits", raw: "8708988877", want: "7708988877"},
+		{name: "protected formatted", raw: "+7 776 600 1170", want: "77766001170"},
+		{name: "protected local eight", raw: "8 776 600 1170", want: "77766001170"},
+		{name: "protected normalized", raw: "77766001170", want: "77766001170"},
 	}
 
 	for _, tt := range tests {
@@ -39,6 +42,11 @@ func TestSuppressionMigrationSeedsManualWhatsAppContacts(t *testing.T) {
 		{name: "first chat id", chatID: "77012357383@c.us"},
 		{name: "second chat id", chatID: "7708988877@c.us"},
 		{name: "third chat id", chatID: "77773000200@c.us"},
+		{name: "protected first", chatID: "77766001170@c.us"},
+		{name: "protected second", chatID: "77054353684@c.us"},
+		{name: "protected third", chatID: "77787888325@c.us"},
+		{name: "protected fourth", chatID: "77054103913@c.us"},
+		{name: "protected fifth", chatID: "77776602066@c.us"},
 		{name: "first raw eight", phone: "87012357383"},
 		{name: "second raw eight", phone: "8708988877"},
 		{name: "third raw eight", phone: "87773000200"},
@@ -75,8 +83,8 @@ func TestSuppressionMigrationIsIdempotent(t *testing.T) {
 	if err := store2.db.QueryRow(`SELECT COUNT(*) FROM whatsapp_automation_suppression`).Scan(&count); err != nil {
 		t.Fatalf("count suppression rows: %v", err)
 	}
-	if count != 3 {
-		t.Fatalf("suppression row count = %d, want 3", count)
+	if count != 8 {
+		t.Fatalf("suppression row count = %d, want 8", count)
 	}
 }
 
@@ -88,6 +96,8 @@ func TestSuppressedIncomingMessagesDoNotSendBotMessages(t *testing.T) {
 		{name: "first chat id", chatID: "77012357383@c.us"},
 		{name: "second chat id", chatID: "7708988877@c.us"},
 		{name: "third chat id", chatID: "77773000200@c.us"},
+		{name: "protected first", chatID: "77766001170@c.us"},
+		{name: "protected local first", chatID: "87766001170"},
 		{name: "first raw eight", chatID: "87012357383"},
 		{name: "second raw eight", chatID: "8708988877"},
 		{name: "third raw eight", chatID: "87773000200"},

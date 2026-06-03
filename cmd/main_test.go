@@ -266,6 +266,59 @@ func TestOutgoingAndStatusNotificationsAreSkipped(t *testing.T) {
 	}
 }
 
+func TestOutgoingPhoneStopManuallyStopsConversation(t *testing.T) {
+	client := &fakeNotificationClient{}
+	store := bot.NewConversationStore()
+	sender := &testSender{}
+	service := bot.NewService(sender, &testAI{}, store, "./video", bot.PortfolioLinks{}, "ru", zap.NewNop())
+	chatID := "77033330000@c.us"
+	stopNotification := incomingTextNotification(331, "manual-stop", chatID, "  StoP  ")
+	stopNotification.Body.TypeWebhook = greenapi.TypeWebhookOutgoingMessage
+
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, stopNotification, zap.NewNop())
+
+	if len(client.deleted) != 1 {
+		t.Fatalf("deleted receipts = %#v, want stop acknowledgement", client.deleted)
+	}
+	conversation, err := store.Snapshot(context.Background(), chatID)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if !conversation.Stopped || !conversation.AutomationClosed || conversation.Stage != bot.ClientStateStopped {
+		t.Fatalf("conversation not manually stopped: stage=%q stopped=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.AutomationClosed)
+	}
+	if conversation.StopReason != "manual_override" || conversation.StoppedBy != "moderator_phone" || conversation.StopMessageID != "manual-stop" {
+		t.Fatalf("stop metadata = reason=%q by=%q id=%q", conversation.StopReason, conversation.StoppedBy, conversation.StopMessageID)
+	}
+
+	incoming := incomingTextNotification(332, "after-manual-stop", chatID, "Здравствуйте")
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, incoming, zap.NewNop())
+	if len(sender.messages) != 0 || len(sender.files) != 0 {
+		t.Fatalf("manual stopped chat got automation: messages=%#v files=%#v", sender.messages, sender.files)
+	}
+}
+
+func TestOutgoingAPIStopDoesNotTriggerManualStop(t *testing.T) {
+	client := &fakeNotificationClient{}
+	handler := &fakeIncomingHandler{}
+	store := bot.NewConversationStore()
+	chatID := "77034440000@c.us"
+	notification := incomingTextNotification(341, "api-stop", chatID, "stop")
+	notification.Body.TypeWebhook = greenapi.TypeWebhookOutgoingAPIMessage
+
+	processNotification(context.Background(), client, handler, store, time.Hour, true, time.Time{}, notification, zap.NewNop())
+
+	if handler.calls != 0 {
+		t.Fatalf("handler calls = %d, want 0", handler.calls)
+	}
+	if len(client.deleted) != 1 {
+		t.Fatalf("deleted receipts = %#v, want one acknowledgement", client.deleted)
+	}
+	if exists, err := store.ConversationExists(context.Background(), chatID); err != nil || exists {
+		t.Fatalf("conversation exists=%v err=%v, want no manual stop row", exists, err)
+	}
+}
+
 func TestOldMessageAfterRestartIsSkipped(t *testing.T) {
 	client := &fakeNotificationClient{}
 	handler := &fakeIncomingHandler{}

@@ -158,12 +158,20 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(normalized_phone)
 		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_automation_suppression_chat_id
+			ON whatsapp_automation_suppression(chat_id)
+			WHERE chat_id IS NOT NULL AND chat_id <> '';`,
 		`INSERT OR IGNORE INTO whatsapp_automation_suppression
 			(raw_phone, normalized_phone, chat_id, reason)
 		VALUES
 			('87012357383', '77012357383', '77012357383@c.us', 'manual_ignore_from_whatsapp_screenshot'),
 			('8708988877', '7708988877', '7708988877@c.us', 'manual_ignore_from_whatsapp_screenshot'),
-			('87773000200', '77773000200', '77773000200@c.us', 'manual_ignore_from_whatsapp_screenshot');`,
+			('87773000200', '77773000200', '77773000200@c.us', 'manual_ignore_from_whatsapp_screenshot'),
+			('+7 776 600 1170', '77766001170', '77766001170@c.us', 'protected_no_autoreply_seed'),
+			('+7 705 435 3684', '77054353684', '77054353684@c.us', 'protected_no_autoreply_seed'),
+			('+7 778 788 8325', '77787888325', '77787888325@c.us', 'protected_no_autoreply_seed'),
+			('+7 705 410 3913', '77054103913', '77054103913@c.us', 'protected_no_autoreply_seed'),
+			('+7 777 660 2066', '77776602066', '77776602066@c.us', 'protected_no_autoreply_seed');`,
 		`UPDATE whatsapp_clients
 		SET automation_closed = 1,
 			stopped = 1,

@@ -310,6 +310,15 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if err := s.store.UpdateLead(ctx, chatID, lead); err != nil {
 		return err
 	}
+	mergedLead := lead
+	s.info("lead state merged after analysis",
+		zap.String("chat_hash", chatFingerprint(chatID)),
+		zap.String("intent", analysis.Intent),
+		zap.Strings("completed_fields", mapKeys(completedFieldsForLead(mergedLead))),
+		zap.Strings("missing_fields", mergedLead.MissingCoreFields()),
+		zap.Bool("asks_for_food_examples", analysis.AsksForFoodExamples),
+		zap.Bool("asks_for_more_options", analysis.AsksForMoreOptions),
+	)
 	if replyPackageDetected {
 		level := levelByPackageKey(replyPackage)
 		if level > 0 {
@@ -383,6 +392,20 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	}
 	if analysis.Intent == IntentFAQ && strings.TrimSpace(analysis.FAQKey) != "" {
 		return s.handleFAQ(ctx, chatID, language, conversation, analysis)
+	}
+	if analysis.AsksForFoodExamples {
+		s.info("selected next action",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("action", "answer_food_examples_and_ask_missing"),
+		)
+		return s.handleFoodExamplesRequest(ctx, chatID, language, conversation)
+	}
+	if analysis.AsksForMoreOptions {
+		s.info("selected next action",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("action", "send_package_options"),
+		)
+		return s.handleMoreOptionsRequest(ctx, chatID, language, conversation)
 	}
 	if state == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
 		return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
@@ -1125,6 +1148,10 @@ func (s *Service) sendCustomerWhatsAppMessage(ctx context.Context, chatID string
 		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
 		return nil
 	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("outgoing whatsapp message skipped because chat is in automation suppression list", chatID)
+		return nil
+	}
 	if sender, ok := s.sender.(purposeGreenSender); ok {
 		return sender.SendMessageWithPurpose(ctx, chatID, message, WhatsAppPurposeCustomerAutomation, nil)
 	}
@@ -1134,6 +1161,10 @@ func (s *Service) sendCustomerWhatsAppMessage(ctx context.Context, chatID string
 func (s *Service) sendCustomerWhatsAppFile(ctx context.Context, chatID string, filePath string, caption string) (string, error) {
 	if isUnsafeCustomerWhatsAppChatID(chatID) {
 		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
+		return "", nil
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("outgoing whatsapp file skipped because chat is in automation suppression list", chatID)
 		return "", nil
 	}
 	if sender, ok := s.sender.(purposeGreenSender); ok {
@@ -1175,6 +1206,13 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	latest, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
 		return err
+	}
+	if isConversationManuallyStopped(latest) {
+		s.info("outgoing whatsapp reply skipped because manual stop is active",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+		)
+		return nil
 	}
 	if !canSendAutomationToConversation(latest) && stage != ClientStateHandedOff && stage != StageHandoffRequired && stage != StageBriefCollected {
 		s.info("outgoing whatsapp reply skipped because automation is closed",
@@ -1257,6 +1295,20 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 			if err := sleepWithContext(ctx, videoSendDelay); err != nil {
 				return err
 			}
+		}
+		latest, err := s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return err
+		}
+		protected := s.isAutomationSuppressed(chatID)
+		if protected || isConversationManuallyStopped(latest) || !canSendAutomationToConversation(latest) {
+			s.info("portfolio video send suppressed due to stopped/protected status",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("file_name", fileName),
+				zap.Bool("suppressed_contact", protected),
+				zap.Bool("manual_stop", isConversationManuallyStopped(latest)),
+			)
+			return nil
 		}
 
 		shouldSend, err := s.store.ShouldSendVideo(ctx, chatID, fileName, allowRepeat)
@@ -2390,6 +2442,73 @@ func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (s *Service) handleFoodExamplesRequest(ctx context.Context, chatID string, language string, conversation Conversation) error {
+	missing := qualificationMissingFields(conversation.Lead)
+	stage := ClientStateAwaitingQualification
+	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+		stage = ClientStatePackagesPresented
+	}
+	if conversation.QuestionnaireOfferSent {
+		stage = ClientStateAwaitingQuestionnaireConfirm
+	}
+	if len(missing) == 0 {
+		message := foodExamplesReadyText(language, conversation.Lead)
+		if !conversation.PackagesSent && !conversation.Lead.OfferSent && !conversation.SentPortfolio && !conversation.Lead.PortfolioSent {
+			if err := s.sendAndRemember(ctx, chatID, message, ClientStateAwaitingQualification, selectedLevelFromConversation(conversation)); err != nil {
+				return err
+			}
+			latest, err := s.store.Snapshot(ctx, chatID)
+			if err != nil {
+				return err
+			}
+			return s.presentPortfolioAndPackages(ctx, chatID, language, latest, CustomerAnalysis{Intent: IntentPortfolioRequest})
+		}
+		return s.sendAndRemember(ctx, chatID, message, stage, selectedLevelFromConversation(conversation))
+	}
+	message := foodExamplesMissingText(language, conversation.Lead, missing)
+	return s.sendAndRemember(ctx, chatID, message, stage, selectedLevelFromConversation(conversation), qualificationFollowupAskedFields(message, missing)...)
+}
+
+func (s *Service) handleMoreOptionsRequest(ctx context.Context, chatID string, language string, conversation Conversation) error {
+	stage := StagePackageSuggested
+	if conversation.QuestionnaireOfferSent {
+		stage = ClientStateAwaitingQuestionnaireConfirm
+	}
+	return s.sendAndRemember(ctx, chatID, packageOptionsText(language), stage, selectedLevelFromConversation(conversation), fieldPackageInterest)
+}
+
+func foodExamplesReadyText(language string, lead LeadState) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Иә, тағам және фермер өнімдеріне AI ролик жасаймыз. Деректер жеткілікті, форматтарды көрсетемін."
+	case "en":
+		return "Yes, we can make AI videos for food and farm products. The details are enough; I will show formats."
+	default:
+		return "Да, для еды и фермерских продуктов AI-ролики делаем. Данных достаточно, покажу форматы."
+	}
+}
+
+func foodExamplesMissingText(language string, lead LeadState, missing []string) string {
+	missing = normalizeFieldList(missing)
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
+			return "Иә, тағам және фермер өнімдеріне AI ролик жасаймыз. Мақсат пен іске қосу мерзімін жазыңыз."
+		}
+		return "Иә, тағам бағытына AI ролик жасаймыз. Нақтылау үшін: " + missingFieldsLabel(language, missing) + "."
+	case "en":
+		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
+			return "Yes, we can make AI videos for food and farm products. Please share the goal and launch timeline."
+		}
+		return "Yes, we can make food-product AI videos. Please clarify only: " + missingFieldsLabel(language, missing) + "."
+	default:
+		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
+			return "Да, для еды и фермерских продуктов AI-ролики делаем. Подскажите цель и сроки запуска."
+		}
+		return "Да, для еды AI-ролики делаем. Уточните только: " + missingFieldsLabel(language, missing) + "."
 	}
 }
 

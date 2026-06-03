@@ -8,7 +8,9 @@ import (
 )
 
 const (
-	TypeWebhookIncomingMessage = "incomingMessageReceived"
+	TypeWebhookIncomingMessage    = "incomingMessageReceived"
+	TypeWebhookOutgoingMessage    = "outgoingMessageReceived"
+	TypeWebhookOutgoingAPIMessage = "outgoingAPIMessageReceived"
 
 	TypeMessageText         = "textMessage"
 	TypeMessageExtendedText = "extendedTextMessage"

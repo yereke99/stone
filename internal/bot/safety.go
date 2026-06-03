@@ -31,6 +31,10 @@ func isConversationClosedForAutomation(conversation Conversation) bool {
 	}
 }
 
+func isConversationManuallyStopped(conversation Conversation) bool {
+	return conversation.Stopped && strings.TrimSpace(conversation.StopReason) == "manual_override"
+}
+
 func canSendAutomationToConversation(conversation Conversation) bool {
 	if isConversationClosedForAutomation(conversation) {
 		return false

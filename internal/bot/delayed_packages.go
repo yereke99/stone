@@ -135,6 +135,15 @@ func (s *Service) processDueFollowupForConversation(ctx context.Context, convers
 	if err != nil {
 		return err
 	}
+	if isConversationManuallyStopped(latest) || s.isAutomationSuppressed(chatID) {
+		s.info("delayed send suppressed due to stopped/protected status",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", strings.TrimSpace(latest.FollowupStage)),
+			zap.Bool("manual_stop", isConversationManuallyStopped(latest)),
+			zap.Bool("suppressed_contact", s.isAutomationSuppressed(chatID)),
+		)
+		return s.store.CancelFollowup(context.WithoutCancel(ctx), chatID)
+	}
 	if !shouldSendFollowup(latest, now, s.autoPackages.options.After) {
 		s.info("delayed follow-up skipped",
 			zap.String("chat_hash", chatFingerprint(chatID)),

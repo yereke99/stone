@@ -94,8 +94,10 @@ go build ./...
 1. Убедитесь, что инстанс GreenAPI авторизован в WhatsApp.
 2. Проверьте, что `GREEN_API_URL`, `GREEN_MEDIA_API_URL`, `GREEN_ID_INSTANCE` и `GREEN_API_TOKEN` заполнены.
 3. Включите входящие уведомления для инстанса: `incomingWebhook=yes`.
-4. Запустите бота и отправьте текстовое сообщение на подключенный WhatsApp с другого номера.
-5. В логах не должно быть регулярных `receiveNotification failed`.
+4. Для ручной остановки бота из WhatsApp включите уведомления о сообщениях, отправленных с телефона: `outgoingMessageWebhook=yes`.
+   Это нужно именно для `outgoingMessageReceived`; `outgoingAPIMessageReceived` относится к сообщениям, отправленным через API, и бот не использует его для ручного `stop`.
+5. Запустите бота и отправьте текстовое сообщение на подключенный WhatsApp с другого номера.
+6. В логах не должно быть регулярных `receiveNotification failed`.
 
 Настроить входящие уведомления можно через кабинет GreenAPI или API:
 
@@ -106,7 +108,7 @@ set +a
 
 curl -sS -X POST \
   -H "Content-Type: application/json" \
-  -d '{"incomingWebhook":"yes"}' \
+  -d '{"incomingWebhook":"yes","outgoingMessageWebhook":"yes"}' \
   "$GREEN_API_URL/waInstance$GREEN_ID_INSTANCE/setSettings/$GREEN_API_TOKEN"
 ```
 

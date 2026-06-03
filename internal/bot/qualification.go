@@ -290,6 +290,12 @@ func buildConversationSummary(conversation Conversation) string {
 	if isValidDeadline(lead.Deadline) {
 		parts = append(parts, "срок: "+strings.TrimSpace(lead.Deadline))
 	}
+	if strings.TrimSpace(lead.ProductOrService) != "" && !strings.EqualFold(strings.TrimSpace(lead.ProductOrService), strings.TrimSpace(lead.Niche)) {
+		parts = append(parts, "продукт: "+strings.TrimSpace(lead.ProductOrService))
+	}
+	if strings.TrimSpace(lead.WebsiteOrInstagram) != "" {
+		parts = append(parts, "ссылка: "+strings.TrimSpace(lead.WebsiteOrInstagram))
+	}
 	if isValidPackageInterest(lead.SelectedPackage) {
 		parts = append(parts, "пакет: "+adminPackageLabel(lead.SelectedPackage))
 	}

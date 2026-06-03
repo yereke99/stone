@@ -202,6 +202,20 @@ func processNotification(
 		}
 	}()
 
+	if notification.Body.TypeWebhook == greenapi.TypeWebhookOutgoingMessage {
+		shouldDelete = true
+		handleOutgoingPhoneWebhook(ctx, conversationStore, notification, zapLogger)
+		return
+	}
+	if notification.Body.TypeWebhook == greenapi.TypeWebhookOutgoingAPIMessage {
+		shouldDelete = true
+		zapLogger.Debug("greenapi outgoing API notification ignored for manual stop logic",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(notification.ChatID())),
+		)
+		return
+	}
+
 	chatID, text, ok, reason := shouldProcessNotification(notification, time.Now(), maxMessageAge, serviceStartedAt, autoReplyEnabled)
 	if !ok {
 		if reason == "whatsapp_group_automation_disabled" {
@@ -225,6 +239,15 @@ func processNotification(
 		return
 	}
 	messageID, dedupeMessageID = notificationMessageKeys(notification, chatID, text)
+
+	if conversationStore.IsSuppressedPhoneOrChatID(chatID, bot.NormalizePhone(chatID)) {
+		zapLogger.Info("incoming message skipped because chat is in automation suppression list",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+		)
+		shouldDelete = true
+		return
+	}
 
 	zapLogger.Info("incoming notification accepted",
 		zap.String("message_type", notification.TypeMessage()),
@@ -271,17 +294,6 @@ func processNotification(
 		return
 	}
 	processingStarted = dedupeDecision == bot.MessageDedupeNew
-
-	if conversationStore.IsSuppressedPhoneOrChatID(chatID, bot.NormalizePhone(chatID)) {
-		zapLogger.Info("incoming message skipped because chat is in automation suppression list",
-			zap.String("message_id", messageID),
-			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
-		)
-		processingSucceeded = true
-		conversationStore.MarkProcessedMessage(chatID, dedupeMessageID)
-		shouldDelete = true
-		return
-	}
 
 	msg := bot.IncomingMessage{
 		IDMessage:       messageID,
@@ -345,6 +357,58 @@ func shouldProcessNotification(notification *greenapi.Notification, now time.Tim
 		return "", "", false, "empty_text"
 	}
 	return chatID, text, true, "accepted"
+}
+
+func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.ConversationStore, notification *greenapi.Notification, zapLogger *zap.Logger) {
+	if notification == nil {
+		return
+	}
+	chatID := strings.TrimSpace(notification.ChatID())
+	text := strings.TrimSpace(notification.Text())
+	messageID := notification.IDMessage()
+	if chatID == "" {
+		zapLogger.Debug("greenapi outgoing phone notification skipped",
+			zap.String("reason", "empty_chat_id"),
+			zap.String("message_id", messageID),
+		)
+		return
+	}
+	if notification.IsWhatsAppGroupMessage() {
+		zapLogger.Info("greenapi outgoing phone notification skipped for WhatsApp group",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+		)
+		return
+	}
+	if !isManualStopCommand(text) {
+		zapLogger.Info("greenapi outgoingMessageReceived received but not a stop command",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+			zap.String("message_type", notification.TypeMessage()),
+		)
+		return
+	}
+	stoppedAt := time.Now().UTC()
+	if notification.Body.Timestamp > 0 {
+		stoppedAt = time.Unix(notification.Body.Timestamp, 0).UTC()
+	}
+	if err := conversationStore.MarkManualStop(ctx, chatID, messageID, stoppedAt, "moderator_phone"); err != nil {
+		zapLogger.Warn("manual moderator stop failed",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+			zap.Error(err),
+		)
+		return
+	}
+	zapLogger.Info("manual moderator stop detected",
+		zap.String("message_id", messageID),
+		zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+	)
+}
+
+func isManualStopCommand(text string) bool {
+	clean := strings.ToLower(strings.TrimSpace(text))
+	return clean == "stop" || clean == "стоп"
 }
 
 func notificationMessageKeys(notification *greenapi.Notification, chatID string, text string) (messageID string, dedupeKey string) {

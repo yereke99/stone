@@ -32,7 +32,12 @@ func isConversationClosedForAutomation(conversation Conversation) bool {
 }
 
 func isConversationManuallyStopped(conversation Conversation) bool {
-	return conversation.Stopped && strings.TrimSpace(conversation.StopReason) == "manual_override"
+	switch strings.TrimSpace(conversation.StopReason) {
+	case "manual_override", "moderator_stop_command":
+		return conversation.Stopped
+	default:
+		return false
+	}
 }
 
 func canSendAutomationToConversation(conversation Conversation) bool {

@@ -193,7 +193,72 @@ func (n *Notification) ChatID() string {
 	if n == nil {
 		return ""
 	}
-	return strings.TrimSpace(n.Body.SenderData.ChatID)
+	return firstPreferredWhatsAppChatID(n.chatIDCandidates(
+		n.Body.SenderData.ChatID,
+		n.Body.MessageData.ChatID,
+		n.Body.MessageData.Chat,
+		n.Body.MessageData.RemoteJID,
+		n.Body.MessageData.From,
+		n.Body.SenderData.Sender,
+	))
+}
+
+func (n *Notification) OutgoingChatID() string {
+	if n == nil {
+		return ""
+	}
+	return firstPreferredWhatsAppChatID(n.chatIDCandidates(
+		n.Body.MessageData.ChatID,
+		n.Body.MessageData.Chat,
+		n.Body.MessageData.RemoteJID,
+		n.Body.SenderData.ChatID,
+		n.Body.SenderData.Sender,
+		n.Body.MessageData.From,
+	))
+}
+
+func (n *Notification) ChatIDCandidates() []string {
+	if n == nil {
+		return nil
+	}
+	return n.chatIDCandidates(
+		n.Body.SenderData.ChatID,
+		n.Body.MessageData.ChatID,
+		n.Body.MessageData.Chat,
+		n.Body.MessageData.RemoteJID,
+		n.Body.MessageData.From,
+		n.Body.SenderData.Sender,
+	)
+}
+
+func (n *Notification) chatIDCandidates(candidates ...string) []string {
+	seen := make(map[string]bool, len(candidates))
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		key := strings.ToLower(candidate)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func firstPreferredWhatsAppChatID(candidates []string) string {
+	for _, candidate := range candidates {
+		if whatsapp.IsPrivateWhatsAppCustomerChatID(candidate) || whatsapp.IsWhatsAppGroupChatID(candidate) {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(candidates[0])
 }
 
 func (n *Notification) IsWhatsAppGroupMessage() bool {

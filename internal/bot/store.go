@@ -593,6 +593,14 @@ func (s *ConversationStore) MarkAutoPackagesSent(ctx context.Context, chatID str
 
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
+	if isConversationClosedForAutomation(*conversation) {
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
+		conversation.UpdatedAt = now
+		conversation.LastUpdated = now
+		return s.persistConversationLocked(ctx, conversation)
+	}
 	conversation.AutoPackagesSentAt = sentAt.UTC()
 	conversation.PackagesSent = true
 	conversation.SentPortfolio = true
@@ -754,7 +762,7 @@ func (s *ConversationStore) MarkManualStop(ctx context.Context, chatID string, m
 	conversation.AutomationClosed = true
 	conversation.StoppedAt = stoppedAt.UTC()
 	conversation.StoppedBy = stoppedBy
-	conversation.StopReason = "manual_override"
+	conversation.StopReason = "moderator_stop_command"
 	conversation.StopMessageID = strings.TrimSpace(messageID)
 	conversation.NextFollowupAt = time.Time{}
 	conversation.FollowupStage = ""

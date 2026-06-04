@@ -572,27 +572,47 @@ func (s *ConversationStore) LogOutgoingMessage(ctx context.Context, chatID strin
 }
 
 func (s *ConversationStore) LogOutgoingGreenAPIMessage(ctx context.Context, chatID string, greenAPIMessageID string, messageType string, text string) error {
+	return s.LogOutgoingWhatsAppMessage(ctx, WhatsAppMessageLog{
+		ChatID:            chatID,
+		GreenAPIMessageID: greenAPIMessageID,
+		MessageType:       messageType,
+		Text:              text,
+	})
+}
+
+func (s *ConversationStore) LogOutgoingWhatsAppMessage(ctx context.Context, log WhatsAppMessageLog) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	chatID = strings.TrimSpace(chatID)
-	text = strings.TrimSpace(text)
-	if chatID == "" || text == "" {
+	chatID := strings.TrimSpace(log.ChatID)
+	text := strings.TrimSpace(log.Text)
+	if chatID == "" || (text == "" && strings.TrimSpace(log.GreenAPIMessageID) == "") {
 		return nil
 	}
 	now := time.Now().UTC()
-	dedupeKey := outgoingDedupeKey(chatID, messageType, text, now)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO whatsapp_messages (
+	if !log.ProcessedAt.IsZero() {
+		now = log.ProcessedAt.UTC()
+	}
+	messageType := strings.TrimSpace(log.MessageType)
+	dedupeKey := strings.TrimSpace(log.DedupeKey)
+	if dedupeKey == "" && strings.TrimSpace(log.GreenAPIMessageID) != "" {
+		dedupeKey = "out|" + chatID + "|" + strings.TrimSpace(log.GreenAPIMessageID)
+	}
+	if dedupeKey == "" {
+		dedupeKey = outgoingDedupeKey(chatID, messageType, text, now)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO whatsapp_messages (
 			chat_id, green_api_message_id, dedupe_key, direction, message_type, text, raw_payload_json, processed_at, created_at
-		) VALUES (?, ?, ?, 'outgoing', ?, ?, '', ?, ?)`,
+		) VALUES (?, ?, ?, 'outgoing', ?, ?, ?, ?, ?)`,
 		chatID,
-		strings.TrimSpace(greenAPIMessageID),
+		strings.TrimSpace(log.GreenAPIMessageID),
 		dedupeKey,
-		strings.TrimSpace(messageType),
+		messageType,
 		text,
+		strings.TrimSpace(log.RawPayloadJSON),
 		timeText(now),
 		timeText(now),
 	)

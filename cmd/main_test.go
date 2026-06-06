@@ -289,16 +289,19 @@ func TestOutgoingPhoneStopManuallyStopsConversation(t *testing.T) {
 	if !conversation.Stopped || !conversation.AutomationClosed || conversation.Stage != bot.ClientStateStopped {
 		t.Fatalf("conversation not manually stopped: stage=%q stopped=%v closed=%v", conversation.Stage, conversation.Stopped, conversation.AutomationClosed)
 	}
-	if conversation.StopReason != "moderator_stop_command" || conversation.StoppedBy != "moderator_phone" || conversation.StopMessageID != "manual-stop" {
+	if conversation.StopReason != bot.StopReasonManualAdminStop || conversation.StoppedBy != bot.StoppedByManualAdmin || conversation.StopMessageID != "manual-stop" {
 		t.Fatalf("stop metadata = reason=%q by=%q id=%q", conversation.StopReason, conversation.StoppedBy, conversation.StopMessageID)
 	}
-	stopLogs := logs.FilterMessage("moderator stop trigger detected").All()
+	stopLogs := logs.FilterMessage("manual admin stop trigger detected").All()
 	if len(stopLogs) != 1 {
 		t.Fatalf("stop trigger log count = %d, want 1: %#v", len(stopLogs), logs.All())
 	}
 	fields := stopLogs[0].ContextMap()
 	if fields["chat_id"] != chatID || fields["message_id"] != "manual-stop" || fields["normalized_text"] != "stop" || fields["previous_state"] != bot.ClientStateNeutralNew || fields["new_state"] != bot.ClientStateStopped {
 		t.Fatalf("stop trigger log fields = %#v", fields)
+	}
+	if fields["reason"] != bot.StopReasonManualAdminStop || fields["stopped_by"] != bot.StoppedByManualAdmin {
+		t.Fatalf("stop trigger metadata fields = %#v", fields)
 	}
 
 	incoming := incomingTextNotification(332, "after-manual-stop", chatID, "Здравствуйте")
@@ -324,6 +327,7 @@ func TestOutgoingPhoneStopCommandVariants(t *testing.T) {
 		{name: "russian uppercase", text: "СТОП"},
 		{name: "russian punctuation", text: " стоп. "},
 		{name: "english uppercase", text: "STOP"},
+		{name: "english punctuation", text: "stop!"},
 		{name: "slash english", text: "/stop"},
 		{name: "slash russian", text: "/стоп"},
 	}
@@ -350,6 +354,31 @@ func TestOutgoingPhoneStopCommandVariants(t *testing.T) {
 	}
 }
 
+func TestOutgoingPhoneStopUsesExtendedTextPayload(t *testing.T) {
+	client := &fakeNotificationClient{}
+	store := bot.NewConversationStore()
+	service := bot.NewService(&testSender{}, &testAI{}, store, "./video", bot.PortfolioLinks{}, "ru", zap.NewNop())
+	chatID := "77035660000@c.us"
+	notification := incomingTextNotification(356, "manual-stop-extended", chatID, "")
+	notification.Body.TypeWebhook = greenapi.TypeWebhookOutgoingMessage
+	notification.Body.MessageData = greenapi.MessageData{
+		TypeMessage: greenapi.TypeMessageExtendedText,
+		ExtendedTextMessageData: greenapi.ExtendedTextMessageData{
+			Text: " СТОП! ",
+		},
+	}
+
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, notification, zap.NewNop())
+
+	conversation, err := store.Snapshot(context.Background(), chatID)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if conversation.Stage != bot.ClientStateStopped || !conversation.Stopped {
+		t.Fatalf("extended text payload did not stop conversation: stage=%q stopped=%v", conversation.Stage, conversation.Stopped)
+	}
+}
+
 func TestOutgoingPhoneStopUsesMessageDataChatIDFallback(t *testing.T) {
 	client := &fakeNotificationClient{}
 	store := bot.NewConversationStore()
@@ -373,6 +402,35 @@ func TestOutgoingPhoneStopUsesMessageDataChatIDFallback(t *testing.T) {
 	}
 }
 
+func TestOutgoingPhoneDuplicateStopIsIdempotent(t *testing.T) {
+	client := &fakeNotificationClient{}
+	store := bot.NewConversationStore()
+	sender := &testSender{}
+	service := bot.NewService(sender, &testAI{}, store, "./video", bot.PortfolioLinks{}, "ru", zap.NewNop())
+	chatID := "77036880000@c.us"
+	first := incomingTextNotification(368, "manual-stop-duplicate", chatID, "/stop")
+	first.Body.TypeWebhook = greenapi.TypeWebhookOutgoingMessage
+	duplicate := incomingTextNotification(369, "manual-stop-duplicate", chatID, "/stop")
+	duplicate.Body.TypeWebhook = greenapi.TypeWebhookOutgoingMessage
+
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, first, zap.NewNop())
+	processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, duplicate, zap.NewNop())
+
+	if len(client.deleted) != 2 {
+		t.Fatalf("deleted receipts = %#v, want two acknowledgements", client.deleted)
+	}
+	if len(sender.messages) != 0 || len(sender.files) != 0 {
+		t.Fatalf("duplicate manual stop sent automation: messages=%#v files=%#v", sender.messages, sender.files)
+	}
+	conversation, err := store.Snapshot(context.Background(), chatID)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if conversation.Stage != bot.ClientStateStopped || !conversation.Stopped || conversation.StopMessageID != "manual-stop-duplicate" {
+		t.Fatalf("duplicate stop state = stage=%q stopped=%v id=%q", conversation.Stage, conversation.Stopped, conversation.StopMessageID)
+	}
+}
+
 func TestOutgoingPhoneNormalMessageDoesNotRunAutomation(t *testing.T) {
 	client := &fakeNotificationClient{}
 	store := bot.NewConversationStore()
@@ -389,6 +447,43 @@ func TestOutgoingPhoneNormalMessageDoesNotRunAutomation(t *testing.T) {
 	}
 	if exists, err := store.ConversationExists(context.Background(), chatID); err != nil || exists {
 		t.Fatalf("normal manual outgoing conversation exists=%v err=%v, want no stopped lead row", exists, err)
+	}
+}
+
+func TestOutgoingPhoneStopFalsePositivesDoNotStop(t *testing.T) {
+	tests := []struct {
+		name        string
+		text        string
+		messageType string
+	}{
+		{name: "normal sentence", text: "stop motion video", messageType: greenapi.TypeMessageText},
+		{name: "russian non command", text: "останови ролик", messageType: greenapi.TypeMessageText},
+		{name: "media caption", text: "stop", messageType: greenapi.TypeMessageImage},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fakeNotificationClient{}
+			store := bot.NewConversationStore()
+			service := bot.NewService(&testSender{}, &testAI{}, store, "./video", bot.PortfolioLinks{}, "ru", zap.NewNop())
+			chatID := "77037880000@c.us"
+			notification := incomingTextNotification(378, "manual-normal-"+tt.name, chatID, tt.text)
+			notification.Body.TypeWebhook = greenapi.TypeWebhookOutgoingMessage
+			if tt.messageType == greenapi.TypeMessageImage {
+				notification.Body.MessageData = greenapi.MessageData{
+					TypeMessage: greenapi.TypeMessageImage,
+					FileMessageData: greenapi.FileMessageData{
+						Caption: tt.text,
+					},
+				}
+			}
+
+			processNotification(context.Background(), client, service, store, time.Hour, true, time.Time{}, notification, zap.NewNop())
+
+			if exists, err := store.ConversationExists(context.Background(), chatID); err != nil || exists {
+				t.Fatalf("conversation exists=%v err=%v, want no stopped lead row", exists, err)
+			}
+		})
 	}
 }
 

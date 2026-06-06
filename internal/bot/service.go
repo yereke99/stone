@@ -22,6 +22,8 @@ const videoSendDelay = 1500 * time.Millisecond
 
 type outgoingCounterKey struct{}
 
+type outgoingAutomationStageKey struct{}
+
 type outgoingCounter struct {
 	count int
 }
@@ -1152,6 +1154,13 @@ func (s *Service) sendCustomerWhatsAppMessage(ctx context.Context, chatID string
 		s.logAutomationSuppressionSkip("outgoing whatsapp message skipped because chat is in automation suppression list", chatID)
 		return nil
 	}
+	allowed, err := s.customerAutomationAllowedForOutgoing(ctx, chatID, "outgoing whatsapp message skipped because automation is closed")
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return nil
+	}
 	if sender, ok := s.sender.(purposeGreenSender); ok {
 		return sender.SendMessageWithPurpose(ctx, chatID, message, WhatsAppPurposeCustomerAutomation, nil)
 	}
@@ -1167,10 +1176,59 @@ func (s *Service) sendCustomerWhatsAppFile(ctx context.Context, chatID string, f
 		s.logAutomationSuppressionSkip("outgoing whatsapp file skipped because chat is in automation suppression list", chatID)
 		return "", nil
 	}
+	allowed, err := s.customerAutomationAllowedForOutgoing(ctx, chatID, "outgoing whatsapp file skipped because automation is closed")
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", nil
+	}
 	if sender, ok := s.sender.(purposeGreenSender); ok {
 		return sender.SendFileByUploadWithPurpose(ctx, chatID, filePath, caption, WhatsAppPurposeCustomerAutomation, nil)
 	}
 	return s.sender.SendFileByUpload(ctx, chatID, filePath, caption)
+}
+
+func (s *Service) customerAutomationAllowedForOutgoing(ctx context.Context, chatID string, logMessage string) (bool, error) {
+	if s == nil || s.store == nil {
+		return true, nil
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false, nil
+	}
+	exists, err := s.store.ConversationExists(ctx, chatID)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return true, nil
+	}
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return false, err
+	}
+	if isConversationManuallyStopped(latest) {
+		fields := automationSilenceFields(chatID, latest, "outbound_guard_manual_stop")
+		s.info(logMessage, fields...)
+		return false, nil
+	}
+	if canSendAutomationToConversation(latest) || outgoingStageAllowsClosedAutomation(ctx) {
+		return true, nil
+	}
+	fields := automationSilenceFields(chatID, latest, "outbound_guard_closed_state")
+	s.info(logMessage, fields...)
+	return false, nil
+}
+
+func outgoingStageAllowsClosedAutomation(ctx context.Context) bool {
+	stage, _ := ctx.Value(outgoingAutomationStageKey{}).(string)
+	switch strings.TrimSpace(stage) {
+	case ClientStateHandedOff, StageHandoffRequired, StageBriefCollected:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) sendManagerWhatsAppMessage(ctx context.Context, chatID string, message string) error {
@@ -1242,7 +1300,8 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		return nil
 	}
 
-	if err := s.sendCustomerWhatsAppMessage(ctx, chatID, message); err != nil {
+	sendCtx := context.WithValue(ctx, outgoingAutomationStageKey{}, stage)
+	if err := s.sendCustomerWhatsAppMessage(sendCtx, chatID, message); err != nil {
 		return err
 	}
 	incrementOutgoingCount(ctx)
@@ -1946,6 +2005,8 @@ func automationSilenceFields(chatID string, conversation Conversation, reason st
 		zap.Bool("automation_closed", conversation.AutomationClosed),
 		zap.Bool("stopped", conversation.Stopped),
 		zap.Bool("opt_out", conversation.OptOut),
+		zap.String("stop_reason", strings.TrimSpace(conversation.StopReason)),
+		zap.String("stopped_by", strings.TrimSpace(conversation.StoppedBy)),
 		zap.String("reason", reason),
 	}
 }

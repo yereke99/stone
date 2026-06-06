@@ -748,7 +748,7 @@ func (s *ConversationStore) MarkManualStop(ctx context.Context, chatID string, m
 	}
 	stoppedBy = strings.TrimSpace(stoppedBy)
 	if stoppedBy == "" {
-		stoppedBy = "moderator_phone"
+		stoppedBy = StoppedByManualAdmin
 	}
 
 	now := time.Now().UTC()
@@ -762,7 +762,7 @@ func (s *ConversationStore) MarkManualStop(ctx context.Context, chatID string, m
 	conversation.AutomationClosed = true
 	conversation.StoppedAt = stoppedAt.UTC()
 	conversation.StoppedBy = stoppedBy
-	conversation.StopReason = "moderator_stop_command"
+	conversation.StopReason = StopReasonManualAdminStop
 	conversation.StopMessageID = strings.TrimSpace(messageID)
 	conversation.NextFollowupAt = time.Time{}
 	conversation.FollowupStage = ""

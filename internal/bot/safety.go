@@ -2,6 +2,15 @@ package bot
 
 import "strings"
 
+const (
+	StopReasonManualAdminStop      = "manual_admin_stop"
+	StopReasonManualOverride       = "manual_override"
+	StopReasonModeratorStopCommand = "moderator_stop_command"
+
+	StoppedByManualAdmin    = "manual_admin"
+	StoppedByModeratorPhone = "moderator_phone"
+)
+
 func isConversationClosedForAutomation(conversation Conversation) bool {
 	state := strings.TrimSpace(conversation.Stage)
 	if conversation.OptOut ||
@@ -33,7 +42,7 @@ func isConversationClosedForAutomation(conversation Conversation) bool {
 
 func isConversationManuallyStopped(conversation Conversation) bool {
 	switch strings.TrimSpace(conversation.StopReason) {
-	case "manual_override", "moderator_stop_command":
+	case StopReasonManualAdminStop, StopReasonManualOverride, StopReasonModeratorStopCommand:
 		return conversation.Stopped
 	default:
 		return false

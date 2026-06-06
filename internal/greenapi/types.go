@@ -65,6 +65,10 @@ type MessageData struct {
 	Chat                    string                  `json:"chat"`
 	RemoteJID               string                  `json:"remoteJid"`
 	From                    string                  `json:"from"`
+	Text                    string                  `json:"text"`
+	TextMessage             string                  `json:"textMessage"`
+	Message                 string                  `json:"message"`
+	Caption                 string                  `json:"caption"`
 	TextMessageData         TextMessageData         `json:"textMessageData"`
 	ExtendedTextMessageData ExtendedTextMessageData `json:"extendedTextMessageData"`
 	FileMessageData         FileMessageData         `json:"fileMessageData"`
@@ -372,30 +376,117 @@ func (n *Notification) Text() string {
 		return ""
 	}
 
+	data := n.Body.MessageData
+	candidates := []string{
+		data.TextMessageData.TextMessage,
+		data.ExtendedTextMessageData.Text,
+		data.ExtendedTextMessageData.Description,
+		data.FileMessageData.Caption,
+		data.Text,
+		data.TextMessage,
+		data.Message,
+		data.Caption,
+	}
 	switch n.TypeMessage() {
 	case TypeMessageText:
-		return strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage)
+		candidates = []string{
+			data.TextMessageData.TextMessage,
+			data.ExtendedTextMessageData.Text,
+			data.ExtendedTextMessageData.Description,
+			data.Text,
+			data.TextMessage,
+			data.Message,
+		}
 	case TypeMessageExtendedText:
-		if text := strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Text); text != "" {
-			return text
+		candidates = []string{
+			data.ExtendedTextMessageData.Text,
+			data.TextMessageData.TextMessage,
+			data.ExtendedTextMessageData.Description,
+			data.Text,
+			data.TextMessage,
+			data.Message,
 		}
-		if text := strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage); text != "" {
-			return text
-		}
-		return strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Description)
 	case TypeMessageQuoted:
-		if text := strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Text); text != "" {
-			return text
+		candidates = []string{
+			data.ExtendedTextMessageData.Text,
+			data.TextMessageData.TextMessage,
+			data.ExtendedTextMessageData.Description,
+			data.Text,
+			data.TextMessage,
+			data.Message,
 		}
-		if text := strings.TrimSpace(n.Body.MessageData.TextMessageData.TextMessage); text != "" {
-			return text
-		}
-		return strings.TrimSpace(n.Body.MessageData.ExtendedTextMessageData.Description)
 	case TypeMessageImage, TypeMessageVideo, TypeMessageAudio, TypeMessageVoice, TypeMessageDocument, TypeMessageSticker:
-		return strings.TrimSpace(n.Body.MessageData.FileMessageData.Caption)
-	default:
+		candidates = []string{
+			data.FileMessageData.Caption,
+			data.Caption,
+			data.Text,
+			data.TextMessage,
+			data.Message,
+		}
+	}
+	if text := firstTrimmedText(candidates...); text != "" {
+		return text
+	}
+	return textFromRawMessageData(n.RawJSON)
+}
+
+func firstTrimmedText(candidates ...string) string {
+	for _, candidate := range candidates {
+		if text := strings.TrimSpace(candidate); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func textFromRawMessageData(data json.RawMessage) string {
+	if len(data) == 0 {
 		return ""
 	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	body := mapValue(payload, "body")
+	if body == nil {
+		body = payload
+	}
+	messageData := mapValue(body, "messageData")
+	if messageData == nil {
+		return ""
+	}
+	return firstTrimmedText(
+		stringValue(mapValue(messageData, "textMessageData"), "textMessage"),
+		stringValue(mapValue(messageData, "extendedTextMessageData"), "text"),
+		stringValue(mapValue(messageData, "extendedTextMessageData"), "description"),
+		stringValue(mapValue(messageData, "fileMessageData"), "caption"),
+		stringValue(messageData, "text"),
+		stringValue(messageData, "textMessage"),
+		stringValue(messageData, "message"),
+		stringValue(messageData, "caption"),
+	)
+}
+
+func mapValue(payload map[string]any, key string) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	value, ok := payload[key].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return value
+}
+
+func stringValue(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, ok := payload[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func (n *Notification) QuotedMessageID() string {

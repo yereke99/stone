@@ -215,8 +215,8 @@ func processNotification(
 			zap.String("message_id", messageID),
 			zap.String("chat_id", notification.OutgoingChatID()),
 			zap.String("chat_hash", bot.ChatFingerprintForLog(notification.OutgoingChatID())),
-			zap.String("normalized_text", normalizeModeratorCommand(notification.Text())),
-			zap.Bool("moderator_stop_matched", isModeratorStopCommand(notification.Text())),
+			zap.String("normalized_text", normalizeManualAdminCommand(notification.Text())),
+			zap.Bool("manual_admin_stop_matched", isManualAdminStopNotification(notification)),
 		)
 		return
 	}
@@ -370,7 +370,7 @@ func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.Conv
 	}
 	chatID := strings.TrimSpace(notification.OutgoingChatID())
 	text := strings.TrimSpace(notification.Text())
-	normalizedText := normalizeModeratorCommand(text)
+	normalizedText := normalizeManualAdminCommand(text)
 	messageID := notification.IDMessage()
 	if chatID == "" {
 		zapLogger.Debug("greenapi outgoing phone notification skipped",
@@ -406,7 +406,7 @@ func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.Conv
 			zap.Error(err),
 		)
 	}
-	if !isModeratorStopCommand(text) {
+	if !isManualAdminStopNotification(notification) {
 		zapLogger.Info("greenapi outgoingMessageReceived received but not a stop command",
 			zap.String("message_id", messageID),
 			zap.String("chat_id", chatID),
@@ -414,13 +414,13 @@ func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.Conv
 			zap.String("message_type", notification.TypeMessage()),
 			zap.String("normalized_text", normalizedText),
 			zap.Bool("manual_outgoing", true),
-			zap.Bool("moderator_stop_matched", false),
+			zap.Bool("manual_admin_stop_matched", false),
 		)
 		return
 	}
 	previous, err := conversationStore.Snapshot(ctx, chatID)
 	if err != nil {
-		zapLogger.Warn("manual moderator stop previous state lookup failed",
+		zapLogger.Warn("manual admin stop previous state lookup failed",
 			zap.String("message_id", messageID),
 			zap.String("chat_id", chatID),
 			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
@@ -430,8 +430,8 @@ func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.Conv
 		return
 	}
 	stoppedAt := notificationTime(notification)
-	if err := conversationStore.MarkManualStop(ctx, chatID, messageID, stoppedAt, "moderator_phone"); err != nil {
-		zapLogger.Warn("manual moderator stop failed",
+	if err := conversationStore.MarkManualStop(ctx, chatID, messageID, stoppedAt, bot.StoppedByManualAdmin); err != nil {
+		zapLogger.Warn("manual admin stop failed",
 			zap.String("message_id", messageID),
 			zap.String("chat_id", chatID),
 			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
@@ -443,7 +443,7 @@ func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.Conv
 	}
 	latest, err := conversationStore.Snapshot(ctx, chatID)
 	if err != nil {
-		zapLogger.Warn("manual moderator stop new state lookup failed",
+		zapLogger.Warn("manual admin stop new state lookup failed",
 			zap.String("message_id", messageID),
 			zap.String("chat_id", chatID),
 			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
@@ -453,17 +453,27 @@ func handleOutgoingPhoneWebhook(ctx context.Context, conversationStore *bot.Conv
 		)
 		return
 	}
-	zapLogger.Info("moderator stop trigger detected",
+	zapLogger.Info("manual admin stop trigger detected",
 		zap.String("message_id", messageID),
 		zap.String("chat_id", chatID),
 		zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
 		zap.String("normalized_text", normalizedText),
 		zap.String("previous_state", conversationStateForLog(previous)),
 		zap.String("new_state", conversationStateForLog(latest)),
+		zap.String("reason", bot.StopReasonManualAdminStop),
+		zap.String("stopped_by", bot.StoppedByManualAdmin),
 	)
 }
 
-func normalizeModeratorCommand(text string) string {
+func isManualAdminStopNotification(notification *greenapi.Notification) bool {
+	if notification == nil || !isManualAdminStopCommand(notification.Text()) {
+		return false
+	}
+	messageType := notification.TypeMessage()
+	return messageType == "" || notification.IsTextMessage()
+}
+
+func normalizeManualAdminCommand(text string) string {
 	clean := strings.ToLower(strings.TrimSpace(text))
 	clean = strings.TrimFunc(clean, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
@@ -471,8 +481,8 @@ func normalizeModeratorCommand(text string) string {
 	return strings.Join(strings.Fields(clean), " ")
 }
 
-func isModeratorStopCommand(text string) bool {
-	switch normalizeModeratorCommand(text) {
+func isManualAdminStopCommand(text string) bool {
+	switch normalizeManualAdminCommand(text) {
 	case "stop", "стоп":
 		return true
 	default:
@@ -517,10 +527,10 @@ func notificationDebugFields(notification *greenapi.Notification) []zap.Field {
 		zap.String("sender", strings.TrimSpace(notification.Body.SenderData.Sender)),
 		zap.String("message_type", notification.TypeMessage()),
 		zap.String("message_id", notification.IDMessage()),
-		zap.String("text_body", text),
+		zap.Int("text_len", len(text)),
 		zap.Bool("manual_outgoing", notification.Body.TypeWebhook == greenapi.TypeWebhookOutgoingMessage),
 		zap.Bool("api_outgoing", notification.Body.TypeWebhook == greenapi.TypeWebhookOutgoingAPIMessage),
-		zap.Bool("moderator_stop_matched", notification.Body.TypeWebhook == greenapi.TypeWebhookOutgoingMessage && isModeratorStopCommand(text)),
+		zap.Bool("manual_admin_stop_matched", notification.Body.TypeWebhook == greenapi.TypeWebhookOutgoingMessage && isManualAdminStopNotification(notification)),
 	}
 }
 
@@ -567,6 +577,9 @@ func notificationMessageKeys(notification *greenapi.Notification, chatID string,
 func notificationRawJSON(notification *greenapi.Notification) string {
 	if notification == nil {
 		return ""
+	}
+	if len(notification.RawJSON) > 0 {
+		return string(notification.RawJSON)
 	}
 	data, err := json.Marshal(notification)
 	if err != nil {

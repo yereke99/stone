@@ -330,6 +330,10 @@ func TestOutgoingPhoneStopCommandVariants(t *testing.T) {
 		{name: "english punctuation", text: "stop!"},
 		{name: "slash english", text: "/stop"},
 		{name: "slash russian", text: "/стоп"},
+		// Latin "c" + Cyrillic "т","о" + Cyrillic "п": a mixed-script "стоп".
+		{name: "mixed script russian", text: "cтоп"},
+		// Cyrillic "ѕ","т","о","р": a mixed-script "stop".
+		{name: "mixed script english", text: "ѕтор"},
 	}
 
 	for _, tt := range tests {

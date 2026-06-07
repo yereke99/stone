@@ -15,7 +15,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/yereke99/stone/internal/bot"
 	"github.com/yereke99/stone/internal/config"
@@ -474,20 +473,11 @@ func isManualAdminStopNotification(notification *greenapi.Notification) bool {
 }
 
 func normalizeManualAdminCommand(text string) string {
-	clean := strings.ToLower(strings.TrimSpace(text))
-	clean = strings.TrimFunc(clean, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
-	})
-	return strings.Join(strings.Fields(clean), " ")
+	return bot.NormalizeAdminStopCommand(text)
 }
 
 func isManualAdminStopCommand(text string) bool {
-	switch normalizeManualAdminCommand(text) {
-	case "stop", "стоп":
-		return true
-	default:
-		return false
-	}
+	return bot.IsAdminStopCommand(text)
 }
 
 func outgoingNotificationDedupeKey(notification *greenapi.Notification, chatID string, text string) string {

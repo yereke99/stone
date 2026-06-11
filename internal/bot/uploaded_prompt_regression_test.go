@@ -29,10 +29,11 @@ func TestProductNicheAnswerStoresNicheAndAsksOnlyMissingFields(t *testing.T) {
 		strings.Contains(lower, "для какой ниши") {
 		t.Fatalf("bot asked for already known niche: %q", last)
 	}
-	for _, want := range []string{"цель", "когда"} {
-		if !strings.Contains(strings.ToLower(last), want) && !strings.Contains(strings.ToLower(last), "срок") {
-			t.Fatalf("missing-field reply %q does not ask for goal/deadline", last)
-		}
+	if !strings.Contains(lower, "цель") {
+		t.Fatalf("missing-field reply %q does not ask for the goal", last)
+	}
+	if strings.Contains(lower, "срок") || strings.Contains(lower, "когда") {
+		t.Fatalf("missing-field reply asked for launch timing in the first qualification: %q", last)
 	}
 }
 
@@ -55,13 +56,16 @@ func TestScreenshotNicheCityMessageDoesNotRepeatNicheQuestion(t *testing.T) {
 	}
 	last := sender.messages[len(sender.messages)-1]
 	lower := strings.ToLower(last)
-	for _, forbidden := range []string{"подскажите нишу", "какая у вас ниша", "для какой ниши", "цель ролика"} {
+	for _, forbidden := range []string{"подскажите нишу", "какая у вас ниша", "для какой ниши"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("reply repeated/stretched qualification question %q in: %q", forbidden, last)
 		}
 	}
-	if !strings.Contains(lower, "когда") && !strings.Contains(lower, "срок") {
-		t.Fatalf("reply did not ask only for launch timing: %q", last)
+	if !strings.Contains(lower, "цель") {
+		t.Fatalf("reply did not ask only for the missing goal: %q", last)
+	}
+	if strings.Contains(lower, "когда") || strings.Contains(lower, "срок") {
+		t.Fatalf("reply asked for launch timing in the first qualification: %q", last)
 	}
 }
 

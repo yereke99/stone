@@ -258,13 +258,15 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 
 func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	updateQualificationFields := analysis.Intent != IntentBriefAnswer
-	if updateQualificationFields && analysis.Niche != nil && strings.TrimSpace(*analysis.Niche) != "" {
+	// A valid stored niche/goal is only replaced by another valid value, so a
+	// greeting, question or unclear fragment can never destroy good data.
+	if updateQualificationFields && analysis.Niche != nil && isValidNiche(*analysis.Niche) && !isNonNicheCandidateText(normalizeForAnalysis(*analysis.Niche)) {
 		s.Niche = strings.TrimSpace(*analysis.Niche)
 	}
 	if updateQualificationFields && analysis.City != nil && strings.TrimSpace(*analysis.City) != "" {
 		s.City = strings.TrimSpace(*analysis.City)
 	}
-	if updateQualificationFields && analysis.Goal != nil && strings.TrimSpace(*analysis.Goal) != "" {
+	if updateQualificationFields && analysis.Goal != nil && isValidGoal(*analysis.Goal) {
 		s.Goal = strings.TrimSpace(*analysis.Goal)
 	}
 	if updateQualificationFields && len(analysis.Platforms) > 0 {
@@ -290,7 +292,7 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	}
 	if analysis.ProductOrService != nil && strings.TrimSpace(*analysis.ProductOrService) != "" {
 		s.ProductOrService = strings.TrimSpace(*analysis.ProductOrService)
-		if !isValidNiche(s.Niche) && isValidNiche(s.ProductOrService) {
+		if !isValidNiche(s.Niche) && isValidNiche(s.ProductOrService) && !isNonNicheCandidateText(normalizeForAnalysis(s.ProductOrService)) {
 			s.Niche = s.ProductOrService
 		}
 	}
@@ -334,16 +336,17 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	}
 }
 
+// MissingCoreFields returns the fields required for the first qualification
+// stage. The launch deadline is intentionally NOT part of it: the bot must not
+// ask about timing unless the customer brings it up, so only niche and goal
+// are required. A volunteered deadline is still stored when extracted.
 func (s LeadState) MissingCoreFields() []string {
-	missing := make([]string, 0, 4)
+	missing := make([]string, 0, 2)
 	if !isValidNiche(s.Niche) {
 		missing = append(missing, fieldNiche)
 	}
 	if !isValidGoal(s.Goal) {
 		missing = append(missing, fieldGoal)
-	}
-	if !isValidDeadline(s.Deadline) {
-		missing = append(missing, fieldDeadline)
 	}
 	return missing
 }
@@ -481,10 +484,13 @@ func extractNiche(text string, current LeadState) string {
 		return value
 	}
 
+	// Questions, greetings, confirmations, timing words and case/price requests
+	// must never fall through to the generic short-answer niche extraction.
+	if isNonNicheCandidateText(normalized) || isNonNicheCandidateText(cleaned) {
+		return ""
+	}
+
 	if hasGoalMarker(normalized) || hasDeadlineMarker(normalized) || len(extractPlatforms(text)) > 0 {
-		if value := knownNicheFromText(cleaned); value != "" {
-			return value
-		}
 		return ""
 	}
 
@@ -496,7 +502,7 @@ func extractNiche(text string, current LeadState) string {
 		return normalizeNiche(cleaned)
 	}
 
-	return knownNicheFromText(cleaned)
+	return ""
 }
 
 func extractCity(text string) string {
@@ -854,7 +860,6 @@ func looksLikeOnlyPlatformContext(normalized string) bool {
 func shortProductOrNicheLine(line string, current LeadState) string {
 	normalized := normalizeForAnalysis(line)
 	if normalized == "" ||
-		isNonNicheShortReply(normalized) ||
 		strings.Contains(normalized, "?") ||
 		strings.Contains(normalized, "http") ||
 		strings.Contains(normalized, "www") ||
@@ -867,6 +872,9 @@ func shortProductOrNicheLine(line string, current LeadState) string {
 	}
 	if value := knownNicheFromText(normalized); value != "" {
 		return value
+	}
+	if isNonNicheCandidateText(normalized) {
+		return ""
 	}
 	words := strings.Fields(normalized)
 	if len(words) == 0 || len(words) > 5 {
@@ -985,8 +993,72 @@ func isRefusal(normalized string) bool {
 
 func isGreeting(normalized string) bool {
 	return containsAny(normalized, []string{
-		"здравствуйте", "добрый", "привет", "салам", "сәлем", "салем", "hello", "hi",
-	})
+		"здравствуйте", "здраствуйте", "добрый", "доброе", "доброго", "привет",
+		"салам", "сәлем", "салем", "ассалаум", "кайырлы", "қайырлы", "hello", "hi ", "good morning", "good afternoon",
+	}) || strings.Trim(normalized, " .,!?:;") == "hi"
+}
+
+// isNonNicheCandidateText guards the generic "short answer becomes the niche"
+// extraction paths. Greetings, confirmations, timing words, questions, case/
+// example/price requests and stop commands must never be stored as a niche,
+// even when the niche is the only missing field.
+func isNonNicheCandidateText(normalized string) bool {
+	clean := strings.Trim(normalized, " .,!?:;")
+	if clean == "" {
+		return true
+	}
+	if isGreeting(clean) || isAgreement(clean) || isGenericAcknowledgement(clean) || isNonNicheShortReply(clean) {
+		return true
+	}
+	if strings.Contains(normalized, "?") {
+		return true
+	}
+	if containsPortfolioRequest(clean) || containsPriceQuestion(clean) {
+		return true
+	}
+	if normalizeDeadline(clean) != "" || isTimingOnlyReply(clean) {
+		return true
+	}
+	if IsAdminStopCommand(clean) || isMuteRequest(clean) {
+		return true
+	}
+	return wordsAreOnlyNonNicheNoise(clean)
+}
+
+// isTimingOnlyReply detects bare timing/context answers such as "сейчас" or
+// "завтра" that must not be confused with a business niche.
+func isTimingOnlyReply(clean string) bool {
+	switch clean {
+	case "сейчас", "сегодня", "завтра", "послезавтра", "позже", "потом", "скоро",
+		"на днях", "пока нет", "не сейчас", "казир", "қазір", "ертен", "ертең",
+		"now", "today", "tomorrow", "later", "soon":
+		return true
+	default:
+		return false
+	}
+}
+
+// wordsAreOnlyNonNicheNoise reports whether every word of a short reply is a
+// filler/intent word ("бот собираюсь", "ну давайте"), so the text carries no
+// business meaning that could be a niche.
+func wordsAreOnlyNonNicheNoise(clean string) bool {
+	words := strings.Fields(clean)
+	if len(words) == 0 || len(words) > 4 {
+		return false
+	}
+	noise := map[string]bool{
+		"бот": true, "бота": true, "боту": true, "bot": true,
+		"собираюсь": true, "собираемся": true, "планирую": true, "планируем": true,
+		"думаю": true, "думаем": true, "хочу": true, "хотим": true, "надо": true,
+		"нужно": true, "ну": true, "вот": true, "это": true, "просто": true,
+		"давай": true, "давайте": true, "можно": true, "пока": true, "еще": true, "ещё": true,
+	}
+	for _, word := range words {
+		if !noise[strings.Trim(word, " .,!?:;")] {
+			return false
+		}
+	}
+	return true
 }
 
 func extractSelectedLevel(text string) int {
@@ -1241,8 +1313,9 @@ func knownNicheFromText(normalized string) string {
 		"фермерские продукты", "пылесосы", "еда",
 		"спорт", "фитнес", "йога", "стоматология", "медицина", "косметология",
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
-		"недвижимость", "ремонт", "строительство", "образование", "курсы",
-		"мебель", "авто", "туризм", "отель", "барбершоп", "маркетинг",
+		"недвижимость", "ремонт", "строительство", "строительная компания", "образование", "курсы",
+		"мебель", "мебельная ниша", "тв зона", "тв зоны", "кофейня", "детская одежда",
+		"авто", "туризм", "отель", "барбершоп", "маркетинг",
 		"бад для похудения", "бад", "бады", "нутрицевтик", "биодобав",
 		"онлайн курс", "online course", "real estate", "beauty salon", "expert blog",
 		"clothing brand", "education", "fitness", "construction", "medical clinic",
@@ -1277,7 +1350,8 @@ func cleanNicheSource(value string) string {
 	value = replacer.Replace(value)
 	value = removeKnownCityPhrases(value)
 	noise := []string{
-		"здравствуйте", "здраствуйте", "добрый день", "добрый вечер", "привет", "салам",
+		"здравствуйте", "здраствуйте", "добрый день", "добрый вечер", "доброе утро",
+		"доброго дня", "доброго утра", "доброго вечера", "привет", "салам",
 		"ниша", "сфера", "направление",
 		"у нас", "у меня", "моя", "мой", "наша", "наш", "работа", "занимаюсь", "занимаемся",
 	}

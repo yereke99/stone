@@ -39,8 +39,11 @@ func isQuotedQualificationPrompt(value string) bool {
 	if normalized == "" {
 		return false
 	}
-	hasNicheQuestion := containsAny(normalized, []string{"в какой нише", "кай нишада", "what niche"})
-	hasGoalQuestion := containsAny(normalized, []string{"какая цель", "максат", "goal"})
+	hasNicheQuestion := containsAny(normalized, []string{
+		"в какой нише", "какая ниша", "что продаете", "кай нишада", "кай ниша", "не сатасыз",
+		"what niche", "what is your niche", "what do you sell",
+	})
+	hasGoalQuestion := containsAny(normalized, []string{"какая цель", "цель ролика", "максат", "goal"})
 	hasDeadlineQuestion := containsAny(normalized, []string{"в какие сроки", "кашан иске", "when do you need"})
 	return hasNicheQuestion && (hasGoalQuestion || hasDeadlineQuestion)
 }

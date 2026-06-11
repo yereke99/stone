@@ -20,11 +20,11 @@ type PortfolioLinks struct {
 func welcomeMessage(language Language) string {
 	switch language {
 	case LanguageKZ:
-		return "48 сағатта түсірілімсіз AI жарнамалық ролик жасаймыз. Баға 35 000 тг бастап. Ниша, платформа және мерзімді жазыңыз."
+		return "48 сағатта түсірілімсіз AI жарнамалық ролик жасаймыз. Баға 35 000 тг бастап. Не сататыныңызды және ролик мақсатын жазыңыз."
 	case LanguageEN:
-		return "We create AI ad videos in 48 hours without filming. From 35,000 KZT. Share niche, platform, and timeline."
+		return "We create AI ad videos in 48 hours without filming. From 35,000 KZT. Share what you sell and the video goal."
 	default:
-		return "Делаем AI-рекламные ролики за 48 часов без съёмки. Стоимость от 35 000 тг. Подскажите нишу, площадку и сроки запуска."
+		return "Делаем AI-рекламные ролики за 48 часов без съёмки. Стоимость от 35 000 тг. Подскажите, что продаёте и какая цель ролика."
 	}
 }
 

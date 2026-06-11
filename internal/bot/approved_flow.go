@@ -22,11 +22,11 @@ const (
 func QualificationQuestionsText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Түсіну үшін айтыңыз:\n1) Қай нишада жұмыс істейсіз?\n2) Мақсат — өтінім / сату / танымалдық?\n3) Қашан іске қосу керек?"
+		return "Роликті дәл сіздің міндетіңізге сай жасау үшін қысқаша жазыңыз:\n\n— Не сатасыз / қай ниша?\n— Роликтің мақсаты қандай: өтінім, сату немесе танымалдық?"
 	case "en":
-		return "To see if this fits, please share:\n1) What niche are you in?\n2) Goal — leads / sales / awareness?\n3) When do you need to launch?"
+		return "To make the video fit your task, please share briefly:\n\n— What do you sell / what is your niche?\n— What is the video goal: leads, sales, or awareness?"
 	default:
-		return "Чтобы понять, подойдём ли мы вам, подскажите:\n1) В какой нише работаете?\n2) Какая цель — заявки / продажи / узнаваемость?\n3) В какие сроки нужно запустить?"
+		return "Чтобы сделать ролик точно под вашу задачу, напишите, пожалуйста, кратко:\n\n— Что продаёте / какая ниша?\n— Какая цель ролика: заявки, продажи или узнаваемость?"
 	}
 }
 

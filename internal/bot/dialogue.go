@@ -108,14 +108,14 @@ func askMissingFieldsReply(language string, lead LeadState, missing []string) st
 	language = normalizeLanguageCode(language)
 	platforms := formatPlatformList(lead.Platforms, language)
 
-	if sameFields(missing, []string{fieldNiche, fieldGoal, fieldDeadline}) && platforms != "" {
+	if sameFields(missing, []string{fieldNiche, fieldGoal}) && platforms != "" {
 		switch language {
 		case "kk":
-			return fmt.Sprintf("Түсіндім, іске қосу %s үшін. Ниша, мақсат және мерзімді қысқаша жазыңыз.", platforms)
+			return fmt.Sprintf("Түсіндім, іске қосу %s үшін. Не сатасыз және роликтің мақсаты қандай екенін қысқаша жазыңыз.", platforms)
 		case "en":
-			return fmt.Sprintf("Got it, launch for %s. Please share the niche, video goal, and timeline.", platforms)
+			return fmt.Sprintf("Got it, launch for %s. Please share what you sell and the video goal.", platforms)
 		default:
-			return fmt.Sprintf("Понял, запуск под %s. Подскажите нишу, цель ролика и сроки запуска.", platforms)
+			return fmt.Sprintf("Понял, запуск под %s. Подскажите, что продаёте и какая цель ролика.", platforms)
 		}
 	}
 

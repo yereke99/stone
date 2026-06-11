@@ -146,7 +146,7 @@ func (s *Service) maybeApplyHistoryGuard(ctx context.Context, msg IncomingMessag
 				zap.String("previous_classification", conversation.HistoryClassification),
 				zap.String("classification", decision.Classification),
 			)
-			return true, s.sendAndRemember(ctx, msg.ChatID, LegacyReengagementClarificationText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+			return true, s.sendAndRemember(ctx, msg.ChatID, LegacyReengagementClarificationText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal)
 		}
 		s.info("history guard stored decision silenced automation",
 			zap.String("chat_hash", chatFingerprint(msg.ChatID)),
@@ -176,7 +176,7 @@ func (s *Service) maybeApplyHistoryGuard(ctx context.Context, msg IncomingMessag
 			zap.String("decision", "legacy_reengagement"),
 			zap.String("classification", decision.Classification),
 		)
-		return true, s.sendAndRemember(ctx, msg.ChatID, LegacyReengagementClarificationText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline)
+		return true, s.sendAndRemember(ctx, msg.ChatID, LegacyReengagementClarificationText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal)
 	case HistoryClassificationLegacyExisting, HistoryClassificationLegacyProcessed, HistoryClassificationHistoryCheckFailed, HistoryClassificationUnknown:
 		s.info("history guard final decision",
 			zap.String("chat_hash", chatFingerprint(msg.ChatID)),
@@ -632,10 +632,10 @@ func absInt64(value int64) int64 {
 func LegacyReengagementClarificationText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Сәлеметсіз бе! Иә, көмектесе аламыз 🙌\n\nҚазір қай жобаға ролик керек екенін жазыңыз:\n1) ниша/сала;\n2) мақсат — өтінім, сату немесе танымалдық;\n3) іске қосу мерзімі?"
+		return "Сәлеметсіз бе! Иә, көмектесе аламыз 🙌\n\nҚазір қай жобаға ролик керек екенін жазыңыз:\n1) ниша/сала;\n2) мақсат — өтінім, сату немесе танымалдық?"
 	case "en":
-		return "Hello! Yes, we can help 🙌\n\nPlease share which project needs a video now:\n1) niche/field;\n2) goal — leads, sales, or awareness;\n3) launch timeline?"
+		return "Hello! Yes, we can help 🙌\n\nPlease share which project needs a video now:\n1) niche/field;\n2) goal — leads, sales, or awareness?"
 	default:
-		return "Здравствуйте! Да, можем помочь 🙌\n\nПодскажите, пожалуйста, для какого проекта нужен ролик сейчас:\n1) ниша/сфера;\n2) цель — заявки, продажи или узнаваемость;\n3) сроки запуска?"
+		return "Здравствуйте! Да, можем помочь 🙌\n\nПодскажите, пожалуйста, для какого проекта нужен ролик сейчас:\n1) ниша/сфера;\n2) цель — заявки, продажи или узнаваемость?"
 	}
 }

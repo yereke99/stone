@@ -95,7 +95,7 @@ func TestUnknownFirstMessageDefaultsToRussianWithoutLanguageQuestion(t *testing.
 	if sender.messages[0] == LanguageChoiceText() {
 		t.Fatalf("bot asked language choice: %#v", sender.messages)
 	}
-	if !strings.Contains(sender.messages[0], "В какой нише") {
+	if !strings.Contains(sender.messages[0], "Что продаёте") {
 		t.Fatalf("unexpected default ru reply: %#v", sender.messages)
 	}
 }

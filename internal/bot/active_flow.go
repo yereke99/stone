@@ -55,7 +55,7 @@ func faqContinuation(language string, conversation Conversation) (string, string
 	if len(missing) == 0 {
 		return FormatQuestionText(language), ClientStatePackagesPresented, level, []string{fieldPackageInterest}
 	}
-	if sameFields(missing, []string{fieldNiche, fieldGoal, fieldDeadline}) {
+	if sameFields(missing, []string{fieldNiche, fieldGoal}) {
 		return QualificationQuestionsText(language), ClientStateAwaitingQualification, 0, missing
 	}
 	reply := qualificationFollowupText(language, conversation)

@@ -243,7 +243,7 @@ func TestMessyMultilineQualificationDoesNotRepeatNiche(t *testing.T) {
 	}
 }
 
-func TestFoodFarmProductsExampleRequestAsksOnlyGoalDeadline(t *testing.T) {
+func TestFoodFarmProductsExampleRequestAsksOnlyGoal(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	ai := &fakeAI{}
@@ -264,8 +264,11 @@ func TestFoodFarmProductsExampleRequestAsksOnlyGoalDeadline(t *testing.T) {
 	}
 	last := sender.messages[len(sender.messages)-1]
 	lower := strings.ToLower(last)
-	if !strings.Contains(lower, "ai-ролики делаем") || !strings.Contains(lower, "цель") || !strings.Contains(lower, "срок") {
-		t.Fatalf("food reply did not answer and ask goal/deadline only: %q", last)
+	if !strings.Contains(lower, "ai-ролики делаем") || !strings.Contains(lower, "цель") {
+		t.Fatalf("food reply did not answer and ask the goal: %q", last)
+	}
+	if strings.Contains(lower, "срок") || strings.Contains(lower, "когда") {
+		t.Fatalf("food reply asked for launch timing in the first qualification: %q", last)
 	}
 	if strings.Contains(lower, "ниша") || strings.Contains(lower, "для какой ниши") {
 		t.Fatalf("food reply asked for known niche: %q", last)
@@ -416,10 +419,13 @@ func TestPackageReplyWithMissingFieldsAsksOnlyMissingFields(t *testing.T) {
 	if strings.Contains(last, "пакет") {
 		t.Fatalf("reply asked for already selected package: %q", last)
 	}
-	for _, want := range []string{"нишу", "цель"} {
+	for _, want := range []string{"что продаёте", "цель"} {
 		if !strings.Contains(last, want) {
 			t.Fatalf("missing-field reply %q does not mention %q", last, want)
 		}
+	}
+	if strings.Contains(last, "срок") || strings.Contains(last, "когда") {
+		t.Fatalf("missing-field reply asked for launch timing: %q", last)
 	}
 }
 
@@ -488,7 +494,7 @@ func TestPendingQuestionnairePackageSelectionDoesNotOpenBriefBeforeQualification
 	if strings.Contains(last, "анкету откроем") || strings.Contains(last, "пакет") {
 		t.Fatalf("unexpected questionnaire/package prompt after selected package: %q", last)
 	}
-	for _, want := range []string{"нишу", "цель"} {
+	for _, want := range []string{"что продаёте", "цель"} {
 		if !strings.Contains(last, want) {
 			t.Fatalf("missing-field reply %q does not mention %q", last, want)
 		}

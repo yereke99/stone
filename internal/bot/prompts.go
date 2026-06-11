@@ -19,7 +19,10 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 Жёсткие правила:
 - не спрашивай выбор языка; отвечай на ru, kk или en из текущего состояния;
 - не начинай диалог заново для существующего chatID;
-- не спрашивай niche, goal, platform, deadline, ai_experience, package или brief, если поле уже заполнено или уже спрашивалось;
+- не спрашивай niche, goal, platform, ai_experience, package или brief, если поле уже заполнено или уже спрашивалось;
+- НИКОГДА не спрашивай сроки/дедлайн запуска ("когда нужно запустить?", "какие сроки?") в первичной квалификации; первичная квалификация — только ниша и цель ролика; сроки обсуждай только если клиент сам спросил о сроках производства или сам написал про срочность;
+- приветствия ("здравствуйте", "доброе утро", "добрый день"), подтверждения ("да", "ок", "понял"), вопросы про кейсы/примеры/цену и слова про время ("сейчас", "завтра") — это НЕ ниша; никогда не сохраняй такие тексты как niche;
+- если клиент спрашивает про кейсы/примеры, сначала ответь, что кейсы отправим прямо сюда, затем спроси только недостающие нишу/цель;
 - если не хватает platform, спрашивай с примерами: Instagram, TikTok, Facebook, WhatsApp, сайт;
 - сначала отвечай на прямой вопрос клиента: цена, примеры, сроки, пакет, Instagram/TikTok, как работает;
 - одно входящее сообщение = максимум один текстовый reply;
@@ -28,7 +31,7 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 - если selected_package заполнен, не продавай заново и не повторяй цены; переходи к короткому брифу;
 - если transferred_to_manager=true, automation_closed=true, brief_completed=true или lead_status=handoff_required, не продолжай продажу и не начинай квалификацию заново;
 - если клиент просит оператора, админа, менеджера, живого человека, звонок или пишет срочно связаться — это прямой запрос человека: stage=handoff_required, lead_status=handoff_required, need_human=true; сначала подтверди подключение менеджера и не спрашивай пакет/портфолио заново;
-- не передавай менеджеру и не ставь handoff_required, если нет валидных niche, goal, deadline и selected_package/package_interest;
+- не передавай менеджеру и не ставь handoff_required, если нет валидных niche, goal и selected_package/package_interest;
 - "давайте откроем анкету" означает intent to proceed, но не полную квалификацию; если поля отсутствуют, спроси только missing_fields;
 - не считай односимвольные или мусорные значения вроде "м", "-", ".", "не знаю" валидной niche/goal;
 - если пакет не выбран и клиент пишет, что менеджер подскажет, package_interest = "needs_manager_recommendation";
@@ -67,11 +70,11 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 func FallbackText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Рақмет. Нишаны, мақсатты және іске қосу мерзімін қысқаша жазыңыз."
+		return "Рақмет. Не сатасыз және роликтің мақсаты қандай екенін қысқаша жазыңыз."
 	case "en":
-		return "Thanks. Please share the niche, video goal, platform, and launch timeline."
+		return "Thanks. Please share what you sell and the video goal: leads, sales, or awareness."
 	default:
-		return "Понял. Уточните нишу, цель ролика, площадку и сроки запуска."
+		return "Понял. Подскажите, пожалуйста, что продаёте и какая цель ролика: заявки, продажи или узнаваемость?"
 	}
 }
 
@@ -93,11 +96,11 @@ func LanguageChoiceText() string {
 func QualificationGreetingText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Сәлеметсіз бе! Хабарласқаныңызға рахмет 🙌\n\n48 сағатта түсірілімсіз ИИ жарнамалық ролик жасаймыз, жарнамаға дайын.\n\nБаға 35 000 тг бастап.\n\nТүсіну үшін айтыңыз:\n1) Қай нишада жұмыс істейсіз?\n2) Мақсат — өтінім / сату / танымалдық?\n3) Қашан іске қосу керек?"
+		return "Сәлеметсіз бе! Хабарласқаныңызға рахмет 🙌\n\n48 сағатта түсірілімсіз ИИ жарнамалық ролик жасаймыз, жарнамаға дайын.\n\nБаға 35 000 тг бастап.\n\nРоликті дәл сіздің міндетіңізге сай жасау үшін қысқаша жазыңыз:\n\n— Не сатасыз / қай ниша?\n— Роликтің мақсаты қандай: өтінім, сату немесе танымалдық?\n\nInstagram немесе сайт жіберсеңіз де болады 🎯\nСодан кейін ролик идеясы мен форматын ұсынамыз 🤝"
 	case "en":
-		return "Hello! Thanks for reaching out 🙌\n\nWe create AI ad videos in 48 hours without filming, ready to launch ads.\n\nPricing starts from 35,000 KZT.\n\nTo see if this fits, please share:\n1) What niche are you in?\n2) Goal — leads / sales / awareness?\n3) When do you need to launch?"
+		return "Hello! Thanks for reaching out 🙌\n\nWe create AI ad videos in 48 hours without filming, ready to launch ads.\n\nPricing starts from 35,000 KZT.\n\nTo make the video fit your task, please share briefly:\n\n— What do you sell / what is your niche?\n— What is the video goal: leads, sales, or awareness?\n\nYou can also send your Instagram or website 🎯\nAfter that we will suggest the idea and format 🤝"
 	default:
-		return "Здравствуйте! Спасибо за обращение 🙌\n\nДелаем ИИ рекламные ролики за 48 часов без съёмки, под запуск рекламы.\n\nСтоимость от 35 000 тг.\n\nЧтобы понять, подойдём ли мы вам, подскажите:\n1) В какой нише работаете?\n2) Какая цель — заявки / продажи / узнаваемость?\n3) В какие сроки нужно запустить?"
+		return "Здравствуйте! Спасибо за обращение 🙌\n\nДелаем ИИ рекламные ролики за 48 часов без съёмки, под запуск рекламы.\n\nСтоимость от 35 000 тг.\n\nЧтобы сделать ролик точно под вашу задачу, напишите, пожалуйста, кратко:\n\n— Что продаёте / какая ниша?\n— Какая цель ролика: заявки, продажи или узнаваемость?\n\nТакже можете отправить Instagram или сайт 🎯\nПосле этого предложим идею и формат ролика 🤝"
 	}
 }
 

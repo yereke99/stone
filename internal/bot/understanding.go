@@ -37,7 +37,7 @@ Fields:
 - asks_for_more_options: true when the customer asks for more execution/package/format options.
 - ready_for_questionnaire: true when the customer wants to proceed/open the brief.
 - needs_manager: true only for a direct manager/human/operator request.
-- missing_fields: only missing core fields among niche, goal, deadline after considering existing state.
+- missing_fields: only missing core fields among niche and goal after considering existing state. Deadline is NOT a core field and must never be in missing_fields.
 - confidence: 0..1.
 
 Rules:
@@ -45,12 +45,17 @@ Rules:
 - "По рекламе" is platform/context, not the product niche.
 - "Пылесосы" can be the niche/product.
 - "Продажи" is a goal.
-- "Через 2 дня" is a deadline.
+- "Через 2 дня" is a deadline only when the customer volunteers timing; never ask for it.
 - Food/farm products count as a valid niche.
 - A website or Instagram handle is business context.
-- If niche + goal + deadline are known, missing_fields must be [].
+- If niche + goal are known, missing_fields must be [].
+- NEVER classify a greeting as a niche: "доброе утро", "добрый день", "здравствуйте", "привет", "салем" are intent "greeting" with niche=null.
+- NEVER classify confirmations ("да", "ок", "понял", "хорошо") or timing words ("сейчас", "завтра", "сегодня") as a niche; they carry no niche/goal facts.
+- NEVER classify questions about cases/examples ("есть кейсы?", "как отправите кейсы?", "покажите примеры") as a niche; that is intent "asks_examples" with niche=null unless a real product is also named.
+- NEVER classify price/package/format questions or "стоп"/"stop" as a niche.
+- Extract niche only when the text clearly names a business, product, or service (e.g. "мебель", "ТВ зоны", "продаём обувь", "салон красоты", "кофейня", "онлайн курс").
 - If the customer asks examples/formats/packages, classify that request first while still extracting facts.
-- If unclear but related, use intent "unclear"; if unrelated, use "irrelevant".
+- If unclear but related, use intent "unclear"; if unrelated, use "irrelevant". Low-meaning fragments like "бот собираюсь" are "unclear" with niche=null.
 - Do not confuse outgoing API bot messages with human moderator messages; this analyzer only sees customer messages.
 
 Example 1:
@@ -68,7 +73,19 @@ Input:
 Фермерские продукты.
 superferma.kz наш инстаграмм"
 Expected:
-{"language":"ru","intent":"asks_examples","niche":"фермерские продукты / еда","goal":null,"deadline":null,"platform":null,"product_or_service":"фермерские продукты","website_or_instagram":"superferma.kz","package_interest":null,"asks_for_food_examples":true,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal","deadline"],"confidence":0.9}
+{"language":"ru","intent":"asks_examples","niche":"фермерские продукты / еда","goal":null,"deadline":null,"platform":null,"product_or_service":"фермерские продукты","website_or_instagram":"superferma.kz","package_interest":null,"asks_for_food_examples":true,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.9}
+
+Example 4:
+Input:
+"Доброе утро"
+Expected:
+{"language":"ru","intent":"greeting","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}
+
+Example 5:
+Input:
+"Есть кейсы?"
+Expected:
+{"language":"ru","intent":"asks_examples","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.9}
 
 Example 3:
 Input:
@@ -179,7 +196,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	}
 	lowConfidence := understanding.Confidence > 0 && understanding.Confidence < 0.35
 	if !lowConfidence {
-		if value := normalizedAIString(firstStringPointer(understanding.Niche, understanding.Extracted.Niche)); isValidNiche(value) {
+		if value := normalizedAIString(firstStringPointer(understanding.Niche, understanding.Extracted.Niche)); isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
 			analysis.Niche = stringPointer(normalizeNiche(value))
 		}
 		if value := normalizeCity(normalizedAIString(understanding.Extracted.City)); value != "" {
@@ -207,7 +224,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		}
 		if value := normalizedAIString(understanding.ProductOrService); value != "" {
 			analysis.ProductOrService = stringPointer(value)
-			if analysis.Niche == nil && isValidNiche(value) {
+			if analysis.Niche == nil && isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
 				analysis.Niche = stringPointer(normalizeNiche(value))
 			}
 		}

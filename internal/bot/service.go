@@ -409,6 +409,14 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		)
 		return s.handleMoreOptionsRequest(ctx, chatID, language, conversation)
 	}
+	if analysis.Intent == IntentPortfolioRequest && !conversationIsWaitingForBrief(conversation) && !hasPackageFlowStarted(conversation) {
+		s.info("selected next action",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("action", "answer_cases_request"),
+			zap.Strings("missing_fields", qualificationMissingFields(conversation.Lead)),
+		)
+		return s.handleCasesRequest(ctx, chatID, text, language, conversation, analysis)
+	}
 	if state == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested {
 		return s.handleBriefRequested(ctx, chatID, text, language, conversation, analysis)
 	}
@@ -2328,50 +2336,56 @@ func hasQualificationSignal(conversation Conversation, analysis CustomerAnalysis
 		containsAny(normalizeForAnalysis(conversation.LastIncomingText), []string{"первый раз", "впервые", "попроб", "протест", "тест", "first time", "try", "test"})
 }
 
+// qualificationMissingFields: the first qualification stage collects only the
+// niche and the video goal. Launch timing is never asked here; it is stored
+// only when the customer volunteers it.
 func qualificationMissingFields(lead LeadState) []string {
-	missing := make([]string, 0, 3)
+	missing := make([]string, 0, 2)
 	if !isValidNiche(lead.Niche) {
 		missing = append(missing, fieldNiche)
 	}
 	if !isValidGoal(lead.Goal) {
 		missing = append(missing, fieldGoal)
 	}
-	if !isValidDeadline(lead.Deadline) {
-		missing = append(missing, fieldDeadline)
-	}
 	return missing
 }
 
 func qualificationFollowupText(language string, conversation Conversation) string {
-	missing := qualificationMissingFields(conversation.Lead)
+	lead := conversation.Lead
+	missing := qualificationMissingFields(lead)
 	if len(missing) == 0 {
 		return packagesPresentedFallbackText(language)
 	}
-	if len(missing) == 1 {
-		return singleMissingQuestion(language, missing[0], conversation.Lead)
-	}
+	nicheKnown := isValidNiche(lead.Niche)
+	goalKnown := isValidGoal(lead.Goal)
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Түсіндім. Нишаны және роликті қашан іске қосқыңыз келетінін қысқаша жазыңыз."
+		switch {
+		case nicheKnown && !goalKnown:
+			return fmt.Sprintf("Түсіндім, %s. Роликтің мақсаты қандай: өтінім, сату немесе танымалдық?", strings.TrimSpace(lead.Niche))
+		case goalKnown && !nicheKnown:
+			return fmt.Sprintf("Түсіндім, мақсат — %s. Не сатасыз / қай ниша екенін жазыңыз.", strings.TrimSpace(lead.Goal))
+		default:
+			return "Не сатасыз және роликтің мақсаты қандай: өтінім, сату немесе танымалдық?"
+		}
 	case "en":
-		return "Got it. Please share the niche and when you want to launch the video."
+		switch {
+		case nicheKnown && !goalKnown:
+			return fmt.Sprintf("Got it, %s. What is the video goal: leads, sales, or awareness?", strings.TrimSpace(lead.Niche))
+		case goalKnown && !nicheKnown:
+			return fmt.Sprintf("Got it, the goal is %s. What do you sell / what is your niche?", strings.TrimSpace(lead.Goal))
+		default:
+			return "Please share what you sell and the video goal: leads, sales, or awareness?"
+		}
 	default:
-		if sameFields(missing, []string{fieldNiche, fieldDeadline}) {
-			return "Понял вас. Подскажите, пожалуйста, нишу и когда хотите запустить ролик?"
+		switch {
+		case nicheKnown && !goalKnown:
+			return fmt.Sprintf("Понял, %s. Какая цель ролика: заявки, продажи или узнаваемость?", strings.TrimSpace(lead.Niche))
+		case goalKnown && !nicheKnown:
+			return fmt.Sprintf("Понял, цель — %s. Подскажите, пожалуйста, что продаёте / какая у вас ниша?", strings.TrimSpace(lead.Goal))
+		default:
+			return "Подскажите, пожалуйста, что продаёте и какая цель ролика: заявки, продажи или узнаваемость?"
 		}
-		if sameFields(missing, []string{fieldNiche, fieldGoal}) {
-			return "Понял вас. Подскажите, пожалуйста, нишу и главную цель ролика?"
-		}
-		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
-			if lastReplyAskedOnlyDeadlineAfterNiche(conversation) || hasPackageFlowStarted(conversation) {
-				return fmt.Sprintf("Понял, %s. Подскажите, пожалуйста, когда хотите запустить ролик?", leadNicheLocationPhrase(conversation.Lead))
-			}
-			if isValidNiche(conversation.Lead.Niche) {
-				return fmt.Sprintf("Понял, %s. Подскажите, пожалуйста, цель ролика: заявки, продажи или узнаваемость? И когда нужно запустить?", leadNicheLocationPhrase(conversation.Lead))
-			}
-			return "Понял вас. Подскажите, пожалуйста, цель и сроки запуска?"
-		}
-		return "Понял вас. Подскажите, пожалуйста, нишу, цель и сроки запуска одним сообщением."
 	}
 }
 
@@ -2394,21 +2408,6 @@ func qualificationFollowupAskedFields(message string, fallback []string) []strin
 		}
 	}
 	return normalizeFieldList(fallback)
-}
-
-func lastReplyAskedOnlyDeadlineAfterNiche(conversation Conversation) bool {
-	asked := fieldsAskedByMessage(conversation.LastReplyText, conversation.Stage)
-	hasDeadline := false
-	hasGoal := false
-	for _, field := range asked {
-		switch field {
-		case fieldDeadline:
-			hasDeadline = true
-		case fieldGoal:
-			hasGoal = true
-		}
-	}
-	return hasDeadline && !hasGoal && isValidNiche(conversation.Lead.Niche)
 }
 
 func leadNicheLocationPhrase(lead LeadState) string {
@@ -2533,6 +2532,87 @@ func (s *Service) handleFoodExamplesRequest(ctx context.Context, chatID string, 
 	return s.sendAndRemember(ctx, chatID, message, stage, selectedLevelFromConversation(conversation), qualificationFollowupAskedFields(message, missing)...)
 }
 
+// handleCasesRequest answers "есть кейсы?" / "как отправите кейсы?" style
+// questions. The question text itself is never stored as a niche. When the
+// niche or the goal is still unknown, the bot answers the question and asks
+// only for the missing fields; when both are known, it confirms and reuses the
+// existing portfolio/package sending flow.
+func (s *Service) handleCasesRequest(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	missing := qualificationMissingFields(conversation.Lead)
+	if len(missing) == 0 {
+		if err := s.sendAndRemember(ctx, chatID, casesReadyText(language, conversation.Lead), ClientStateAwaitingQualification, selectedLevelFromConversation(conversation)); err != nil {
+			return err
+		}
+		latest, err := s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return err
+		}
+		return s.presentPortfolioAndPackages(ctx, chatID, language, latest, analysis)
+	}
+	message := casesRequestQualificationText(language, conversation.Lead, missing, isCasesDeliveryQuestion(text))
+	return s.sendAndRemember(ctx, chatID, message, ClientStateAwaitingQualification, selectedLevelFromConversation(conversation), qualificationFollowupAskedFields(message, missing)...)
+}
+
+func isCasesDeliveryQuestion(text string) bool {
+	normalized := normalizeForAnalysis(text)
+	if normalized == "" {
+		return false
+	}
+	return containsAny(normalized, []string{"как", "куда", "калай", "қалай", "how", "where"}) &&
+		containsAny(normalized, []string{"отправ", "пришл", "скин", "получ", "жибер", "жібер", "send", "get"})
+}
+
+func casesReadyText(language string, lead LeadState) string {
+	niche := strings.TrimSpace(lead.Niche)
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return fmt.Sprintf("Иә, %s бағытына жақын форматтағы мысалдарды жіберемін. Қазір ыңғайлы нұсқаларды таңдаймын.", niche)
+	case "en":
+		return fmt.Sprintf("Yes, I will send examples in a format close to your niche (%s). Picking the right ones now.", niche)
+	default:
+		return fmt.Sprintf("Да, отправим примеры по близкому формату для вашей ниши — %s. Сейчас подберу подходящие варианты.", niche)
+	}
+}
+
+func casesRequestQualificationText(language string, lead LeadState, missing []string, deliveryQuestion bool) string {
+	missing = normalizeFieldList(missing)
+	languageCode := normalizeLanguageCode(language)
+
+	var base string
+	switch languageCode {
+	case "kk":
+		if deliveryQuestion {
+			base = "Видео-мысалдар мен форматтарды осы WhatsApp чатына жіберемін."
+		} else {
+			base = "Иә, кейстерді осы чатқа жібере аламыз."
+		}
+	case "en":
+		if deliveryQuestion {
+			base = "We will send video examples and formats right here in WhatsApp."
+		} else {
+			base = "Yes, we can send cases right here."
+		}
+	default:
+		if deliveryQuestion {
+			base = "Отправим прямо сюда в WhatsApp видео-примеры и форматы."
+		} else {
+			base = "Да, кейсы можем отправить прямо сюда."
+		}
+	}
+
+	if sameFields(missing, []string{fieldNiche, fieldGoal}) {
+		switch languageCode {
+		case "kk":
+			return base + " Сізге жақынын таңдау үшін не сататыныңызды және роликтің мақсатын жазыңыз: өтінім, сату немесе танымалдық?"
+		case "en":
+			return base + " To pick the closest ones, please share what you sell and the video goal: leads, sales, or awareness?"
+		default:
+			return base + " Чтобы подобрать ближе к вашей задаче, подскажите, пожалуйста, что продаёте и какая цель ролика: заявки, продажи или узнаваемость?"
+		}
+	}
+	return base + " " + qualificationFollowupText(language, Conversation{Lead: lead})
+}
+
 func (s *Service) handleMoreOptionsRequest(ctx context.Context, chatID string, language string, conversation Conversation) error {
 	stage := StagePackageSuggested
 	if conversation.QuestionnaireOfferSent {
@@ -2556,18 +2636,18 @@ func foodExamplesMissingText(language string, lead LeadState, missing []string) 
 	missing = normalizeFieldList(missing)
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
-			return "Иә, тағам және фермер өнімдеріне AI ролик жасаймыз. Мақсат пен іске қосу мерзімін жазыңыз."
+		if sameFields(missing, []string{fieldGoal}) {
+			return "Иә, тағам және фермер өнімдеріне AI ролик жасаймыз. Роликтің мақсаты қандай: өтінім, сату немесе танымалдық?"
 		}
 		return "Иә, тағам бағытына AI ролик жасаймыз. Нақтылау үшін: " + missingFieldsLabel(language, missing) + "."
 	case "en":
-		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
-			return "Yes, we can make AI videos for food and farm products. Please share the goal and launch timeline."
+		if sameFields(missing, []string{fieldGoal}) {
+			return "Yes, we can make AI videos for food and farm products. What is the video goal: leads, sales, or awareness?"
 		}
 		return "Yes, we can make food-product AI videos. Please clarify only: " + missingFieldsLabel(language, missing) + "."
 	default:
-		if sameFields(missing, []string{fieldGoal, fieldDeadline}) {
-			return "Да, для еды и фермерских продуктов AI-ролики делаем. Подскажите цель и сроки запуска."
+		if sameFields(missing, []string{fieldGoal}) {
+			return "Да, для еды и фермерских продуктов AI-ролики делаем. Подскажите цель ролика: заявки, продажи или узнаваемость?"
 		}
 		return "Да, для еды AI-ролики делаем. Уточните только: " + missingFieldsLabel(language, missing) + "."
 	}

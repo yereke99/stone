@@ -21,13 +21,15 @@ func managerQualificationForConversation(conversation Conversation) managerQuali
 	}
 }
 
+// leadHasRequiredManagerFields: the launch deadline is intentionally not
+// required — the bot never asks for it during qualification, so a lead with
+// niche, goal and a package interest is complete enough for the manager.
 func leadHasRequiredManagerFields(lead LeadState) bool {
 	if leadHasCollectedBrief(lead) {
 		return true
 	}
 	return isValidNiche(lead.Niche) &&
 		isValidGoal(lead.Goal) &&
-		isValidDeadline(lead.Deadline) &&
 		isValidPackageInterest(lead.SelectedPackage)
 }
 
@@ -49,9 +51,6 @@ func requiredLeadMissingFields(conversation Conversation) []string {
 	}
 	if !isValidGoal(lead.Goal) {
 		missing = append(missing, fieldGoal)
-	}
-	if !isValidDeadline(lead.Deadline) {
-		missing = append(missing, fieldDeadline)
 	}
 	if !isValidPackageInterest(lead.SelectedPackage) {
 		missing = append(missing, fieldPackageInterest)
@@ -180,7 +179,6 @@ func extractPackageInterest(text string, current LeadState, selectedLevel int) s
 func packageMissingAfterBusinessFields(lead LeadState) bool {
 	return isValidNiche(lead.Niche) &&
 		isValidGoal(lead.Goal) &&
-		isValidDeadline(lead.Deadline) &&
 		!isValidPackageInterest(lead.SelectedPackage)
 }
 

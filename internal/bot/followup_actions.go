@@ -32,7 +32,7 @@ func (s *Service) cancelFollowups(ctx context.Context, chatID string) error {
 }
 
 func (s *Service) sendGreetingAndSchedule(ctx context.Context, chatID string, language string) error {
-	if err := s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal, fieldDeadline); err != nil {
+	if err := s.sendAndRemember(ctx, chatID, QualificationGreetingText(language), ClientStateAwaitingQualification, 0, fieldNiche, fieldGoal); err != nil {
 		return err
 	}
 	return s.scheduleFollowup(ctx, chatID, followupStageSendPackages, s.autoPackages.options.After, time.Now().UTC())

@@ -23,6 +23,7 @@ func TestIsAdminStopCommand(t *testing.T) {
 		{name: "english upper", text: "STOP", want: true},
 		{name: "english punctuation", text: "stop.", want: true},
 		{name: "english bang", text: "stop!", want: true},
+		{name: "english capital bang", text: "Stop!", want: true},
 		{name: "english spaces", text: " stop ", want: true},
 		{name: "english slash", text: "/stop", want: true},
 

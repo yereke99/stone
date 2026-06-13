@@ -72,7 +72,7 @@ func (s *Service) sendWeeklyDiscountFollowup(ctx context.Context, chatID string,
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if err := s.sendVideos(ctx, chatID, []string{VideoLevel3}, language, false); err != nil {
+	if err := s.sendVideos(ctx, chatID, []string{VideoLevel4}, language, false); err != nil {
 		return err
 	}
 	if err := s.sendAndRemember(ctx, chatID, WeeklyDiscountFollowupText(language), ClientStatePackagesPresented, level); err != nil {

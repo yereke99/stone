@@ -53,15 +53,10 @@ func QuestionnaireReminderText(language string) string {
 }
 
 func WeeklyDiscountFollowupText(language string) string {
-	switch normalizeLanguageCode(language) {
-	case "kk":
-		return "Жаңа проект жасадық, сізге пример жіберіп отырмын.\n\nБірінші тапсырысқа -15% жеңілдік жасай аламыз."
-	case "en":
-		return "We made a new project, sending you an example.\n\nWe can give -15% off the first order."
-	default:
-		return "Сделали новый проект, отправляю вам пример.\n\nМожем на первый заказ сделать скидку -15%."
-	}
+	return weeklyDiscountFollowupText
 }
+
+const weeklyDiscountFollowupText = "Здравствуйте! 👋\n\n🎬 Сделали новый AI-проект и решили поделиться результатом.\n\n🎁 Для новых клиентов действует скидка 15% на первый заказ.\n\n⏳ Акция действует только 3 дня.\n\nЕсли интересно протестировать напишите + в ответ."
 
 func BriefContextReturnText(language string) string {
 	switch normalizeLanguageCode(language) {

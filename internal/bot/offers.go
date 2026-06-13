@@ -6,12 +6,14 @@ const (
 	VideoLevel1 = "video_level_1.mp4"
 	VideoLevel2 = "video_level_2.mp4"
 	VideoLevel3 = "video_level_3.mp4"
+	VideoLevel4 = "video_level_4.mp4"
 )
 
 var ExpectedVideoFiles = []string{
 	VideoLevel1,
 	VideoLevel2,
 	VideoLevel3,
+	VideoLevel4,
 }
 
 const (

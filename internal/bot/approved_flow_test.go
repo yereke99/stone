@@ -455,6 +455,7 @@ func TestWeeklyFollowupSendsDiscountOnce(t *testing.T) {
 	service.SetDelayedPackageOptions(DelayedPackageOptions{Enabled: true, After: 15 * time.Minute})
 	chatID := "chat-followup-weekly"
 	now := time.Now().UTC()
+	wantText := "Здравствуйте! 👋\n\n🎬 Сделали новый AI-проект и решили поделиться результатом.\n\n🎁 Для новых клиентов действует скидка 15% на первый заказ.\n\n⏳ Акция действует только 3 дня.\n\nЕсли интересно протестировать напишите + в ответ."
 	seedPresentedQualifiedLead(store, chatID)
 	store.Update(chatID, func(conversation *Conversation) {
 		conversation.QuestionnaireOfferSent = true
@@ -470,15 +471,64 @@ func TestWeeklyFollowupSendsDiscountOnce(t *testing.T) {
 	if err := service.ProcessDueFollowups(context.Background(), now); err != nil {
 		t.Fatalf("ProcessDueFollowups() error = %v", err)
 	}
-	if got := sender.messages[len(sender.messages)-1]; got != WeeklyDiscountFollowupText("ru") {
+	if got := WeeklyDiscountFollowupText("ru"); got != wantText {
+		t.Fatalf("weekly discount template mismatch:\n%s", got)
+	}
+	if got := sender.messages[len(sender.messages)-1]; got != wantText {
 		t.Fatalf("weekly discount mismatch:\n%s", got)
 	}
+	if got := sender.messages[len(sender.messages)-1]; strings.Contains(got, "отправляю вам пример") ||
+		strings.Contains(got, "скидку -15") {
+		t.Fatalf("weekly discount still contains old copy:\n%s", got)
+	}
+	if len(sender.files) != 1 {
+		t.Fatalf("weekly discount files = %#v, want one video", sender.files)
+	}
+	if got := filepath.Base(sender.files[0]); got != VideoLevel4 {
+		t.Fatalf("weekly discount video = %q, want %q", got, VideoLevel4)
+	}
+	if got := sender.captions[0]; got != "" {
+		t.Fatalf("weekly discount video caption = %q, want empty because text is sent separately", got)
+	}
 	before := len(sender.messages)
+	beforeFiles := len(sender.files)
 	if err := service.ProcessDueFollowups(context.Background(), now.Add(time.Minute)); err != nil {
 		t.Fatalf("second ProcessDueFollowups() error = %v", err)
 	}
 	if len(sender.messages) != before {
 		t.Fatalf("weekly discount repeated: %#v", sender.messages[before:])
+	}
+	if len(sender.files) != beforeFiles {
+		t.Fatalf("weekly discount video repeated: %#v", sender.files[beforeFiles:])
+	}
+}
+
+func TestWeeklyFollowupMissingVideoDoesNotCrash(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, t.TempDir())
+	service.SetDelayedPackageOptions(DelayedPackageOptions{Enabled: true, After: 15 * time.Minute})
+	chatID := "chat-followup-weekly-missing-video"
+	now := time.Now().UTC()
+	seedPresentedQualifiedLead(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.QuestionnaireOfferSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.FollowupStage = followupStageWeeklyDiscount
+		conversation.FollowupReferenceAt = now.Add(-8 * 24 * time.Hour)
+		conversation.NextFollowupAt = now.Add(-time.Minute)
+		conversation.LastIncomingAt = now.Add(-9 * 24 * time.Hour)
+	})
+
+	if err := service.ProcessDueFollowups(context.Background(), now); err != nil {
+		t.Fatalf("ProcessDueFollowups() with missing video error = %v", err)
+	}
+	if len(sender.files) != 0 {
+		t.Fatalf("missing video should not be uploaded: %#v", sender.files)
+	}
+	if got := sender.messages[len(sender.messages)-1]; got != WeeklyDiscountFollowupText("ru") {
+		t.Fatalf("weekly discount text after missing video mismatch:\n%s", got)
 	}
 }
 

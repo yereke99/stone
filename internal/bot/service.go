@@ -1396,9 +1396,9 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 			continue
 		}
 
-		caption := strings.TrimSpace(OfferCaptionByVideo(fileName, language))
-		if caption == "" {
-			caption = "Stone production"
+		caption := ""
+		if offer, ok := OfferByVideo(fileName); ok {
+			caption = strings.TrimSpace(offer.Caption(language))
 		}
 
 		messageID, err := s.sendCustomerWhatsAppFile(ctx, chatID, filePath, caption)
@@ -1947,6 +1947,7 @@ func dedupeVideos(files []string) []string {
 		VideoLevel1: {},
 		VideoLevel2: {},
 		VideoLevel3: {},
+		VideoLevel4: {},
 	}
 	seen := make(map[string]struct{}, len(files))
 	result := make([]string, 0, len(files))

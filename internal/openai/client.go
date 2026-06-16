@@ -513,6 +513,7 @@ func customerUnderstandingSchema() map[string]any {
 					"asks_deadline",
 					"asks_human",
 					"ready_to_order",
+					"defer",
 					"unclear",
 					"irrelevant",
 				},

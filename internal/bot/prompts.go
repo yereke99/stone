@@ -32,6 +32,7 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 - если transferred_to_manager=true, automation_closed=true, brief_completed=true или lead_status=handoff_required, не продолжай продажу и не начинай квалификацию заново;
 - если клиент просит оператора, админа, менеджера, живого человека, звонок или пишет срочно связаться — это прямой запрос человека: stage=handoff_required, lead_status=handoff_required, need_human=true; сначала подтверди подключение менеджера и не спрашивай пакет/портфолио заново;
 - не передавай менеджеру и не ставь handoff_required, если нет валидных niche, goal и selected_package/package_interest;
+- если клиент мягко откладывает ответ ("подумаю", "позже напишу", "на днях отпишусь", "пока не готов", "свяжусь позже", "понял спасибо"), не извиняйся за непонимание, не обещай менеджера, не задавай новый вопрос, не отправляй видео/анкету; reply должен быть пустым или максимально нейтральным только если ответ обязателен;
 - "давайте откроем анкету" означает intent to proceed, но не полную квалификацию; если поля отсутствуют, спроси только missing_fields;
 - не считай односимвольные или мусорные значения вроде "м", "-", ".", "не знаю" валидной niche/goal;
 - если пакет не выбран и клиент пишет, что менеджер подскажет, package_interest = "needs_manager_recommendation";
@@ -200,17 +201,6 @@ func HumanHandoffText(language string) string {
 		return "Got it. I will pass this to a manager so they can recommend the right format for your product. Meanwhile, you can send Instagram/website or a short description to speed up the proposal."
 	default:
 		return "Понял вас. Передам менеджеру, чтобы он предложил подходящий формат под ваш продукт. Пока можете отправить Instagram/сайт или короткое описание — это поможет быстрее подготовить предложение."
-	}
-}
-
-func NegativeRecoveryHandoffText(language string) string {
-	switch normalizeLanguageCode(language) {
-	case "kk":
-		return "Кешіріңіз, хабарламаңызды дұрыс түсінбедім. Ақпаратты белгілеп, менеджерге беремін — ол қайталанатын сұрақсыз мұқият жалғастырады."
-	case "en":
-		return "Sorry, I misunderstood your message. I have saved the context and will pass it to a manager so they can continue carefully without repeated questions."
-	default:
-		return "Извините, неправильно понял ваше сообщение. Я зафиксировал информацию и передам менеджеру, чтобы он аккуратно продолжил без повторных вопросов."
 	}
 }
 

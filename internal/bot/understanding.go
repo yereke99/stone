@@ -25,7 +25,7 @@ Your job:
 
 Fields:
 - language: ru, kk, en, mixed, or unknown.
-- intent: greeting, qualification_answer, asks_examples, asks_packages, asks_price, asks_discount, asks_deadline, asks_human, ready_to_order, unclear, or irrelevant.
+- intent: greeting, qualification_answer, asks_examples, asks_packages, asks_price, asks_discount, asks_deadline, asks_human, ready_to_order, defer, unclear, or irrelevant.
 - niche: business category or product niche if known.
 - goal: business/video goal if known.
 - deadline: launch or production deadline if known.
@@ -51,6 +51,7 @@ Rules:
 - If niche + goal are known, missing_fields must be [].
 - NEVER classify a greeting as a niche: "доброе утро", "добрый день", "здравствуйте", "привет", "салем" are intent "greeting" with niche=null.
 - NEVER classify confirmations ("да", "ок", "понял", "хорошо") or timing words ("сейчас", "завтра", "сегодня") as a niche; they carry no niche/goal facts.
+- Soft deferrals like "спасибо, позже напишу", "я подумаю", "на днях отпишусь", "свяжусь позже", "пока не готов", "понял спасибо" are intent "defer". They are not negative, not a manager request, not a stop/unsubscribe, and must not need a manager.
 - NEVER classify questions about cases/examples ("есть кейсы?", "как отправите кейсы?", "покажите примеры") as a niche; that is intent "asks_examples" with niche=null unless a real product is also named.
 - NEVER classify price/package/format questions or "стоп"/"stop" as a niche.
 - Extract niche only when the text clearly names a business, product, or service (e.g. "мебель", "ТВ зоны", "продаём обувь", "салон красоты", "кофейня", "онлайн курс").
@@ -126,6 +127,13 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 	}
 
 	analysis := mergeCustomerAnalysis(fallback, aiAnalysis)
+	if isClientDeferText(text) {
+		analysis.Intent = IntentDefer
+		analysis.WantsQuestionnaire = false
+		analysis.ShouldHandoff = false
+		analysis.ShouldStop = false
+		analysis.Frustrated = false
+	}
 	updated := conversation.Lead
 	updated.ApplyAnalysis(analysis)
 	analysis.MissingFields = updated.MissingCoreFields()
@@ -261,6 +269,8 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.Intent = IntentHumanRequest
 	case "ready_to_order":
 		analysis.Intent = IntentReadyToOrder
+	case "defer", "wait", "client_will_reply_later":
+		analysis.Intent = IntentDefer
 	case "unclear", "irrelevant":
 		analysis.Intent = IntentOther
 	case "choose_package":
@@ -285,6 +295,14 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.Intent = IntentNegativeReaction
 		analysis.Frustrated = true
 	}
+	if strings.TrimSpace(understanding.Intent) == "defer" {
+		analysis.Intent = IntentDefer
+	}
+	if analysis.Intent == IntentDefer {
+		analysis.ShouldHandoff = false
+		analysis.ShouldStop = false
+		analysis.Frustrated = false
+	}
 	if understanding.ReadyForQuestionnaire {
 		analysis.WantsQuestionnaire = true
 	}
@@ -298,6 +316,12 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	analysis.ShouldStop = understanding.StateUpdate.ShouldStopAutomation || understanding.Sentiment.WantsToStop || analysis.Intent == IntentNegativeReaction
 	if analysis.Intent == IntentHumanRequest {
 		analysis.WantsQuestionnaire = true
+	}
+	if analysis.Intent == IntentDefer {
+		analysis.WantsQuestionnaire = false
+		analysis.ShouldHandoff = false
+		analysis.ShouldStop = false
+		analysis.Frustrated = false
 	}
 
 	updated := current

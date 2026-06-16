@@ -708,6 +708,112 @@ func TestDuplicateExamplesAreNotSpammed(t *testing.T) {
 	}
 }
 
+func TestFormatQuestionEnsuresPortfolioVideosFirst(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-format-question-missing-videos"
+	now := time.Now().UTC()
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStatePackagesPresented
+		conversation.InitialMessageSent = true
+		conversation.PackagesSent = true
+		conversation.Lead.OfferSent = true
+		conversation.FollowupReferenceAt = now
+	})
+
+	if err := service.sendFormatQuestionAndSchedule(context.Background(), chatID, "ru", 0, now); err != nil {
+		t.Fatalf("sendFormatQuestionAndSchedule() error = %v", err)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("format question files = %#v, want three portfolio videos", sender.files)
+	}
+	for i, want := range []string{VideoLevel1, VideoLevel2, VideoLevel3} {
+		if got := filepath.Base(sender.files[i]); got != want {
+			t.Fatalf("file[%d] = %q, want %q", i, got, want)
+		}
+	}
+	if len(sender.messages) != 1 || sender.messages[0] != FormatQuestionText("ru") {
+		t.Fatalf("messages = %#v, want only the format question after videos", sender.messages)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	for _, fileName := range []string{VideoLevel1, VideoLevel2, VideoLevel3} {
+		if _, ok := conversation.SentVideoFiles[fileName]; !ok {
+			t.Fatalf("%s was not recorded as sent: %#v", fileName, conversation.SentVideoFiles)
+		}
+	}
+	if conversation.LastReplyText != FormatQuestionText("ru") {
+		t.Fatalf("last reply = %q, want format question", conversation.LastReplyText)
+	}
+}
+
+func TestPackageOptionsQuestionEnsuresPortfolioVideosFirst(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-package-options-missing-videos"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStatePackagesPresented
+		conversation.InitialMessageSent = true
+		conversation.PackagesSent = true
+		conversation.Lead.OfferSent = true
+	})
+
+	if err := service.handleMoreOptionsRequest(context.Background(), chatID, "ru", snapshotConversation(t, store, chatID)); err != nil {
+		t.Fatalf("handleMoreOptionsRequest() error = %v", err)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("package options files = %#v, want three portfolio videos", sender.files)
+	}
+	if len(sender.messages) != 1 || sender.messages[0] != packageOptionsText("ru") {
+		t.Fatalf("messages = %#v, want package options after videos", sender.messages)
+	}
+}
+
+func TestFormatQuestionIsNotSentWhenPortfolioVideoMissing(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id"}}
+	store := NewConversationStore()
+	dir := t.TempDir()
+	for _, name := range []string{VideoLevel1, VideoLevel2} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("test"), 0o644); err != nil {
+			t.Fatalf("write test video %s: %v", name, err)
+		}
+	}
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, dir)
+	service.SetDelayedPackageOptions(DelayedPackageOptions{Enabled: true, After: 15 * time.Minute})
+	chatID := "chat-format-question-missing-video-file"
+	now := time.Now().UTC()
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStateAwaitingQualification
+		conversation.InitialMessageSent = true
+		conversation.InitialGreetingSentAt = now.Add(-20 * time.Minute)
+		conversation.FollowupStage = followupStageSendPackages
+		conversation.FollowupReferenceAt = now.Add(-20 * time.Minute)
+		conversation.NextFollowupAt = now.Add(-time.Minute)
+	})
+
+	err := service.ProcessDueFollowups(context.Background(), now)
+	if err == nil {
+		t.Fatal("ProcessDueFollowups() error = nil, want missing video error")
+	}
+	if len(sender.files) != 2 {
+		t.Fatalf("sent files = %#v, want only available videos before failure", sender.files)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("format question was sent without all videos: %#v", sender.messages)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.LastReplyText == FormatQuestionText("ru") {
+		t.Fatalf("format question was recorded despite missing video")
+	}
+	if !conversation.AutoPackagesSentAt.IsZero() || conversation.FollowupStage != followupStageSendPackages {
+		t.Fatalf("missing-video follow-up was marked complete: sent_at=%v stage=%q", conversation.AutoPackagesSentAt, conversation.FollowupStage)
+	}
+}
+
 func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -1178,7 +1284,7 @@ func TestSQLiteMessageDedupeSurvivesRestart(t *testing.T) {
 func TestExistingProcessedClientContinuesFromSavedState(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
 	chatID := "chat-existing"
 
 	sendText(t, service, chatID, "Здравствуйте")
@@ -1204,15 +1310,69 @@ func TestOptOutStopsMarketingReplies(t *testing.T) {
 	sendText(t, service, chatID, "не интересно")
 	sendText(t, service, chatID, "алло")
 
-	if len(sender.messages) != 2 {
-		t.Fatalf("sent messages after opt-out = %#v, want opening plus recovery handoff", sender.messages)
-	}
-	if !strings.Contains(sender.messages[1], "неправильно понял") {
-		t.Fatalf("opt-out recovery reply = %q", sender.messages[1])
+	if len(sender.messages) != 1 {
+		t.Fatalf("sent messages after opt-out = %#v, want only opening", sender.messages)
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateHandedOff || !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {
-		t.Fatalf("opt-out handoff state = stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.AutomationClosed || !conversation.Stopped || conversation.HandedOffToOwner {
+		t.Fatalf("opt-out state = stage=%q optout=%v handed=%v closed=%v stopped=%v", conversation.Stage, conversation.OptOut, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+}
+
+func TestSoftDeferStopsImmediateMessagingWithoutClosingAutomation(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-soft-defer"
+	seedPresentedPackageMessages(store, chatID)
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.FollowupStage = followupStageQuestionnaireOffer
+		conversation.FollowupReferenceAt = time.Now().UTC().Add(-time.Hour)
+		conversation.NextFollowupAt = time.Now().UTC().Add(time.Hour)
+	})
+
+	sendText(t, service, chatID, "Понял спасибо, на днях вам отпишусь 👍")
+
+	if len(sender.messages) != 0 || len(sender.files) != 0 {
+		t.Fatalf("soft defer should be silent: messages=%#v files=%#v", sender.messages, sender.files)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stage != StageClosing || conversation.AutomationClosed || conversation.Stopped || conversation.OptOut || conversation.HandedOffToOwner {
+		t.Fatalf("soft defer state = stage=%q closed=%v stopped=%v optout=%v handed=%v", conversation.Stage, conversation.AutomationClosed, conversation.Stopped, conversation.OptOut, conversation.HandedOffToOwner)
+	}
+	if !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
+		t.Fatalf("soft defer follow-up was not cleared: next=%v stage=%q", conversation.NextFollowupAt, conversation.FollowupStage)
+	}
+	if !strings.Contains(conversation.Lead.Notes, "Клиент отложил ответ") {
+		t.Fatalf("soft defer note was not saved: %q", conversation.Lead.Notes)
+	}
+}
+
+func TestSoftDeferPhrasesAreNotOptOutOrReadyToOrder(t *testing.T) {
+	phrases := []string{
+		"Спасибо, позже напишу",
+		"Я подумаю",
+		"На днях отпишусь",
+		"Хорошо, понял",
+		"Пока не готов",
+		"Свяжусь позже",
+	}
+	for _, phrase := range phrases {
+		if isExplicitOptOutText(phrase) {
+			t.Fatalf("%q was classified as explicit opt-out", phrase)
+		}
+		analysis := AnalyzeCustomerMessage(phrase, LeadState{}, "ru")
+		if analysis.Intent != IntentDefer {
+			t.Fatalf("%q intent = %q, want defer", phrase, analysis.Intent)
+		}
+		if analysis.ShouldHandoff || analysis.ShouldStop || analysis.WantsQuestionnaire {
+			t.Fatalf("%q flags = handoff:%v stop:%v questionnaire:%v", phrase, analysis.ShouldHandoff, analysis.ShouldStop, analysis.WantsQuestionnaire)
+		}
+	}
+
+	analysis := AnalyzeCustomerMessage("в целом интересно, давайте еще варианты исполнения подумаем", LeadState{}, "ru")
+	if analysis.Intent != IntentPackageQuestion || !analysis.AsksForMoreOptions {
+		t.Fatalf("more-options phrase intent=%q asks_more=%v", analysis.Intent, analysis.AsksForMoreOptions)
 	}
 }
 

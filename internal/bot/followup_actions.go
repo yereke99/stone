@@ -42,9 +42,6 @@ func (s *Service) sendPackageVideosAndAskFormat(ctx context.Context, chatID stri
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if err := s.sendVideos(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, false); err != nil {
-		return err
-	}
 	return s.sendFormatQuestionAndSchedule(ctx, chatID, language, 0, now.UTC())
 }
 
@@ -72,10 +69,16 @@ func (s *Service) sendWeeklyDiscountFollowup(ctx context.Context, chatID string,
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if err := s.sendVideos(ctx, chatID, []string{VideoLevel4}, language, false); err != nil {
+	sent, err := s.sendVideosWithCaptions(ctx, chatID, []string{VideoLevel4}, language, false, map[string]string{
+		VideoLevel4: WeeklyDiscountFollowupText(language),
+	})
+	if err != nil {
 		return err
 	}
-	if err := s.sendAndRemember(ctx, chatID, WeeklyDiscountFollowupText(language), ClientStatePackagesPresented, level); err != nil {
+	if sent == 0 {
+		return nil
+	}
+	if err := s.store.UpdateState(context.WithoutCancel(ctx), chatID, ClientStatePackagesPresented, level); err != nil {
 		return err
 	}
 	return s.store.MarkFollowupSent(context.WithoutCancel(ctx), chatID, followupStageWeeklyDiscountSent, now.UTC())

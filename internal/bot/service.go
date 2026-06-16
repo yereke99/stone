@@ -353,13 +353,20 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 
 func (s *Service) handleSalesState(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
 	state := clientStateForConversation(&conversation)
-	if analysis.Intent == IntentNegativeReaction || analysis.Frustrated || (analysis.ShouldStop && analysis.ShouldHandoff) {
-		s.info("state machine negative reaction handoff", zap.String("chat_hash", chatFingerprint(chatID)))
-		return s.sendNegativeRecoveryHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
+	if analysis.Intent == IntentDefer || isClientDeferText(text) {
+		s.info("state machine deferred reply silently",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("state", state),
+		)
+		return s.deferClientReply(ctx, chatID, selectedLevelFromConversation(conversation))
 	}
 	if isOptOutText(text) || analysis.Intent == IntentMute {
-		s.info("state machine opt out handoff", zap.String("chat_hash", chatFingerprint(chatID)))
-		return s.sendNegativeRecoveryHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
+		s.info("state machine opt out stopped silently", zap.String("chat_hash", chatFingerprint(chatID)))
+		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut, true)
+	}
+	if analysis.Intent == IntentNegativeReaction || analysis.Frustrated || (analysis.ShouldStop && analysis.ShouldHandoff) {
+		s.info("state machine negative reaction stopped silently", zap.String("chat_hash", chatFingerprint(chatID)))
+		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerNegative, false)
 	}
 	if isConversationClosedForAutomation(conversation) || conversation.OptOut || conversation.Stopped || state == ClientStateOptOut || state == ClientStateStopped || state == ClientStateHandedOff {
 		fields := automationSilenceFields(chatID, conversation, "state_machine_stopped")
@@ -830,41 +837,58 @@ func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language 
 	return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
 }
 
-func (s *Service) sendNegativeRecoveryHandoff(ctx context.Context, chatID string, language string, level int) error {
+func (s *Service) deferClientReply(ctx context.Context, chatID string, level int) error {
 	s.store.Update(chatID, func(conversation *Conversation) {
-		conversation.WantsQuestionnaire = true
-		conversation.Lead.WantsQuestionnaire = true
 		if level > 0 {
 			conversation.SelectedLevel = level
 			conversation.Lead.SelectedPackage = packageKey(level)
-		} else if !isValidPackageInterest(conversation.Lead.SelectedPackage) {
-			conversation.Lead.SelectedPackage = packageNeedsManagerRecommendation
 		}
-		handoffNote := "Негативная реакция / остановка автоматизации"
+		conversation.Stage = StageClosing
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
+		note := "Клиент отложил ответ"
 		if text := strings.TrimSpace(conversation.LastIncomingText); text != "" {
-			handoffNote += ": " + text
+			note += ": " + text
 		}
-		conversation.Lead.FreeText = appendBriefText(conversation.Lead.FreeText, handoffNote)
-		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, handoffNote)
-		conversation.Lead.BriefCompleted = true
-		conversation.Lead.ContactBriefReady = true
-		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
-		conversation.LeadStatus = LeadStatusHandoffRequired
-		conversation.HandedOffToOwner = true
-		conversation.AutomationClosed = true
-		conversation.Stopped = true
-		if conversation.TransferredAt.IsZero() {
-			conversation.TransferredAt = time.Now().UTC()
-		}
+		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, note)
 	})
-	conversation, err := s.store.Snapshot(ctx, chatID)
-	if err != nil {
-		return err
-	}
-	if level == 0 {
-		level = selectedLevelFromConversation(conversation)
-	}
-	return s.sendAndRemember(ctx, chatID, NegativeRecoveryHandoffText(language), ClientStateHandedOff, level)
+	return s.cancelFollowups(ctx, chatID)
+}
+
+func (s *Service) stopAutomationSilently(ctx context.Context, chatID string, level int, reason string, optOut bool) error {
+	now := time.Now().UTC()
+	s.store.Update(chatID, func(conversation *Conversation) {
+		if level > 0 {
+			conversation.SelectedLevel = level
+			conversation.Lead.SelectedPackage = packageKey(level)
+		}
+		if optOut {
+			conversation.Stage = ClientStateOptOut
+			conversation.OptOut = true
+			conversation.Lead.LeadStatus = LeadStatusMuted
+			conversation.LeadStatus = LeadStatusMuted
+		} else {
+			conversation.Stage = ClientStateStopped
+		}
+		conversation.Stopped = true
+		conversation.AutomationClosed = true
+		conversation.StoppedAt = now
+		conversation.StoppedBy = StoppedByCustomer
+		conversation.StopReason = strings.TrimSpace(reason)
+		conversation.NextFollowupAt = time.Time{}
+		conversation.FollowupStage = ""
+		conversation.FollowupReferenceAt = time.Time{}
+		note := "Клиент остановил автоматизацию"
+		if optOut {
+			note = "Клиент отказался от рассылки"
+		}
+		if text := strings.TrimSpace(conversation.LastIncomingText); text != "" {
+			note += ": " + text
+		}
+		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, note)
+	})
+	return s.cancelFollowups(ctx, chatID)
 }
 
 func (s *Service) sendQualifiedLeadHandoff(ctx context.Context, chatID string, language string, level int) error {
@@ -1000,6 +1024,11 @@ func (s *Service) handleLocalCommand(ctx context.Context, chatID string, text st
 		return true, s.store.UpdateState(ctx, chatID, StageMuted, conversation.SelectedLevel)
 	}
 
+	if analysis.Intent == IntentDefer || isClientDeferText(text) {
+		s.info("local rule used", zap.String("chat_hash", chatFingerprint(chatID)), zap.String("rule", "defer"))
+		return true, s.deferClientReply(ctx, chatID, selectedLevelFromConversation(conversation))
+	}
+
 	if analysis.Intent == IntentBriefAnswer {
 		s.info("local rule used", zap.String("chat_hash", chatFingerprint(chatID)), zap.String("rule", "brief_answer"))
 		return true, s.sendAndRemember(ctx, chatID, BriefCollectedText(language), StageHandoffRequired, conversation.SelectedLevel)
@@ -1129,7 +1158,7 @@ func (s *Service) handleLocalCommand(ctx context.Context, chatID string, text st
 		}
 	}
 
-	if analysis.Intent == IntentObjection || (conversation.Stage != "" && hasAny(normalized, []string{"дорого", "подумаю", "подумаем", "позже", "кейін", "қымбат", "ойлан", "expensive"})) {
+	if analysis.Intent == IntentObjection || (conversation.Stage != "" && hasAny(normalized, []string{"дорого", "қымбат", "expensive"})) {
 		s.info("local rule used", zap.String("chat_hash", chatFingerprint(chatID)), zap.String("rule", "objection"))
 		return true, s.sendAndRemember(ctx, chatID, ObjectionText(language), StageObjection, 0)
 	}
@@ -1287,6 +1316,15 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		)
 		return nil
 	}
+	if needsPortfolioExamplesBeforeFormatQuestion(message) {
+		ready, err := s.ensurePortfolioExamplesSentBeforeFormatQuestion(ctx, chatID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return nil
+		}
+	}
 
 	duplicate, err := s.store.RecentlySentReply(ctx, chatID, message, outgoingRepeatWindow)
 	if err != nil {
@@ -1339,33 +1377,88 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 }
 
 func (s *Service) sendVideos(ctx context.Context, chatID string, files []string, language string, allowRepeat bool) error {
+	_, err := s.sendVideosWithCaptions(ctx, chatID, files, language, allowRepeat, nil)
+	return err
+}
+
+func (s *Service) ensurePortfolioExamplesSentBeforeFormatQuestion(ctx context.Context, chatID string) (bool, error) {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return false, nil
+	}
 	if isUnsafeCustomerWhatsAppChatID(chatID) {
 		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
-		return nil
+		return false, nil
 	}
 	if s.isAutomationSuppressed(chatID) {
-		s.logAutomationSuppressionSkip("portfolio video skipped because chat is in automation suppression list", chatID)
-		return nil
+		s.logAutomationSuppressionSkip("format question skipped because chat is in automation suppression list", chatID)
+		return false, nil
 	}
 	latest, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if !canSendAutomationToConversation(latest) {
+		s.info("format question skipped because automation is closed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+		)
+		return false, nil
+	}
+
+	missing := missingPortfolioExampleVideos(latest)
+	if len(missing) == 0 {
+		return true, nil
+	}
+	language := latest.Language
+	if language == "" {
+		language = "ru"
+	}
+	if _, err := s.sendVideosWithCaptions(ctx, chatID, missing, language, false, nil); err != nil {
+		return false, err
+	}
+	latest, err = s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return false, err
+	}
+	if missing = missingPortfolioExampleVideos(latest); len(missing) > 0 {
+		s.warn("format question skipped because portfolio examples were not fully sent",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Strings("missing_files", missing),
+		)
+		return false, fmt.Errorf("portfolio examples not fully sent before format question: missing %s", strings.Join(missing, ", "))
+	}
+	return true, nil
+}
+
+func (s *Service) sendVideosWithCaptions(ctx context.Context, chatID string, files []string, language string, allowRepeat bool, captionsByFile map[string]string) (int, error) {
+	if isUnsafeCustomerWhatsAppChatID(chatID) {
+		s.blockOutgoingWhatsAppGroupMessage(chatID, WhatsAppPurposeCustomerAutomation)
+		return 0, nil
+	}
+	if s.isAutomationSuppressed(chatID) {
+		s.logAutomationSuppressionSkip("portfolio video skipped because chat is in automation suppression list", chatID)
+		return 0, nil
+	}
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return 0, err
 	}
 	if !canSendAutomationToConversation(latest) {
 		s.info("portfolio video skipped because automation is closed",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 		)
-		return nil
+		return 0, nil
 	}
+	sent := 0
 	for index, fileName := range dedupeVideos(files) {
 		if index > 0 {
 			if err := sleepWithContext(ctx, videoSendDelay); err != nil {
-				return err
+				return sent, err
 			}
 		}
 		latest, err := s.store.Snapshot(ctx, chatID)
 		if err != nil {
-			return err
+			return sent, err
 		}
 		protected := s.isAutomationSuppressed(chatID)
 		if protected || isConversationManuallyStopped(latest) || !canSendAutomationToConversation(latest) {
@@ -1375,12 +1468,12 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 				zap.Bool("suppressed_contact", protected),
 				zap.Bool("manual_stop", isConversationManuallyStopped(latest)),
 			)
-			return nil
+			return sent, nil
 		}
 
 		shouldSend, err := s.store.ShouldSendVideo(ctx, chatID, fileName, allowRepeat)
 		if err != nil {
-			return err
+			return sent, err
 		}
 		if !shouldSend {
 			s.info("portfolio video skipped because already sent",
@@ -1397,14 +1490,16 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 		}
 
 		caption := ""
-		if offer, ok := OfferByVideo(fileName); ok {
+		if explicitCaption, ok := captionsByFile[fileName]; ok {
+			caption = strings.TrimSpace(explicitCaption)
+		} else if offer, ok := OfferByVideo(fileName); ok {
 			caption = strings.TrimSpace(offer.Caption(language))
 		}
 
 		messageID, err := s.sendCustomerWhatsAppFile(ctx, chatID, filePath, caption)
 		if err != nil {
 			s.warn("portfolio video send failed", zap.String("file_name", fileName), zap.Error(err))
-			return err
+			return sent, err
 		}
 		s.info("portfolio video sent",
 			zap.String("chat_hash", chatFingerprint(chatID)),
@@ -1412,19 +1507,20 @@ func (s *Service) sendVideos(ctx context.Context, chatID string, files []string,
 			zap.String("message_id", strings.TrimSpace(messageID)),
 		)
 		incrementOutgoingCount(ctx)
+		sent++
 		if err := s.store.LogOutgoingGreenAPIMessage(context.WithoutCancel(ctx), chatID, messageID, "file", caption); err != nil {
-			return err
+			return sent, err
 		}
 		if offer, ok := OfferByVideo(fileName); ok {
 			if err := s.store.RecordOutgoingPackageMessage(context.WithoutCancel(ctx), chatID, messageID, packageKey(offer.Level), fileName, caption); err != nil {
-				return err
+				return sent, err
 			}
 		}
 		if err := s.store.MarkVideoSent(context.WithoutCancel(ctx), chatID, fileName); err != nil {
-			return err
+			return sent, err
 		}
 	}
-	return nil
+	return sent, nil
 }
 
 func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage string) {
@@ -1963,6 +2059,47 @@ func dedupeVideos(files []string) []string {
 		result = append(result, fileName)
 	}
 	return result
+}
+
+func needsPortfolioExamplesBeforeFormatQuestion(message string) bool {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return false
+	}
+	for _, question := range []string{
+		FormatQuestionText("ru"),
+		FormatQuestionText("kk"),
+		FormatQuestionText("en"),
+		"Қай формат ұнады?",
+		"Which format do you like?",
+	} {
+		if question != "" && strings.Contains(message, question) {
+			return true
+		}
+	}
+	return false
+}
+
+func missingPortfolioExampleVideos(conversation Conversation) []string {
+	missing := make([]string, 0, 3)
+	for _, item := range []struct {
+		level    int
+		fileName string
+	}{
+		{level: 1, fileName: VideoLevel1},
+		{level: 2, fileName: VideoLevel2},
+		{level: 3, fileName: VideoLevel3},
+	} {
+		fileName := item.fileName
+		if _, ok := conversation.SentVideoFiles[fileName]; ok {
+			continue
+		}
+		if conversation.SentVideos[item.level] {
+			continue
+		}
+		missing = append(missing, fileName)
+	}
+	return dedupeVideos(missing)
 }
 
 func isAllowedStage(stage string) bool {
@@ -2724,6 +2861,38 @@ func isOptOutText(text string) bool {
 	return isExplicitOptOutText(text)
 }
 
+func isClientDeferText(text string) bool {
+	normalized := normalizeForAnalysis(text)
+	if normalized == "" {
+		return false
+	}
+	if asksForMoreOptions(normalized) || containsHumanRequest(normalized) || isMuteRequest(normalized) || isExplicitOptOutText(text) {
+		return false
+	}
+	clean := strings.NewReplacer(",", " ", ".", " ", "!", " ", "?", " ", ":", " ", ";", " ").Replace(normalized)
+	clean = strings.Join(strings.Fields(clean), " ")
+	switch clean {
+	case "подумаю", "я подумаю", "подумаем", "мы подумаем", "надо подумать", "нужно подумать",
+		"позже", "потом", "кейін", "later", "not now",
+		"пока не готов", "пока не готовы", "не готов", "не готовы",
+		"хорошо понял", "хорошо поняла", "понял спасибо", "поняла спасибо",
+		"спасибо позже", "рахмет кейін", "буду на связи", "будем на связи":
+		return true
+	}
+	if strings.Contains(clean, "на днях") && containsAny(clean, []string{"отпиш", "напиш", "свяж"}) {
+		return true
+	}
+	return containsAny(clean, []string{
+		"позже напиш", "напишу позже", "напишем позже", "отпишусь позже", "отпишемся позже",
+		"свяжусь позже", "свяжемся позже", "позже свяж", "потом напиш", "потом свяж",
+		"я подумаю", "мы подумаем", "надо подумать", "нужно подумать", "подумаю над",
+		"пока не готов", "пока не готовы", "не готов сейчас", "не готовы сейчас",
+		"хорошо понял", "хорошо поняла", "понял спасибо", "поняла спасибо",
+		"пока не реш", "пока не определ", "буду на связи", "будем на связи",
+		"i will think", "i'll think", "will get back", "later", "not ready yet",
+	})
+}
+
 func isExplicitOptOutText(text string) bool {
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" {
@@ -2735,7 +2904,8 @@ func isExplicitOptOutText(text string) bool {
 	}
 	return containsAny(normalized, []string{
 		"не пишите", "больше не пишите", "не надо", "не интересно", "не актуально", "передумал",
-		"передумали", "не хочу", "отстан", "отпиш", "unsubscribe", "stop messaging",
+		"передумали", "не хочу", "отстан", "отписаться", "отписка", "отпишите меня",
+		"отписать меня", "отпишите от", "unsubscribe", "stop messaging",
 		"жазбаңыз", "мазаламаңыз", "керек емес", "not interested", "do not message",
 	})
 }

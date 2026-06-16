@@ -29,6 +29,7 @@ const (
 	IntentDeadlineQuestion = "deadline_question"
 	IntentReadyToOrder     = "ready_to_order"
 	IntentObjection        = "objection"
+	IntentDefer            = "defer"
 	IntentNegativeReaction = "negative_reaction"
 	IntentBriefAnswer      = "brief_answer"
 	IntentHumanRequest     = "human_request"
@@ -178,10 +179,11 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	}
 	questionnaireIntent := containsQuestionnaireIntent(normalized)
 	readySignal := containsReadySignal(text)
-	if moreOptionsRequest {
+	deferRequest := isClientDeferText(text)
+	if moreOptionsRequest || deferRequest {
 		readySignal = false
 	}
-	analysis.WantsQuestionnaire = questionnaireIntent || readySignal
+	analysis.WantsQuestionnaire = (questionnaireIntent || readySignal) && !deferRequest
 
 	switch {
 	case isMuteRequest(normalized):
@@ -213,6 +215,8 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentPriceQuestion
 	case analysis.SelectedLevel > 0 && looksLikePackageSelection(normalized):
 		analysis.Intent = IntentPackageSelection
+	case deferRequest:
+		analysis.Intent = IntentDefer
 	case readySignal || questionnaireIntent:
 		analysis.Intent = IntentReadyToOrder
 	case containsObjection(text):

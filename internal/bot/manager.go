@@ -253,8 +253,7 @@ func parseUsedAIVideos(text string) *bool {
 
 func containsObjection(text string) bool {
 	return containsAny(normalize(text), []string{
-		"дорого", "подумаю", "подумаем", "позже", "expensive", "costly", "think", "i will think",
-		"too much", "қымбат", "ойлан", "кейін",
+		"дорого", "expensive", "costly", "too much", "қымбат",
 	})
 }
 

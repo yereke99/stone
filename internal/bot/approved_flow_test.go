@@ -254,7 +254,7 @@ func TestBriefRequestedAkciiNetIsBriefAnswer(t *testing.T) {
 	}
 }
 
-func TestBriefRequestedRealOptOutStopsWithoutHandoff(t *testing.T) {
+func TestBriefRequestedRealOptOutStopsSilently(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
@@ -276,14 +276,14 @@ func TestBriefRequestedRealOptOutStopsWithoutHandoff(t *testing.T) {
 	sendText(t, service, chatID, "Не интересно, больше не пишите")
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateHandedOff || !conversation.HandedOffToOwner || !conversation.AutomationClosed || !conversation.Stopped {
-		t.Fatalf("real opt-out handoff state = stage=%q handed=%v closed=%v stopped=%v", conversation.Stage, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.AutomationClosed || !conversation.Stopped || conversation.HandedOffToOwner {
+		t.Fatalf("real opt-out state = stage=%q optout=%v handed=%v closed=%v stopped=%v", conversation.Stage, conversation.OptOut, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
 	}
-	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
-		t.Fatalf("admin notification count for opt-out = %d messages=%#v", got, sender.messages)
+	if conversation.StopReason != StopReasonCustomerOptOut || conversation.StoppedBy != StoppedByCustomer {
+		t.Fatalf("stop metadata = reason=%q by=%q", conversation.StopReason, conversation.StoppedBy)
 	}
-	if got := countMessagesContaining(sender.messages, "неправильно понял"); got != 1 {
-		t.Fatalf("recovery apology count = %d messages=%#v", got, sender.messages)
+	if len(sender.messages) != 0 {
+		t.Fatalf("opt-out should not send client/admin handoff messages: %#v", sender.messages)
 	}
 	if !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
 		t.Fatalf("follow-up was not cancelled after opt-out: next=%v stage=%q", conversation.NextFollowupAt, conversation.FollowupStage)
@@ -474,12 +474,8 @@ func TestWeeklyFollowupSendsDiscountOnce(t *testing.T) {
 	if got := WeeklyDiscountFollowupText("ru"); got != wantText {
 		t.Fatalf("weekly discount template mismatch:\n%s", got)
 	}
-	if got := sender.messages[len(sender.messages)-1]; got != wantText {
-		t.Fatalf("weekly discount mismatch:\n%s", got)
-	}
-	if got := sender.messages[len(sender.messages)-1]; strings.Contains(got, "отправляю вам пример") ||
-		strings.Contains(got, "скидку -15") {
-		t.Fatalf("weekly discount still contains old copy:\n%s", got)
+	if len(sender.messages) != 0 {
+		t.Fatalf("weekly discount text was sent separately: %#v", sender.messages)
 	}
 	if len(sender.files) != 1 {
 		t.Fatalf("weekly discount files = %#v, want one video", sender.files)
@@ -487,8 +483,15 @@ func TestWeeklyFollowupSendsDiscountOnce(t *testing.T) {
 	if got := filepath.Base(sender.files[0]); got != VideoLevel4 {
 		t.Fatalf("weekly discount video = %q, want %q", got, VideoLevel4)
 	}
-	if got := sender.captions[0]; got != "" {
-		t.Fatalf("weekly discount video caption = %q, want empty because text is sent separately", got)
+	if len(sender.captions) != 1 {
+		t.Fatalf("weekly discount captions = %#v, want one caption", sender.captions)
+	}
+	if got := sender.captions[0]; got != wantText {
+		t.Fatalf("weekly discount caption mismatch:\n%s", got)
+	}
+	if got := sender.captions[0]; strings.Contains(got, "отправляю вам пример") ||
+		strings.Contains(got, "скидку -15") {
+		t.Fatalf("weekly discount still contains old copy:\n%s", got)
 	}
 	before := len(sender.messages)
 	beforeFiles := len(sender.files)
@@ -527,8 +530,12 @@ func TestWeeklyFollowupMissingVideoDoesNotCrash(t *testing.T) {
 	if len(sender.files) != 0 {
 		t.Fatalf("missing video should not be uploaded: %#v", sender.files)
 	}
-	if got := sender.messages[len(sender.messages)-1]; got != WeeklyDiscountFollowupText("ru") {
-		t.Fatalf("weekly discount text after missing video mismatch:\n%s", got)
+	if len(sender.messages) != 0 {
+		t.Fatalf("missing weekly video should not send caption as text: %#v", sender.messages)
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.FollowupStage != followupStageWeeklyDiscount {
+		t.Fatalf("missing weekly video marked follow-up sent: %q", conversation.FollowupStage)
 	}
 }
 

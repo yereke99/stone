@@ -6,9 +6,12 @@ const (
 	StopReasonManualAdminStop      = "manual_admin_stop"
 	StopReasonManualOverride       = "manual_override"
 	StopReasonModeratorStopCommand = "moderator_stop_command"
+	StopReasonCustomerOptOut       = "customer_opt_out"
+	StopReasonCustomerNegative     = "customer_negative"
 
 	StoppedByManualAdmin    = "manual_admin"
 	StoppedByModeratorPhone = "moderator_phone"
+	StoppedByCustomer       = "customer"
 )
 
 func isConversationClosedForAutomation(conversation Conversation) bool {

@@ -25,10 +25,13 @@ func TestNonBusinessMessagesAreNeverSavedAsNiche(t *testing.T) {
 		{text: "Здравствуйте", wantIntent: IntentGreeting},
 		{text: "да"},
 		{text: "ок"},
+		{text: "принято"},
 		{text: "понял"},
 		{text: "хорошо"},
 		{text: "Есть кейсы?", wantIntent: IntentPortfolioRequest},
 		{text: "Как отправите кейсы?", wantIntent: IntentPortfolioRequest},
+		{text: "Хронометраж видео какой", wantIntent: IntentFAQ},
+		{text: "Сколько секунд ролик?", wantIntent: IntentFAQ},
 		{text: "Сейчас"},
 		{text: "Завтра"},
 		{text: "Бот собираюсь"},
@@ -178,6 +181,90 @@ func TestGoalAnswerAfterKnownNicheDoesNotRepeatNicheQuestion(t *testing.T) {
 		if strings.Contains(lower, "какая ниша") || strings.Contains(lower, "что продаёте") || strings.Contains(lower, "для какой ниши") {
 			t.Fatalf("bot asked niche again after goal answer: %q", message)
 		}
+	}
+}
+
+func TestQuotedConstructionReplyUsesTypedTextAndPreservesGoal(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-quoted-construction-answer"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStateAwaitingQualification
+		conversation.InitialMessageSent = true
+		conversation.Lead.Goal = "получать заявки"
+	})
+
+	currentText := "Плиточные клея, шпаклёвка, штукатурка и т.д.\nОсновные клиенты строительные компании, частники!"
+	if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
+		IDMessage:       "quoted-construction-answer",
+		ChatID:          chatID,
+		TypeMessage:     "quotedMessage",
+		Text:            currentText,
+		QuotedMessageID: "old-qualification-question",
+		QuotedType:      "textMessage",
+		QuotedText:      "Чтобы предложить точный формат, напишите, пожалуйста, что именно продвигаем, кто ваша аудитория и какая цель: заявки, продажи или узнаваемость.",
+	}); err != nil {
+		t.Fatalf("HandleIncomingMessage() error = %v", err)
+	}
+
+	conversation := snapshotConversation(t, store, chatID)
+	niche := normalizeForAnalysis(conversation.Lead.Niche)
+	for _, want := range []string{"плиточные клея", "шпаклевка", "штукатурка"} {
+		if !strings.Contains(niche, want) {
+			t.Fatalf("niche = %q, want it to contain %q", conversation.Lead.Niche, want)
+		}
+	}
+	if conversation.Lead.Goal != "получать заявки" {
+		t.Fatalf("goal = %q, want preserved known goal", conversation.Lead.Goal)
+	}
+	audience := normalizeForAnalysis(conversation.Lead.TargetAudience)
+	if !strings.Contains(audience, "строительные компании") || !strings.Contains(audience, "частники") {
+		t.Fatalf("audience = %q, want construction companies and private customers", conversation.Lead.TargetAudience)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("qualified quoted reply should send package examples, files=%#v", sender.files)
+	}
+	for _, message := range sender.messages {
+		lower := strings.ToLower(message)
+		if strings.Contains(lower, "что продаёте") ||
+			strings.Contains(lower, "что продаете") ||
+			strings.Contains(lower, "какая у вас ниша") {
+			t.Fatalf("bot asked niche again after quoted typed answer: %q", message)
+		}
+	}
+}
+
+func TestDurationQuestionAnswersFAQAndDoesNotPolluteLead(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-duration-question"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStateAwaitingQualification
+		conversation.InitialMessageSent = true
+	})
+
+	sendText(t, service, chatID, "Хронометраж видео какой")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "" || conversation.Lead.Goal != "" {
+		t.Fatalf("duration question polluted lead fields: %#v", conversation.Lead)
+	}
+	if len(sender.files) != 0 {
+		t.Fatalf("duration FAQ should not send videos before qualification: %#v", sender.files)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one FAQ reply", sender.messages)
+	}
+	reply := sender.messages[0]
+	if !strings.Contains(reply, "30–45 секунд") {
+		t.Fatalf("duration reply = %q, want 30–45 секунд answer", reply)
+	}
+	if strings.Contains(strings.ToLower(reply), "понял, хронометраж") {
+		t.Fatalf("duration question was echoed as qualification data: %q", reply)
 	}
 }
 

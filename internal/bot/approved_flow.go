@@ -17,6 +17,7 @@ const (
 	faqPayment      = "payment"
 	faqOnline       = "online"
 	faqAIVsShooting = "ai_vs_shooting"
+	faqDuration     = "duration"
 )
 
 func QualificationQuestionsText(language string) string {
@@ -106,6 +107,8 @@ func faqAnswerRU(key string) string {
 		return "🌍 Да. Весь процесс — от брифа до сдачи ролика — можно пройти дистанционно."
 	case faqAIVsShooting:
 		return "⚡ Это быстрее, дешевле и позволяет тестировать креативы без больших затрат на съемочную команду, студии и технику."
+	case faqDuration:
+		return "Для рекламы у нас обычно 30–45 секунд."
 	default:
 		return ""
 	}
@@ -115,6 +118,11 @@ func detectFAQIntent(text string) (string, bool) {
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" {
 		return "", false
+	}
+	// Duration questions ("хронометраж видео какой", "сколько секунд ролик")
+	// are direct questions even without a question mark or question word.
+	if isDurationQuestion(normalized) {
+		return faqDuration, true
 	}
 	hasQuestionShape := strings.Contains(normalized, "?") ||
 		containsAny(normalized, []string{"как", "что", "сколько", "нужно", "надо", "можно", "это", "а если", "чем", "в каком", "выгляд"})

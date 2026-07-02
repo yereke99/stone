@@ -1413,7 +1413,8 @@ func (s *Service) ensurePortfolioExamplesSentBeforeFormatQuestion(ctx context.Co
 	if language == "" {
 		language = "ru"
 	}
-	if _, err := s.sendVideosWithCaptions(ctx, chatID, missing, language, false, nil); err != nil {
+	sent, err := s.sendVideosWithCaptions(ctx, chatID, missing, language, false, nil)
+	if err != nil {
 		return false, err
 	}
 	latest, err = s.store.Snapshot(ctx, chatID)
@@ -1421,6 +1422,25 @@ func (s *Service) ensurePortfolioExamplesSentBeforeFormatQuestion(ctx context.Co
 		return false, err
 	}
 	if missing = missingPortfolioExampleVideos(latest); len(missing) > 0 {
+		unavailable := make([]string, 0, len(missing))
+		for _, fileName := range missing {
+			if _, statErr := os.Stat(filepath.Join(s.videoDir, fileName)); statErr != nil {
+				unavailable = append(unavailable, fileName)
+			}
+		}
+		if len(unavailable) == len(missing) {
+			// The remaining example files do not exist on disk: this is a
+			// deployment/config failure, not a transient send error. Log it
+			// clearly and keep the format question blocked so we never claim
+			// that examples were shown.
+			s.warn("portfolio example videos are unavailable on disk; format question skipped",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("video_dir", s.videoDir),
+				zap.Strings("missing_files", missing),
+				zap.Int("sent_now", sent),
+			)
+			return false, fmt.Errorf("portfolio example videos unavailable before format question: missing %s", strings.Join(missing, ", "))
+		}
 		s.warn("format question skipped because portfolio examples were not fully sent",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.Strings("missing_files", missing),
@@ -1485,7 +1505,12 @@ func (s *Service) sendVideosWithCaptions(ctx context.Context, chatID string, fil
 
 		filePath := filepath.Join(s.videoDir, fileName)
 		if _, err := os.Stat(filePath); err != nil {
-			s.warn("portfolio video file is unavailable", zap.String("file_name", fileName), zap.Error(err))
+			s.warn("portfolio video file is unavailable; video not sent",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("file_name", fileName),
+				zap.String("file_path", filePath),
+				zap.Error(err),
+			)
 			continue
 		}
 
@@ -2930,7 +2955,7 @@ func isPositiveConfirmation(text string) bool {
 	normalized := normalizeForAnalysis(text)
 	clean := strings.Trim(normalized, " .,!?:;")
 	switch clean {
-	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "отправляйте", "давайте", "жду", "конечно", "иә", "иа", "жарайды", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
+	case "да", "ок", "окей", "хорошо", "можно", "отправьте", "отправляйте", "давайте", "жду", "конечно", "принято", "иә", "иа", "жарайды", "жаксы", "жақсы", "yes", "ok", "okay", "sure":
 		return true
 	default:
 		return containsAny(normalized, []string{"отправьте", "скиньте", "сбросьте", "жду", "жибер", "жібер", "send it", "send me"})
@@ -2941,7 +2966,7 @@ func isGenericAcknowledgement(text string) bool {
 	normalized := normalizeForAnalysis(text)
 	clean := strings.Trim(normalized, " .,!?:;")
 	switch clean {
-	case "да", "ок", "окей", "хорошо", "понял", "поняла", "принял", "приняла", "спасибо", "рахмет",
+	case "да", "ок", "окей", "хорошо", "понял", "поняла", "принял", "приняла", "принято", "спасибо", "рахмет",
 		"иә", "иа", "жарайды", "жаксы", "жақсы", "yes", "ok", "okay", "thanks", "thank you":
 		return true
 	default:

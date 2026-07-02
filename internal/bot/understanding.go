@@ -25,12 +25,13 @@ Your job:
 
 Fields:
 - language: ru, kk, en, mixed, or unknown.
-- intent: greeting, qualification_answer, asks_examples, asks_packages, asks_price, asks_discount, asks_deadline, asks_human, ready_to_order, defer, unclear, or irrelevant.
+- intent: greeting, qualification_answer, asks_examples, asks_packages, asks_price, asks_discount, asks_deadline, asks_duration, asks_human, ready_to_order, defer, unclear, or irrelevant.
 - niche: business category or product niche if known.
 - goal: business/video goal if known.
 - deadline: launch or production deadline if known.
 - platform: advertising/use context such as Instagram, TikTok, site, or advertising.
 - product_or_service: concrete product/service if present.
+- target_audience: who the customer's clients are, if the customer describes them.
 - website_or_instagram: website, Instagram handle, or business link if present.
 - package_interest: test, basic, standard, unknown, or null.
 - asks_for_food_examples: true when the customer asks whether food/farm-product videos/examples exist.
@@ -42,6 +43,8 @@ Fields:
 
 Rules:
 - Understand answers even if they are not formal sentences.
+- The input JSON may contain incoming.quoted_text / quoted_caption: this is the message the customer replied to (usually the bot's own earlier question). Use it ONLY as context to understand which question the customer is answering. NEVER extract niche/goal/deadline/audience from the quoted text itself; extract facts only from incoming.text.
+- Multiline natural replies often answer several questions at once: extract niche/products from product lines and audience from client lines. "Плиточные клея, шпаклёвка, штукатурка и т.д." is a niche/products answer (construction/finishing materials). "Основные клиенты строительные компании, частники" is target_audience, NOT a goal.
 - "По рекламе" is platform/context, not the product niche.
 - "Пылесосы" can be the niche/product.
 - "Продажи" is a goal.
@@ -49,8 +52,9 @@ Rules:
 - Food/farm products count as a valid niche.
 - A website or Instagram handle is business context.
 - If niche + goal are known, missing_fields must be [].
+- "Хронометраж видео какой", "сколько секунд ролик", "длина видео какая" are direct questions about the video duration: intent "asks_duration" with niche=null and goal=null. NEVER save such question text as a niche or a goal.
 - NEVER classify a greeting as a niche: "доброе утро", "добрый день", "здравствуйте", "привет", "салем" are intent "greeting" with niche=null.
-- NEVER classify confirmations ("да", "ок", "понял", "хорошо") or timing words ("сейчас", "завтра", "сегодня") as a niche; they carry no niche/goal facts.
+- NEVER classify confirmations ("да", "ок", "понял", "хорошо", "принято") or timing words ("сейчас", "завтра", "сегодня") as a niche; they carry no niche/goal facts.
 - Soft deferrals like "спасибо, позже напишу", "я подумаю", "на днях отпишусь", "свяжусь позже", "пока не готов", "понял спасибо" are intent "defer". They are not negative, not a manager request, not a stop/unsubscribe, and must not need a manager.
 - NEVER classify questions about cases/examples ("есть кейсы?", "как отправите кейсы?", "покажите примеры") as a niche; that is intent "asks_examples" with niche=null unless a real product is also named.
 - NEVER classify price/package/format questions or "стоп"/"stop" as a niche.
@@ -92,7 +96,21 @@ Example 3:
 Input:
 "в целом интересно, давайте еще варианты исполнения подумаем"
 Expected:
-{"language":"ru","intent":"asks_packages","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":"unknown","asks_for_food_examples":false,"asks_for_more_options":true,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.85}`
+{"language":"ru","intent":"asks_packages","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":"unknown","asks_for_food_examples":false,"asks_for_more_options":true,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.85}
+
+Example 6 (reply to a quoted bot question):
+Input text:
+"Плиточные клея, шпаклёвка, штукатурка и т.д.
+Основные клиенты строительные компании, частники!"
+Quoted text (context only): "Чтобы предложить точный формат, напишите, пожалуйста, что именно продвигаем, кто ваша аудитория и какая цель: заявки, продажи или узнаваемость."
+Expected:
+{"language":"ru","intent":"qualification_answer","niche":"строительные и отделочные материалы (плиточный клей, шпаклёвка, штукатурка)","goal":null,"deadline":null,"platform":null,"product_or_service":"плиточный клей, шпаклёвка, штукатурка","target_audience":"строительные компании и частники","website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.93}
+
+Example 7:
+Input:
+"Хронометраж видео какой"
+Expected:
+{"language":"ru","intent":"asks_duration","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"target_audience":null,"website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}`
 
 func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, msg IncomingMessage, text string, language string, conversation Conversation) (CustomerAnalysis, bool) {
 	fallback := AnalyzeCustomerMessage(text, conversation.Lead, language)
@@ -227,7 +245,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		if value := normalizedAIString(firstStringPointer(understanding.Platform, understanding.Extracted.Platform)); value != "" {
 			analysis.Platforms = mergePlatforms(analysis.Platforms, platformsFromAIString(value))
 		}
-		if value := normalizedAIString(understanding.Extracted.TargetAudience); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.TargetAudience, understanding.Extracted.TargetAudience)); value != "" {
 			analysis.TargetAudience = stringPointer(value)
 		}
 		if value := normalizedAIString(understanding.ProductOrService); value != "" {
@@ -265,6 +283,9 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.Intent = IntentObjection
 	case "asks_deadline":
 		analysis.Intent = IntentDeadlineQuestion
+	case "asks_duration":
+		analysis.Intent = IntentFAQ
+		analysis.FAQKey = faqDuration
 	case "asks_human":
 		analysis.Intent = IntentHumanRequest
 	case "ready_to_order":
@@ -374,6 +395,9 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	}
 	if ai.Intent != "" && ai.Intent != IntentOther {
 		result.Intent = ai.Intent
+	}
+	if ai.FAQKey != "" {
+		result.FAQKey = ai.FAQKey
 	}
 	result.WantsQuestionnaire = result.WantsQuestionnaire || ai.WantsQuestionnaire
 	result.ShouldHandoff = result.ShouldHandoff || ai.ShouldHandoff

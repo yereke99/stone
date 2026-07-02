@@ -50,6 +50,7 @@ type CustomerUnderstanding struct {
 	Deadline              *string  `json:"deadline"`
 	Platform              *string  `json:"platform"`
 	ProductOrService      *string  `json:"product_or_service"`
+	TargetAudience        *string  `json:"target_audience"`
 	WebsiteOrInstagram    *string  `json:"website_or_instagram"`
 	PackageInterest       *string  `json:"package_interest"`
 	AsksForFoodExamples   bool     `json:"asks_for_food_examples"`
@@ -487,6 +488,7 @@ func customerUnderstandingSchema() map[string]any {
 			"deadline",
 			"platform",
 			"product_or_service",
+			"target_audience",
 			"website_or_instagram",
 			"package_interest",
 			"asks_for_food_examples",
@@ -511,6 +513,7 @@ func customerUnderstandingSchema() map[string]any {
 					"asks_price",
 					"asks_discount",
 					"asks_deadline",
+					"asks_duration",
 					"asks_human",
 					"ready_to_order",
 					"defer",
@@ -523,6 +526,7 @@ func customerUnderstandingSchema() map[string]any {
 			"deadline":             nullableString(),
 			"platform":             nullableString(),
 			"product_or_service":   nullableString(),
+			"target_audience":      nullableString(),
 			"website_or_instagram": nullableString(),
 			"package_interest": map[string]any{
 				"type": []string{"string", "null"},

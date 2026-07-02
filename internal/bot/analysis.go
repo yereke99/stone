@@ -155,6 +155,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		if facts.productOrService != "" {
 			analysis.ProductOrService = stringPointer(facts.productOrService)
 		}
+		if facts.audience != "" {
+			analysis.TargetAudience = stringPointer(facts.audience)
+		}
 	}
 	analysis.AsksForFoodExamples = foodExampleRequest
 	analysis.AsksForMoreOptions = moreOptionsRequest
@@ -207,6 +210,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentPackageSelection
 	case containsPortfolioRequest(text):
 		analysis.Intent = IntentPortfolioRequest
+	case isDurationQuestion(normalized):
+		analysis.Intent = IntentFAQ
+		analysis.FAQKey = faqDuration
 	case containsDeadlineQuestion(normalized):
 		analysis.Intent = IntentDeadlineQuestion
 	case analysis.SelectedLevel > 0 && isPackageInfoQuestion(normalized):
@@ -483,6 +489,10 @@ func extractNiche(text string, current LeadState) string {
 		return normalizeNiche(cleanNicheSource(value))
 	}
 
+	if value := nicheFromProductEnumeration(text); value != "" {
+		return value
+	}
+
 	cleaned := cleanNicheSource(normalized)
 	if value := knownNicheFromText(cleaned); value != "" {
 		return value
@@ -547,6 +557,11 @@ func extractGoal(text string, current LeadState) string {
 			return goal
 		}
 	}
+	// "Основные клиенты строительные компании, частники" describes the
+	// audience; the bare "клиент" keyword must not turn it into a goal.
+	if isAudienceDescriptionText(normalized) && !hasExplicitGoalSignal(normalized) {
+		return ""
+	}
 	if goal := normalizeGoal(normalized); goal != "" {
 		return goal
 	}
@@ -554,6 +569,53 @@ func extractGoal(text string, current LeadState) string {
 		return normalizeGoal(normalized)
 	}
 	return ""
+}
+
+// isAudienceDescriptionText detects "основные клиенты ..." style statements
+// that describe who the customers are rather than what the video goal is.
+func isAudienceDescriptionText(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	if containsAny(normalized, []string{
+		"основные клиенты", "основной клиент", "наши клиенты", "наш клиент",
+		"основные покупатели", "клиенты в основном", "покупатели в основном",
+		"целевая аудитория", "основная аудитория", "негизги клиенттер",
+		"main clients", "our clients", "our customers", "target audience",
+	}) {
+		return true
+	}
+	return strings.HasPrefix(normalized, "клиенты ") || strings.HasPrefix(normalized, "аудитория ")
+}
+
+// hasExplicitGoalSignal reports whether the text names a video/business goal
+// explicitly, so an audience-looking sentence can still carry a goal.
+func hasExplicitGoalSignal(normalized string) bool {
+	return containsAny(normalized, []string{
+		"цель", "максат", "мақсат", "goal", "хочу", "хотим", "нужны", "нужно", "керек",
+		"привлеч", "заяв", "лид", "продаж", "узнаваем", "охват", "трафик", "подпис", "запуск",
+	})
+}
+
+// audienceFromDescriptionLine extracts the audience value from an audience
+// statement line ("Основные клиенты строительные компании, частники!").
+func audienceFromDescriptionLine(line string) string {
+	normalized := normalizeForAnalysis(line)
+	for _, marker := range []string{
+		"основные клиенты", "основной клиент", "наши клиенты", "наш клиент",
+		"основные покупатели", "клиенты в основном", "покупатели в основном",
+		"целевая аудитория", "основная аудитория", "негизги клиенттер",
+		"main clients", "our clients", "our customers", "target audience",
+		"клиенты", "аудитория",
+	} {
+		normalized = strings.ReplaceAll(normalized, marker, " ")
+	}
+	normalized = strings.Trim(strings.Join(strings.Fields(normalized), " "), " -—:;,.!?")
+	if meaningfulRuneCount(normalized) < 3 {
+		return ""
+	}
+	return normalized
 }
 
 func extractPlatforms(text string) []string {
@@ -756,11 +818,12 @@ type messyQualificationFacts struct {
 	goal             string
 	deadline         string
 	productOrService string
+	audience         string
 	platforms        []string
 }
 
 func (f messyQualificationFacts) hasAny() bool {
-	return f.niche != "" || f.goal != "" || f.deadline != "" || f.productOrService != "" || len(f.platforms) > 0
+	return f.niche != "" || f.goal != "" || f.deadline != "" || f.productOrService != "" || f.audience != "" || len(f.platforms) > 0
 }
 
 func extractMessyQualificationFacts(text string, current LeadState) messyQualificationFacts {
@@ -788,6 +851,14 @@ func extractMessyQualificationFacts(text string, current LeadState) messyQualifi
 			continue
 		}
 		if strings.Contains(normalized, "?") {
+			continue
+		}
+		// Audience statements ("Основные клиенты строительные компании,
+		// частники") are stored as the audience and never as a goal/niche.
+		if isAudienceDescriptionText(normalized) && !hasExplicitGoalSignal(normalized) {
+			if facts.audience == "" {
+				facts.audience = audienceFromDescriptionLine(line)
+			}
 			continue
 		}
 		if facts.deadline == "" {
@@ -874,6 +945,9 @@ func shortProductOrNicheLine(line string, current LeadState) string {
 		len(extractPlatforms(line)) > 0 {
 		return ""
 	}
+	if value := nicheFromProductEnumeration(line); value != "" {
+		return value
+	}
 	if value := knownNicheFromText(normalized); value != "" {
 		return value
 	}
@@ -890,12 +964,59 @@ func shortProductOrNicheLine(line string, current LeadState) string {
 	return ""
 }
 
+// nicheFromProductEnumeration recognises comma-separated product listings such
+// as "Плиточные клея, шпаклёвка, штукатурка и т.д." and keeps the whole
+// enumeration as the niche/products text.
+func nicheFromProductEnumeration(line string) string {
+	normalized := normalizeForAnalysis(line)
+	if normalized == "" ||
+		strings.Contains(normalized, "?") ||
+		strings.Contains(normalized, "http") ||
+		strings.Contains(normalized, "www") ||
+		strings.Contains(normalized, "@") {
+		return ""
+	}
+	if isAudienceDescriptionText(normalized) || normalizeGoal(normalized) != "" ||
+		normalizeDeadline(normalized) != "" || len(extractPlatforms(line)) > 0 {
+		return ""
+	}
+	parts := strings.Split(normalized, ",")
+	if len(parts) < 2 {
+		return ""
+	}
+	etcReplacer := strings.NewReplacer("и т.д", " ", "и т.п", " ", "и так далее", " ", "и тд", " ", "и тп", " ", "etc", " ")
+	cleanParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(etcReplacer.Replace(part))
+		part = strings.Trim(part, " -—:;,.!")
+		if part == "" {
+			continue
+		}
+		words := strings.Fields(part)
+		if len(words) > 3 {
+			return ""
+		}
+		if isNonNicheCandidateText(part) || normalizeGoal(part) != "" || normalizeDeadline(part) != "" {
+			return ""
+		}
+		cleanParts = append(cleanParts, strings.Join(words, " "))
+	}
+	if len(cleanParts) < 2 {
+		return ""
+	}
+	niche := strings.Join(cleanParts, ", ")
+	if !isValidNiche(niche) {
+		return ""
+	}
+	return niche
+}
+
 func isNonNicheShortReply(normalized string) bool {
 	clean := strings.Trim(normalized, " .,!?:;")
 	switch clean {
 	case "вот этот", "вот эта", "этот", "эта", "это", "тот", "та", "да", "ок", "окей",
 		"хорошо", "супер", "анкета", "анкету", "бриф", "заявка", "заявку", "давайте",
-		"отправьте", "пришлите", "жду", "ага", "угу":
+		"отправьте", "пришлите", "жду", "ага", "угу", "принято":
 		return true
 	default:
 		return false
@@ -982,7 +1103,7 @@ func isMuteRequest(normalized string) bool {
 func isAgreement(normalized string) bool {
 	switch normalized {
 	case "да", "да.", "ок", "ок.", "окей", "окей.", "хорошо", "супер", "ага", "угу",
-		"иә", "иа", "жаксы", "жақсы", "yes", "yes.", "ok", "okay", "sure":
+		"принято", "принято.", "иә", "иа", "жаксы", "жақсы", "yes", "yes.", "ok", "okay", "sure":
 		return true
 	default:
 		return false
@@ -1004,8 +1125,8 @@ func isGreeting(normalized string) bool {
 
 // isNonNicheCandidateText guards the generic "short answer becomes the niche"
 // extraction paths. Greetings, confirmations, timing words, questions, case/
-// example/price requests and stop commands must never be stored as a niche,
-// even when the niche is the only missing field.
+// example/price requests, duration questions and stop commands must never be
+// stored as a niche, even when the niche is the only missing field.
 func isNonNicheCandidateText(normalized string) bool {
 	clean := strings.Trim(normalized, " .,!?:;")
 	if clean == "" {
@@ -1020,6 +1141,9 @@ func isNonNicheCandidateText(normalized string) bool {
 	if containsPortfolioRequest(clean) || containsPriceQuestion(clean) {
 		return true
 	}
+	if isDurationQuestion(clean) {
+		return true
+	}
 	if normalizeDeadline(clean) != "" || isTimingOnlyReply(clean) {
 		return true
 	}
@@ -1027,6 +1151,28 @@ func isNonNicheCandidateText(normalized string) bool {
 		return true
 	}
 	return wordsAreOnlyNonNicheNoise(clean)
+}
+
+// isDurationQuestion detects direct questions about the video duration
+// ("хронометраж видео какой", "сколько секунд ролик", "длина видео какая").
+// They must be answered directly and never stored as a niche or a goal.
+func isDurationQuestion(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "хронометраж") {
+		return true
+	}
+	mentionsVideo := containsAny(normalized, []string{"видео", "ролик", "video", "creative"})
+	if containsAny(normalized, []string{"секунд", "seconds", "сек ", "sec "}) &&
+		(mentionsVideo || containsAny(normalized, []string{"сколько", "канша", "қанша", "how many"})) {
+		return true
+	}
+	return mentionsVideo && containsAny(normalized, []string{
+		"длина", "длительность", "продолжительность", "узактыг", "узактык",
+		"length", "duration", "how long",
+	})
 }
 
 // isTimingOnlyReply detects bare timing/context answers such as "сейчас" or
@@ -1315,6 +1461,9 @@ func knownNicheFromText(normalized string) string {
 		"стирка ковров", "чистка ковров", "химчистка ковров", "копирайтинг",
 		"доставка еды", "магазин одежды", "барбер", "барбершоп",
 		"фермерские продукты", "пылесосы", "еда",
+		"плиточный клей", "плиточные клея", "строительные материалы",
+		"отделочные материалы", "сухие смеси", "стройматериалы",
+		"шпаклевка", "штукатурка", "ламинат", "керамогранит", "гипсокартон",
 		"спорт", "фитнес", "йога", "стоматология", "медицина", "косметология",
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
 		"недвижимость", "ремонт", "строительство", "строительная компания", "образование", "курсы",

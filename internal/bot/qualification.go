@@ -91,12 +91,20 @@ func isValidNiche(value string) bool {
 	if containsAny(clean, []string{"не знаю", "пока не знаю", "не определ", "хз", "no idea", "dont know", "don't know"}) {
 		return false
 	}
+	// A stored value that is itself a question ("хронометраж видео какой")
+	// is pollution from a customer question and must never stay a niche.
+	if strings.Contains(clean, "?") || isDurationQuestion(clean) {
+		return false
+	}
 	return meaningfulRuneCount(clean) >= 2
 }
 
 func isValidGoal(value string) bool {
 	clean := normalizedLeadValue(value)
 	if isWeakLeadValue(clean) {
+		return false
+	}
+	if strings.Contains(clean, "?") || isDurationQuestion(clean) {
 		return false
 	}
 	if normalizeGoal(clean) != "" {

@@ -84,10 +84,14 @@ func (s *Service) handleBriefRequested(ctx context.Context, chatID string, text 
 	}
 	if analysis.Intent == IntentBusinessLink {
 		s.recordBriefMessage(chatID, text, analysis)
-		return s.sendAndRemember(ctx, chatID, LinkReceivedBriefText(language), StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
+		return s.continueBriefAfterSavedMessage(ctx, chatID, language)
 	}
 
 	s.recordBriefMessage(chatID, text, analysis)
+	return s.continueBriefAfterSavedMessage(ctx, chatID, language)
+}
+
+func (s *Service) continueBriefAfterSavedMessage(ctx context.Context, chatID string, language string) error {
 	conversation, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
 		return err
@@ -99,7 +103,11 @@ func (s *Service) handleBriefRequested(ctx context.Context, chatID string, text 
 	if status.nextQuestion == "" {
 		return s.sendAndRemember(ctx, chatID, BriefContextReturnText(language), StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
 	}
-	return s.sendAndRemember(ctx, chatID, status.nextQuestion, StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
+	message := status.nextQuestion
+	if leadHasBusinessLink(conversation.Lead) && !strings.Contains(normalizeForAnalysis(message), "ссыл") {
+		message = briefLinkAcknowledgedNextQuestion(language, message)
+	}
+	return s.sendAndRemember(ctx, chatID, message, StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
 }
 
 func (s *Service) recordBriefMessage(chatID string, text string, analysis CustomerAnalysis) {
@@ -120,6 +128,24 @@ func (s *Service) recordBriefMessage(chatID string, text string, analysis Custom
 		if len(analysis.Platforms) > 0 {
 			conversation.Lead.Platforms = mergePlatforms(conversation.Lead.Platforms, analysis.Platforms)
 			conversation.Lead.Platform = strings.Join(conversation.Lead.Platforms, ", ")
+		}
+		if analysis.ProductOrService != nil && strings.TrimSpace(*analysis.ProductOrService) != "" {
+			conversation.Lead.ProductOrService = strings.TrimSpace(*analysis.ProductOrService)
+		}
+		if analysis.TargetAudience != nil && strings.TrimSpace(*analysis.TargetAudience) != "" {
+			conversation.Lead.TargetAudience = strings.TrimSpace(*analysis.TargetAudience)
+		}
+		if analysis.StrongSide != nil && strings.TrimSpace(*analysis.StrongSide) != "" {
+			conversation.Lead.StrongSide = strings.TrimSpace(*analysis.StrongSide)
+		}
+		if analysis.Offer != nil && strings.TrimSpace(*analysis.Offer) != "" {
+			conversation.Lead.Offer = strings.TrimSpace(*analysis.Offer)
+		}
+		if analysis.BusinessLink != nil && strings.TrimSpace(*analysis.BusinessLink) != "" {
+			conversation.Lead.WebsiteOrInstagram = strings.TrimSpace(*analysis.BusinessLink)
+		}
+		for _, link := range analysis.ReferenceLinks {
+			conversation.Lead.ReferenceLinks = appendUniqueString(conversation.Lead.ReferenceLinks, link)
 		}
 		conversation.Lead.FreeText = appendBriefText(conversation.Lead.FreeText, text)
 		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, text)
@@ -151,16 +177,19 @@ func briefCompletionStatus(conversation Conversation) briefStatus {
 	if !briefHasProduct(text, conversation) {
 		missing = append(missing, "product")
 	}
-	if !briefHasStrength(text) {
+	if !briefHasStrength(text, conversation) {
 		missing = append(missing, "strength")
 	}
-	if !briefHasClient(text) {
+	if !briefHasClient(text, conversation) {
 		missing = append(missing, "client")
 	}
-	if !briefHasOffer(text) {
+	if !briefHasOffer(text, conversation) {
 		missing = append(missing, "offer")
 	}
 	if len(missing) == 0 {
+		if !isValidGoal(conversation.Lead.Goal) {
+			return briefStatus{nextQuestion: briefMissingQuestion(fieldGoal)}
+		}
 		return briefStatus{complete: true}
 	}
 	return briefStatus{nextQuestion: briefMissingQuestion(missing[0])}
@@ -170,7 +199,13 @@ func briefHasProduct(text string, conversation Conversation) bool {
 	if isValidNiche(conversation.Lead.Niche) {
 		return true
 	}
+	if strings.TrimSpace(conversation.Lead.ProductOrService) != "" {
+		return true
+	}
 	if knownNicheFromText(text) != "" {
+		return true
+	}
+	if shortServiceLine(text) {
 		return true
 	}
 	return containsAny(text, []string{
@@ -179,21 +214,31 @@ func briefHasProduct(text string, conversation Conversation) bool {
 	})
 }
 
-func briefHasStrength(text string) bool {
+func briefHasStrength(text string, conversation ...Conversation) bool {
+	if len(conversation) > 0 && strings.TrimSpace(conversation[0].Lead.StrongSide) != "" {
+		return true
+	}
 	return containsAny(text, []string{
 		"сильн", "преимущ", "ценность", "отлич", "качество", "быстро", "на заказ", "опыт",
 		"гарант", "premium", "преми", "эксклюзив", "уникаль", "высокий чек",
 	})
 }
 
-func briefHasClient(text string) bool {
+func briefHasClient(text string, conversation ...Conversation) bool {
+	if len(conversation) > 0 && strings.TrimSpace(conversation[0].Lead.TargetAudience) != "" {
+		return true
+	}
 	return containsAny(text, []string{
 		"клиент", "аудитор", "покупател", "семьи", "семь", "женщ", "девуш", "мужчин", "муж",
 		"предпринимател", "бизнес", "новые квартиры", "для тех", "ца ", "чек", "20-35",
-	})
+		"компани", "b2b", "б2б", "производств", "промышлен", "добыч", "завод", "корпоратив",
+	}) || audienceLikeLine(text)
 }
 
-func briefHasOffer(text string) bool {
+func briefHasOffer(text string, conversation ...Conversation) bool {
+	if len(conversation) > 0 && strings.TrimSpace(conversation[0].Lead.Offer) != "" {
+		return true
+	}
 	if strings.Contains(text, "http") || strings.Contains(text, "www") || strings.Contains(text, "instagram") || strings.Contains(text, "@") {
 		return true
 	}
@@ -214,8 +259,25 @@ func briefMissingQuestion(field string) string {
 		return "Кто ваш клиент?"
 	case "offer":
 		return "Есть ли сейчас акция / оффер?"
+	case fieldGoal:
+		return "Какая цель ролика: заявки, продажи или узнаваемость?"
 	default:
 		return BriefContextReturnText("ru")
+	}
+}
+
+func briefLinkAcknowledgedNextQuestion(language string, question string) string {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return LinkReceivedBriefText(language)
+	}
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Сілтемені алдым, рақмет. " + question
+	case "en":
+		return "Got the link, thank you. " + question
+	default:
+		return "Ссылку получил, спасибо. " + question
 	}
 }
 

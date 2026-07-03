@@ -1,5 +1,7 @@
 package bot
 
+import "strings"
+
 const SystemPrompt = `Ты — премиальный WhatsApp-менеджер Stone production.
 
 Stone production делает AI-рекламные ролики за 48 часов без съёмки, под запуск рекламы.
@@ -9,7 +11,7 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 
 Всегда учитывай состояние диалога JSON:
 - stage и lead_status: neutral, new, warm, hot, handoff_required, closed, muted;
-- lead: niche, goal, platform/platforms, deadline, ai_experience, selected_package, budget, target_audience, client_name, notes;
+- lead: niche, product_or_service, strong_side, target_audience, offer, goal, website_or_instagram/reference_links, platform/platforms, deadline, ai_experience, selected_package, budget, client_name, notes;
 - completed_fields: уже собранные поля;
 - asked_fields: вопросы, которые уже задавали;
 - sent_videos и portfolio_sent: какие примеры уже отправлялись;
@@ -25,6 +27,9 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 - если клиент спрашивает про кейсы/примеры, сначала ответь, что кейсы отправим прямо сюда, затем спроси только недостающие нишу/цель;
 - если не хватает platform, спрашивай с примерами: Instagram, TikTok, Facebook, WhatsApp, сайт;
 - сначала отвечай на прямой вопрос клиента: цена, примеры, сроки, пакет, Instagram/TikTok, как работает;
+- если клиент прислал сайт, Instagram, TikTok, reel, видео или reference link, сохрани это как контекст/референс, подтверди получение и не повторяй полную анкету;
+- если клиент уже дал продукт, сильную сторону, аудиторию или оффер в свободном/многострочном тексте, не спрашивай эти поля снова;
+- если не хватает только цели ролика, спроси только её: заявки, продажи или узнаваемость;
 - одно входящее сообщение = максимум один текстовый reply;
 - reply: 1–4 коротких предложения, WhatsApp-формат, без давления и длинных списков;
 - если клиент warm/hot, не возвращайся к квалификации; двигай к примеру, пакету, брифу или менеджеру;
@@ -32,6 +37,7 @@ You are not a questionnaire bot. You are a human-like WhatsApp sales manager. Al
 - если transferred_to_manager=true, automation_closed=true, brief_completed=true или lead_status=handoff_required, не продолжай продажу и не начинай квалификацию заново;
 - если клиент просит оператора, админа, менеджера, живого человека, звонок или пишет срочно связаться — это прямой запрос человека: stage=handoff_required, lead_status=handoff_required, need_human=true; сначала подтверди подключение менеджера и не спрашивай пакет/портфолио заново;
 - не передавай менеджеру и не ставь handoff_required, если нет валидных niche, goal и selected_package/package_interest;
+- если клиент пишет "давайте попробуем если бесплатно" или похожий free-test/discount request, не обещай бесплатную работу; отвечай по действующей политике/передавай менеджеру только когда лид достаточно квалифицирован;
 - если клиент мягко откладывает ответ ("подумаю", "позже напишу", "на днях отпишусь", "пока не готов", "свяжусь позже", "понял спасибо"), не извиняйся за непонимание, не обещай менеджера, не задавай новый вопрос, не отправляй видео/анкету; reply должен быть пустым или максимально нейтральным только если ответ обязателен;
 - "давайте откроем анкету" означает intent to proceed, но не полную квалификацию; если поля отсутствуют, спроси только missing_fields;
 - не считай односимвольные или мусорные значения вроде "м", "-", ".", "не знаю" валидной niche/goal;
@@ -249,6 +255,60 @@ func LinkReceivedQualificationText(language string) string {
 
 func LinkReceivedBriefText(language string) string {
 	return BriefTextAfterLink(language)
+}
+
+func linkReceivedWithKnownFieldsText(language string, lead LeadState) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Сілтемені алдым, рақмет. Деректерді сақтадым, команда парақшаны қарап, ролик идеясын нақтылайды."
+	case "en":
+		return "Got the link, thank you. I saved the context, and the team will review the page for the video idea."
+	default:
+		if summary := leadBriefSummaryRU(lead); summary != "" {
+			return "Ссылку получил, спасибо. Зафиксировал: " + summary + "."
+		}
+		return "Ссылку получил, спасибо. Данные сохранил, команда посмотрит страницу и уточнит идею ролика."
+	}
+}
+
+func frustrationNextQuestionText(language string, lead LeadState, nextQuestion string) string {
+	nextQuestion = strings.TrimSpace(nextQuestion)
+	if nextQuestion == "" {
+		nextQuestion = BriefContextReturnText(language)
+	}
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Дұрыс айтасыз, қайталамаймын. " + nextQuestion
+	case "en":
+		return "You are right, I will not repeat it. " + nextQuestion
+	default:
+		if summary := leadBriefSummaryRU(lead); summary != "" {
+			return "Вы правы, данные уже есть. Зафиксировал: " + summary + ". Уточню только недостающее: " + lowerFirst(nextQuestion)
+		}
+		return "Вы правы, не буду повторять анкету. Уточню только недостающее: " + lowerFirst(nextQuestion)
+	}
+}
+
+func leadBriefSummaryRU(lead LeadState) string {
+	parts := make([]string, 0, 5)
+	if value := strings.TrimSpace(lead.ProductOrService); value != "" {
+		parts = append(parts, value)
+	} else if value := strings.TrimSpace(lead.Niche); value != "" {
+		parts = append(parts, value)
+	}
+	if value := strings.TrimSpace(lead.StrongSide); value != "" {
+		parts = append(parts, "сильная сторона — "+value)
+	}
+	if value := strings.TrimSpace(lead.TargetAudience); value != "" {
+		parts = append(parts, "клиенты — "+value)
+	}
+	if value := strings.TrimSpace(lead.Offer); value != "" {
+		parts = append(parts, "оффер — "+value)
+	}
+	if value := strings.TrimSpace(lead.WebsiteOrInstagram); value != "" {
+		parts = append(parts, "сайт/ссылка — "+value)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func ObjectionText(language string) string {

@@ -364,6 +364,10 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		s.info("state machine opt out stopped silently", zap.String("chat_hash", chatFingerprint(chatID)))
 		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut, true)
 	}
+	if analysis.Intent == IntentFrustration {
+		s.info("state machine handling customer frustration without restarting questionnaire", zap.String("chat_hash", chatFingerprint(chatID)))
+		return s.handleFrustrationReply(ctx, chatID, language, conversation)
+	}
 	if analysis.Intent == IntentNegativeReaction || analysis.Frustrated || (analysis.ShouldStop && analysis.ShouldHandoff) {
 		s.info("state machine negative reaction stopped silently", zap.String("chat_hash", chatFingerprint(chatID)))
 		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerNegative, false)
@@ -2866,19 +2870,54 @@ func formatAdviceFollowupText(language string, conversation Conversation) string
 func (s *Service) handleBusinessLink(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
 	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested || conversation.QuestionnaireOfferSent {
 		s.recordBriefMessage(chatID, text, analysis)
-		return s.sendAndRemember(ctx, chatID, LinkReceivedBriefText(language), StageBriefRequested, selectedLevelFromConversation(conversation), fieldBrief)
+		return s.continueBriefAfterSavedMessage(ctx, chatID, language)
 	}
 	stage := ClientStateAwaitingQualification
 	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
 		stage = ClientStatePackagesPresented
 	}
-	if len(qualificationMissingFields(conversation.Lead)) == 0 {
-		return s.sendAndRemember(ctx, chatID, LinkReceivedBriefText(language), stage, selectedLevelFromConversation(conversation), fieldBrief)
+	if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
+		message := briefLinkAcknowledgedNextQuestion(language, qualificationFollowupText(language, conversation))
+		return s.sendAndRemember(ctx, chatID, message, stage, selectedLevelFromConversation(conversation), qualificationFollowupAskedFields(message, missing)...)
 	}
-	return s.sendAndRemember(ctx, chatID, LinkReceivedQualificationText(language), stage, selectedLevelFromConversation(conversation), qualificationMissingFields(conversation.Lead)...)
+	message := linkReceivedWithKnownFieldsText(language, conversation.Lead)
+	return s.sendAndRemember(ctx, chatID, message, stage, selectedLevelFromConversation(conversation), fieldBrief)
+}
+
+func (s *Service) handleFrustrationReply(ctx context.Context, chatID string, language string, conversation Conversation) error {
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	level := selectedLevelFromConversation(latest)
+	if latest.Stage == StageBriefRequested || latest.QuestionnaireSent || latest.Lead.BriefRequested {
+		status := briefCompletionStatus(latest)
+		if status.complete {
+			if managerQualificationForConversation(latest).Ready {
+				return s.completeBriefAndHandoff(ctx, chatID, language, level)
+			}
+			return s.askMissingBeforeManager(ctx, chatID, language, latest, requiredLeadMissingFields(latest))
+		}
+		next := status.nextQuestion
+		if strings.TrimSpace(next) == "" {
+			next = BriefContextReturnText(language)
+		}
+		return s.sendAndRemember(ctx, chatID, frustrationNextQuestionText(language, latest.Lead, next), StageBriefRequested, level, fieldBrief)
+	}
+	if missing := qualificationMissingFields(latest.Lead); len(missing) > 0 {
+		reply := qualificationFollowupText(language, latest)
+		return s.sendAndRemember(ctx, chatID, frustrationNextQuestionText(language, latest.Lead, reply), ClientStateAwaitingQualification, level, qualificationFollowupAskedFields(reply, missing)...)
+	}
+	if managerQualificationForConversation(latest).Ready {
+		return s.sendQualifiedLeadHandoff(ctx, chatID, language, level)
+	}
+	return s.askMissingBeforeManager(ctx, chatID, language, latest, requiredLeadMissingFields(latest))
 }
 
 func leadHasBusinessLink(lead LeadState) bool {
+	if strings.TrimSpace(lead.WebsiteOrInstagram) != "" || len(lead.ReferenceLinks) > 0 {
+		return true
+	}
 	return extractBusinessLink(strings.Join([]string{lead.Notes, lead.FreeText}, " ")) != ""
 }
 

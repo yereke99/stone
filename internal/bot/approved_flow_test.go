@@ -171,6 +171,115 @@ func TestBriefRequestedCompleteAnswerHandsOff(t *testing.T) {
 	}
 }
 
+func TestBriefRequestedSamrukMultilineThenWebsiteAsksOnlyGoal(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-samruk-brief"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+	})
+
+	sendText(t, service, chatID, "мед услуги для b2b\nопыт в крупных проектах\nкрупные компании в сфере производства, промышленность, добыча, строительство и тд\nнет оффера")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche == "" || conversation.Lead.ProductOrService == "" || conversation.Lead.StrongSide == "" || conversation.Lead.TargetAudience == "" || conversation.Lead.Offer == "" {
+		t.Fatalf("brief facts were not saved: %#v", conversation.Lead)
+	}
+	firstReply := sender.messages[len(sender.messages)-1]
+	if strings.Contains(firstReply, "Кто ваш клиент") || strings.Contains(firstReply, "Что продаёте") || strings.Contains(firstReply, "В чём ваша сильная сторона") {
+		t.Fatalf("bot repeated answered brief fields: %q", firstReply)
+	}
+	if !strings.Contains(firstReply, "Какая цель ролика") {
+		t.Fatalf("bot did not ask only goal after complete brief facts: %q", firstReply)
+	}
+
+	sendText(t, service, chatID, "https://samruk-med.kz/")
+
+	conversation = snapshotConversation(t, store, chatID)
+	if conversation.Lead.WebsiteOrInstagram != "https://samruk-med.kz/" {
+		t.Fatalf("website was not saved: %q", conversation.Lead.WebsiteOrInstagram)
+	}
+	lastReply := sender.messages[len(sender.messages)-1]
+	if strings.Contains(lastReply, "Кто ваш клиент") || strings.Contains(lastReply, "Что продаёте") || strings.Contains(lastReply, "В чём ваша сильная сторона") {
+		t.Fatalf("bot repeated questionnaire after website: %q", lastReply)
+	}
+	if !strings.Contains(lastReply, "Ссылку получил") || !strings.Contains(lastReply, "Какая цель ролика") {
+		t.Fatalf("website reply should acknowledge link and ask only goal: %q", lastReply)
+	}
+}
+
+func TestBriefRequestedInstagramReferenceIsSavedWithoutQuestionnaireRestart(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-instagram-reference"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "мебель"
+		conversation.Lead.Goal = "получать заявки"
+		conversation.Lead.SelectedPackage = "basic"
+		conversation.SelectedLevel = 2
+	})
+
+	sendText(t, service, chatID, "референс https://www.instagram.com/reel/ABC123/")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if len(conversation.Lead.ReferenceLinks) == 0 || !strings.Contains(conversation.Lead.ReferenceLinks[0], "instagram.com/reel") {
+		t.Fatalf("reference link was not saved: %#v", conversation.Lead.ReferenceLinks)
+	}
+	lastReply := sender.messages[len(sender.messages)-1]
+	if strings.Contains(lastReply, BriefText("ru")) || strings.Contains(lastReply, "Что продаёте") || strings.Contains(lastReply, "Кто ваш клиент") {
+		t.Fatalf("instagram reference restarted questionnaire: %q", lastReply)
+	}
+}
+
+func TestBriefRequestedFrustrationDoesNotRepeatQuestionnaire(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t), "77019519013@c.us")
+	chatID := "chat-frustrated-brief"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = StageBriefRequested
+		conversation.QuestionnaireSent = true
+		conversation.WantsQuestionnaire = true
+		conversation.Lead.WantsQuestionnaire = true
+		conversation.Lead.BriefRequested = true
+		conversation.Lead.Niche = "мед услуги для b2b"
+		conversation.Lead.ProductOrService = "мед услуги для b2b"
+		conversation.Lead.StrongSide = "опыт в крупных проектах"
+		conversation.Lead.TargetAudience = "крупные компании в сфере производства, промышленность, добыча, строительство"
+		conversation.Lead.Offer = "нет текущего оффера"
+		conversation.Lead.WebsiteOrInstagram = "https://samruk-med.kz/"
+		conversation.Lead.SelectedPackage = "standard"
+		conversation.SelectedLevel = 3
+	})
+
+	sendText(t, service, chatID, "дорогой бот читай внимательно")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Stopped || conversation.AutomationClosed || conversation.HandedOffToOwner {
+		t.Fatalf("frustration should not silently stop/handoff incomplete brief: stage=%q stopped=%v closed=%v handed=%v", conversation.Stage, conversation.Stopped, conversation.AutomationClosed, conversation.HandedOffToOwner)
+	}
+	lastReply := sender.messages[len(sender.messages)-1]
+	if !strings.Contains(lastReply, "Вы правы") || !strings.Contains(strings.ToLower(lastReply), "цель ролика") {
+		t.Fatalf("frustration reply should acknowledge and ask only goal: %q", lastReply)
+	}
+	if strings.Contains(lastReply, "Кто ваш клиент") || strings.Contains(lastReply, "Что продаёте") || strings.Contains(lastReply, "В чём ваша сильная сторона") {
+		t.Fatalf("frustration reply repeated questionnaire: %q", lastReply)
+	}
+}
+
 func TestBriefRequestedObservedAnswerWithNetuHandsOff(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()

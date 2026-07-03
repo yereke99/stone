@@ -18,21 +18,25 @@ Use Russian, Kazakh, English, and mixed informal WhatsApp text. Treat every shor
 Return valid JSON only. Do not write a free-form chatbot reply. Do not invent facts.
 
 Your job:
-- extract structured facts from the latest customer message and conversation context;
+- extract structured facts from the latest customer message and conversation context before any reply is chosen;
 - merge meaning with existing lead state mentally, but never overwrite good existing values with null;
 - never ask for a field that is already known;
 - identify direct requests for examples, packages/options, price, deadline, human manager, or questionnaire.
 
 Fields:
 - language: ru, kk, en, mixed, or unknown.
-- intent: greeting, qualification_answer, asks_examples, asks_packages, asks_price, asks_discount, asks_deadline, asks_duration, asks_human, ready_to_order, defer, unclear, or irrelevant.
+- intent: greeting, qualification_answer, provide_link, provide_reference, asks_examples, asks_packages, asks_price, asks_discount, free_test_request, asks_deadline, asks_duration, asks_human, ready_to_order, defer, frustration, unclear, or irrelevant.
 - niche: business category or product niche if known.
 - goal: business/video goal if known.
 - deadline: launch or production deadline if known.
 - platform: advertising/use context such as Instagram, TikTok, site, or advertising.
 - product_or_service: concrete product/service if present.
+- strong_side: USP / strongest side / experience / advantage, if present.
 - target_audience: who the customer's clients are, if the customer describes them.
+- offer: current offer/promo/discount, including "no current offer" when the customer says there is none.
 - website_or_instagram: website, Instagram handle, or business link if present.
+- reference_links: all site, Instagram, TikTok, reel, video, or reference links from incoming.text only.
+- budget: budget/price objection/free-test context if present.
 - package_interest: test, basic, standard, unknown, or null.
 - asks_for_food_examples: true when the customer asks whether food/farm-product videos/examples exist.
 - asks_for_more_options: true when the customer asks for more execution/package/format options.
@@ -43,14 +47,21 @@ Fields:
 
 Rules:
 - Understand answers even if they are not formal sentences.
+- The current incoming.text is primary. quoted_text and quoted_caption are context only.
 - The input JSON may contain incoming.quoted_text / quoted_caption: this is the message the customer replied to (usually the bot's own earlier question). Use it ONLY as context to understand which question the customer is answering. NEVER extract niche/goal/deadline/audience from the quoted text itself; extract facts only from incoming.text.
-- Multiline natural replies often answer several questions at once: extract niche/products from product lines and audience from client lines. "Плиточные клея, шпаклёвка, штукатурка и т.д." is a niche/products answer (construction/finishing materials). "Основные клиенты строительные компании, частники" is target_audience, NOT a goal.
+- Multiline natural replies often answer several questions at once: extract niche/products from product lines, strong_side from advantage/experience lines, audience from client/company lines, and offer from promo/no-offer lines.
+- "мед услуги для b2b / опыт в крупных проектах / крупные компании в сфере производства, промышленность, добыча, строительство / нет оффера" means niche/product_or_service = B2B medical services / industrial medicine, strong_side = experience in large projects, target_audience = large companies in manufacturing/industry/mining/construction, offer = no current offer.
+- "Плиточные клея, шпаклёвка, штукатурка и т.д." is a niche/products answer (construction/finishing materials). "Основные клиенты строительные компании, частники" is target_audience, NOT a goal.
 - "По рекламе" is platform/context, not the product niche.
 - "Пылесосы" can be the niche/product.
 - "Продажи" is a goal.
 - "Через 2 дня" is a deadline only when the customer volunteers timing; never ask for it.
 - Food/farm products count as a valid niche.
 - A website or Instagram handle is business context.
+- A URL-only message is useful context/reference material: intent "provide_link" or "provide_reference"; save the link and never restart the questionnaire.
+- Instagram reels, TikTok, video URLs, and reference examples are reference material: intent "provide_reference"; save the link and do not restart the questionnaire.
+- Frustrated messages like "дорогой бот читай внимательно" are intent "frustration"; do not classify them as stop/unsubscribe unless the customer explicitly asks not to be messaged.
+- Free-test/discount requests like "давайте попробуем если бесплатно" are intent "free_test_request" or "asks_discount"; never promise free work.
 - If niche + goal are known, missing_fields must be [].
 - "Хронометраж видео какой", "сколько секунд ролик", "длина видео какая" are direct questions about the video duration: intent "asks_duration" with niche=null and goal=null. NEVER save such question text as a niche or a goal.
 - NEVER classify a greeting as a niche: "доброе утро", "добрый день", "здравствуйте", "привет", "салем" are intent "greeting" with niche=null.
@@ -70,7 +81,7 @@ Input:
 Продажи
 Через 2 дня"
 Expected:
-{"language":"ru","intent":"qualification_answer","niche":"пылесосы","goal":"продажи","deadline":"через 2 дня","platform":"реклама","product_or_service":"пылесосы","website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.95}
+{"language":"ru","intent":"qualification_answer","niche":"пылесосы","goal":"продажи","deadline":"через 2 дня","platform":"реклама","product_or_service":"пылесосы","strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.95}
 
 Example 2:
 Input:
@@ -78,25 +89,25 @@ Input:
 Фермерские продукты.
 superferma.kz наш инстаграмм"
 Expected:
-{"language":"ru","intent":"asks_examples","niche":"фермерские продукты / еда","goal":null,"deadline":null,"platform":null,"product_or_service":"фермерские продукты","website_or_instagram":"superferma.kz","package_interest":null,"asks_for_food_examples":true,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.9}
+{"language":"ru","intent":"asks_examples","niche":"фермерские продукты / еда","goal":null,"deadline":null,"platform":null,"product_or_service":"фермерские продукты","strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":"superferma.kz","reference_links":["superferma.kz"],"budget":null,"package_interest":null,"asks_for_food_examples":true,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.9}
 
 Example 4:
 Input:
 "Доброе утро"
 Expected:
-{"language":"ru","intent":"greeting","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}
+{"language":"ru","intent":"greeting","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}
 
 Example 5:
 Input:
 "Есть кейсы?"
 Expected:
-{"language":"ru","intent":"asks_examples","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.9}
+{"language":"ru","intent":"asks_examples","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.9}
 
 Example 3:
 Input:
 "в целом интересно, давайте еще варианты исполнения подумаем"
 Expected:
-{"language":"ru","intent":"asks_packages","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"website_or_instagram":null,"package_interest":"unknown","asks_for_food_examples":false,"asks_for_more_options":true,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.85}
+{"language":"ru","intent":"asks_packages","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":"unknown","asks_for_food_examples":false,"asks_for_more_options":true,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.85}
 
 Example 6 (reply to a quoted bot question):
 Input text:
@@ -104,13 +115,22 @@ Input text:
 Основные клиенты строительные компании, частники!"
 Quoted text (context only): "Чтобы предложить точный формат, напишите, пожалуйста, что именно продвигаем, кто ваша аудитория и какая цель: заявки, продажи или узнаваемость."
 Expected:
-{"language":"ru","intent":"qualification_answer","niche":"строительные и отделочные материалы (плиточный клей, шпаклёвка, штукатурка)","goal":null,"deadline":null,"platform":null,"product_or_service":"плиточный клей, шпаклёвка, штукатурка","target_audience":"строительные компании и частники","website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.93}
+{"language":"ru","intent":"qualification_answer","niche":"строительные и отделочные материалы (плиточный клей, шпаклёвка, штукатурка)","goal":null,"deadline":null,"platform":null,"product_or_service":"плиточный клей, шпаклёвка, штукатурка","strong_side":null,"target_audience":"строительные компании и частники","offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.93}
 
 Example 7:
 Input:
 "Хронометраж видео какой"
 Expected:
-{"language":"ru","intent":"asks_duration","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"target_audience":null,"website_or_instagram":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}`
+{"language":"ru","intent":"asks_duration","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}
+
+Example 8:
+Input:
+"мед услуги для b2b
+опыт в крупных проектах
+крупные компании в сфере производства, промышленность, добыча, строительство и тд
+нет оффера"
+Expected:
+{"language":"ru","intent":"qualification_answer","niche":"мед услуги для b2b","goal":null,"deadline":null,"platform":null,"product_or_service":"мед услуги для b2b","strong_side":"опыт в крупных проектах","target_audience":"крупные компании в сфере производства, промышленность, добыча, строительство","offer":"нет текущего оффера","website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.95}`
 
 func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, msg IncomingMessage, text string, language string, conversation Conversation) (CustomerAnalysis, bool) {
 	fallback := AnalyzeCustomerMessage(text, conversation.Lead, language)
@@ -254,8 +274,26 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 				analysis.Niche = stringPointer(normalizeNiche(value))
 			}
 		}
+		if value := normalizedAIString(firstStringPointer(understanding.StrongSide, understanding.Extracted.StrongSide)); value != "" {
+			analysis.StrongSide = stringPointer(value)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.Offer, understanding.Extracted.Offer)); value != "" {
+			analysis.Offer = stringPointer(value)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.Budget, understanding.Extracted.Budget)); value != "" {
+			analysis.Budget = stringPointer(value)
+		}
 		if value := normalizedAIString(understanding.WebsiteOrInstagram); value != "" {
 			analysis.BusinessLink = stringPointer(value)
+		}
+		if value := normalizedAIString(understanding.Extracted.BusinessLink); value != "" && analysis.BusinessLink == nil {
+			analysis.BusinessLink = stringPointer(value)
+		}
+		for _, link := range understanding.ReferenceLinks {
+			analysis.ReferenceLinks = appendUniqueString(analysis.ReferenceLinks, link)
+		}
+		if analysis.BusinessLink != nil {
+			analysis.ReferenceLinks = appendUniqueString(analysis.ReferenceLinks, *analysis.BusinessLink)
 		}
 		if value := normalizePackageInterest(normalizedAIString(firstStringPointer(understanding.PackageInterest, understanding.Extracted.PackageInterest))); value != "" {
 			analysis.PackageInterest = stringPointer(value)
@@ -272,6 +310,8 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		if analysis.HasBusinessSignal() {
 			analysis.Intent = IntentAnswer
 		}
+	case "provide_link", "provide_reference":
+		analysis.Intent = IntentBusinessLink
 	case "asks_examples":
 		analysis.Intent = IntentPortfolioRequest
 	case "asks_packages":
@@ -279,7 +319,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.AsksForMoreOptions = true
 	case "asks_price":
 		analysis.Intent = IntentPriceQuestion
-	case "asks_discount":
+	case "asks_discount", "free_test_request":
 		analysis.Intent = IntentObjection
 	case "asks_deadline":
 		analysis.Intent = IntentDeadlineQuestion
@@ -300,6 +340,9 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.Intent = IntentHumanRequest
 	case "negative_reaction":
 		analysis.Intent = IntentNegativeReaction
+	case "frustration":
+		analysis.Intent = IntentFrustration
+		analysis.Frustrated = true
 	case "stop":
 		analysis.Intent = IntentMute
 	case "provide_info":
@@ -312,8 +355,11 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.Intent = IntentOther
 	}
 
-	if understanding.Sentiment.Negative || understanding.Sentiment.Frustrated || understanding.Sentiment.WantsToStop {
+	if understanding.Sentiment.Negative || understanding.Sentiment.WantsToStop {
 		analysis.Intent = IntentNegativeReaction
+		analysis.Frustrated = true
+	} else if understanding.Sentiment.Frustrated {
+		analysis.Intent = IntentFrustration
 		analysis.Frustrated = true
 	}
 	if strings.TrimSpace(understanding.Intent) == "defer" {
@@ -382,6 +428,17 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	}
 	if ai.ProductOrService != nil {
 		result.ProductOrService = ai.ProductOrService
+	}
+	if ai.StrongSide != nil {
+		result.StrongSide = ai.StrongSide
+	}
+	if ai.Offer != nil {
+		result.Offer = ai.Offer
+	}
+	if len(ai.ReferenceLinks) > 0 {
+		for _, link := range ai.ReferenceLinks {
+			result.ReferenceLinks = appendUniqueString(result.ReferenceLinks, link)
+		}
 	}
 	if ai.BusinessLink != nil {
 		result.BusinessLink = ai.BusinessLink
@@ -484,8 +541,17 @@ func extractedAnalysisFields(analysis CustomerAnalysis) []string {
 	if analysis.ProductOrService != nil {
 		fields = append(fields, "product_or_service")
 	}
+	if analysis.StrongSide != nil {
+		fields = append(fields, "strong_side")
+	}
+	if analysis.Offer != nil {
+		fields = append(fields, "offer")
+	}
 	if analysis.BusinessLink != nil {
 		fields = append(fields, "website_or_instagram")
+	}
+	if len(analysis.ReferenceLinks) > 0 {
+		fields = append(fields, "reference_links")
 	}
 	if analysis.PackageInterest != nil || analysis.SelectedLevel > 0 {
 		fields = append(fields, fieldPackageInterest)

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,39 @@ func TestBusinessMessagesAreExtracted(t *testing.T) {
 				t.Fatalf("AnalyzeCustomerMessage(%q) overwrote niche with %q", text, *analysis.Niche)
 			}
 		})
+	}
+}
+
+func TestSamrukStyleMultilineBriefFactsAreExtracted(t *testing.T) {
+	text := "мед услуги для b2b\nопыт в крупных проектах\nкрупные компании в сфере производства, промышленность, добыча, строительство и тд\nнет оффера"
+
+	analysis := AnalyzeCustomerMessage(text, LeadState{}, "ru")
+	lead := LeadState{}
+	lead.ApplyAnalysis(analysis)
+
+	if analysis.Niche == nil || !strings.Contains(normalizeForAnalysis(*analysis.Niche), "мед") {
+		t.Fatalf("niche = %#v, want B2B medical services", analysis.Niche)
+	}
+	if lead.ProductOrService == "" || !strings.Contains(normalizeForAnalysis(lead.ProductOrService), "b2b") {
+		t.Fatalf("product_or_service = %q, want B2B medical services", lead.ProductOrService)
+	}
+	if lead.StrongSide == "" || !strings.Contains(normalizeForAnalysis(lead.StrongSide), "опыт") {
+		t.Fatalf("strong_side = %q, want experience in large projects", lead.StrongSide)
+	}
+	audience := normalizeForAnalysis(lead.TargetAudience)
+	for _, want := range []string{"крупные компании", "производства", "промышленность", "добыча", "строительство"} {
+		if !strings.Contains(audience, want) {
+			t.Fatalf("target_audience = %q, want it to contain %q", lead.TargetAudience, want)
+		}
+	}
+	if lead.Offer == "" || !strings.Contains(normalizeForAnalysis(lead.Offer), "нет") {
+		t.Fatalf("offer = %q, want no current offer", lead.Offer)
+	}
+	if analysis.Intent != IntentAnswer {
+		t.Fatalf("intent = %q, want answer", analysis.Intent)
+	}
+	if !sameFields(analysis.MissingFields, []string{fieldGoal}) {
+		t.Fatalf("missing fields = %#v, want only goal", analysis.MissingFields)
 	}
 }
 
@@ -343,6 +377,54 @@ func TestCasesRequestWithQualifiedLeadSendsExamples(t *testing.T) {
 		if strings.Contains(lower, "что продаёте") || strings.Contains(lower, "какая у вас ниша") {
 			t.Fatalf("bot re-asked qualification for a qualified lead: %q", message)
 		}
+	}
+}
+
+func TestExamplesRequestSendsThreePortfolioVideosWithCaptionsOnce(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-examples-captioned"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Stage = ClientStateAwaitingQualification
+		conversation.InitialMessageSent = true
+		conversation.Lead.Niche = "мебель"
+		conversation.Lead.Goal = "получать заявки"
+	})
+
+	sendText(t, service, chatID, "покажите примеры")
+
+	if len(sender.files) != 3 {
+		t.Fatalf("files = %#v, want three local portfolio videos", sender.files)
+	}
+	for i, want := range []string{VideoLevel1, VideoLevel2, VideoLevel3} {
+		if got := filepath.Base(sender.files[i]); got != want {
+			t.Fatalf("file[%d] = %q, want %q", i, got, want)
+		}
+	}
+	if len(sender.captions) != 3 {
+		t.Fatalf("captions = %#v, want one caption per video upload", sender.captions)
+	}
+	for i, caption := range sender.captions {
+		if strings.TrimSpace(caption) == "" {
+			t.Fatalf("caption[%d] is empty", i)
+		}
+	}
+	if !strings.Contains(sender.captions[0], "Тестовый формат") ||
+		!strings.Contains(sender.captions[1], "Базовый формат") ||
+		!strings.Contains(sender.captions[2], "Стандарт") {
+		t.Fatalf("captions do not match package videos: %#v", sender.captions)
+	}
+	if countMessagesContaining(sender.messages, "Тестовый формат") != 0 ||
+		countMessagesContaining(sender.messages, "Базовый формат") != 0 ||
+		countMessagesContaining(sender.messages, "Стандарт (премиум") != 0 {
+		t.Fatalf("video captions were sent as standalone text: %#v", sender.messages)
+	}
+
+	sendText(t, service, chatID, "покажите примеры")
+
+	if len(sender.files) != 3 {
+		t.Fatalf("portfolio videos repeated without explicit repeat request: %#v", sender.files)
 	}
 }
 

@@ -50,8 +50,12 @@ type CustomerUnderstanding struct {
 	Deadline              *string  `json:"deadline"`
 	Platform              *string  `json:"platform"`
 	ProductOrService      *string  `json:"product_or_service"`
+	StrongSide            *string  `json:"strong_side"`
 	TargetAudience        *string  `json:"target_audience"`
+	Offer                 *string  `json:"offer"`
 	WebsiteOrInstagram    *string  `json:"website_or_instagram"`
+	ReferenceLinks        []string `json:"reference_links"`
+	Budget                *string  `json:"budget"`
 	PackageInterest       *string  `json:"package_interest"`
 	AsksForFoodExamples   bool     `json:"asks_for_food_examples"`
 	AsksForMoreOptions    bool     `json:"asks_for_more_options"`
@@ -76,6 +80,10 @@ type CustomerUnderstandingExtracted struct {
 	Deadline        *string `json:"deadline"`
 	Platform        *string `json:"platform"`
 	TargetAudience  *string `json:"target_audience"`
+	StrongSide      *string `json:"strong_side"`
+	Offer           *string `json:"offer"`
+	BusinessLink    *string `json:"business_link"`
+	Budget          *string `json:"budget"`
 	PackageInterest *string `json:"package_interest"`
 }
 

@@ -299,8 +299,20 @@ func buildConversationSummary(conversation Conversation) string {
 	if strings.TrimSpace(lead.ProductOrService) != "" && !strings.EqualFold(strings.TrimSpace(lead.ProductOrService), strings.TrimSpace(lead.Niche)) {
 		parts = append(parts, "продукт: "+strings.TrimSpace(lead.ProductOrService))
 	}
+	if strings.TrimSpace(lead.StrongSide) != "" {
+		parts = append(parts, "сильная сторона: "+strings.TrimSpace(lead.StrongSide))
+	}
+	if strings.TrimSpace(lead.TargetAudience) != "" {
+		parts = append(parts, "аудитория: "+strings.TrimSpace(lead.TargetAudience))
+	}
+	if strings.TrimSpace(lead.Offer) != "" {
+		parts = append(parts, "оффер: "+strings.TrimSpace(lead.Offer))
+	}
 	if strings.TrimSpace(lead.WebsiteOrInstagram) != "" {
 		parts = append(parts, "ссылка: "+strings.TrimSpace(lead.WebsiteOrInstagram))
+	}
+	if len(lead.ReferenceLinks) > 0 {
+		parts = append(parts, "референсы: "+strings.Join(lead.ReferenceLinks, ", "))
 	}
 	if isValidPackageInterest(lead.SelectedPackage) {
 		parts = append(parts, "пакет: "+adminPackageLabel(lead.SelectedPackage))

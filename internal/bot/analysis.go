@@ -30,6 +30,7 @@ const (
 	IntentReadyToOrder     = "ready_to_order"
 	IntentObjection        = "objection"
 	IntentDefer            = "defer"
+	IntentFrustration      = "frustration"
 	IntentNegativeReaction = "negative_reaction"
 	IntentBriefAnswer      = "brief_answer"
 	IntentHumanRequest     = "human_request"
@@ -56,7 +57,10 @@ type LeadState struct {
 	Budget             string   `json:"budget,omitempty"`
 	PriceInterest      bool     `json:"price_interest,omitempty"`
 	ProductOrService   string   `json:"product_or_service,omitempty"`
+	StrongSide         string   `json:"strong_side,omitempty"`
+	Offer              string   `json:"offer,omitempty"`
 	WebsiteOrInstagram string   `json:"website_or_instagram,omitempty"`
+	ReferenceLinks     []string `json:"reference_links,omitempty"`
 	SelectedPackage    string   `json:"selected_package,omitempty"`
 	WantsQuestionnaire bool     `json:"wants_questionnaire,omitempty"`
 	ClientName         string   `json:"client_name,omitempty"`
@@ -82,7 +86,10 @@ type CustomerAnalysis struct {
 	Budget              *string  `json:"budget,omitempty"`
 	TargetAudience      *string  `json:"target_audience,omitempty"`
 	ProductOrService    *string  `json:"product_or_service,omitempty"`
+	StrongSide          *string  `json:"strong_side,omitempty"`
+	Offer               *string  `json:"offer,omitempty"`
 	BusinessLink        *string  `json:"business_link,omitempty"`
+	ReferenceLinks      []string `json:"reference_links,omitempty"`
 	Intent              string   `json:"intent"`
 	SelectedLevel       int      `json:"selected_level,omitempty"`
 	PackageInterest     *string  `json:"package_interest,omitempty"`
@@ -136,8 +143,17 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	if audience := extractTargetAudience(text); audience != "" {
 		analysis.TargetAudience = stringPointer(audience)
 	}
+	if strongSide := extractStrongSide(text); strongSide != "" {
+		analysis.StrongSide = stringPointer(strongSide)
+	}
+	if offer := extractOffer(text); offer != "" {
+		analysis.Offer = stringPointer(offer)
+	}
 	if link := extractBusinessLink(text); link != "" {
 		analysis.BusinessLink = stringPointer(link)
+	}
+	if links := extractReferenceLinks(text); len(links) > 0 {
+		analysis.ReferenceLinks = links
 	}
 	if facts := extractMessyQualificationFacts(text, current); facts.hasAny() {
 		if facts.niche != "" {
@@ -157,6 +173,12 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		}
 		if facts.audience != "" {
 			analysis.TargetAudience = stringPointer(facts.audience)
+		}
+		if facts.strongSide != "" {
+			analysis.StrongSide = stringPointer(facts.strongSide)
+		}
+		if facts.offer != "" {
+			analysis.Offer = stringPointer(facts.offer)
 		}
 	}
 	analysis.AsksForFoodExamples = foodExampleRequest
@@ -191,6 +213,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	switch {
 	case isMuteRequest(normalized):
 		analysis.Intent = IntentMute
+	case isFrustrationComplaint(normalized):
+		analysis.Intent = IntentFrustration
+		analysis.Frustrated = true
 	case isNegativeReaction(normalized):
 		analysis.Intent = IntentNegativeReaction
 		analysis.Frustrated = true
@@ -223,6 +248,8 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentPackageSelection
 	case deferRequest:
 		analysis.Intent = IntentDefer
+	case isFreeTestRequest(normalized):
+		analysis.Intent = IntentObjection
 	case readySignal || questionnaireIntent:
 		analysis.Intent = IntentReadyToOrder
 	case containsObjection(text):
@@ -260,9 +287,12 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 		a.Budget != nil ||
 		a.TargetAudience != nil ||
 		a.ProductOrService != nil ||
+		a.StrongSide != nil ||
+		a.Offer != nil ||
 		a.SelectedLevel > 0 ||
 		a.PackageInterest != nil ||
 		a.BusinessLink != nil ||
+		len(a.ReferenceLinks) > 0 ||
 		a.WantsQuestionnaire
 }
 
@@ -306,9 +336,23 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 			s.Niche = s.ProductOrService
 		}
 	}
+	if analysis.StrongSide != nil && strings.TrimSpace(*analysis.StrongSide) != "" {
+		s.StrongSide = strings.TrimSpace(*analysis.StrongSide)
+	}
+	if analysis.Offer != nil && strings.TrimSpace(*analysis.Offer) != "" {
+		s.Offer = strings.TrimSpace(*analysis.Offer)
+	}
 	if analysis.BusinessLink != nil && strings.TrimSpace(*analysis.BusinessLink) != "" {
 		s.WebsiteOrInstagram = strings.TrimSpace(*analysis.BusinessLink)
 		s.Notes = appendBriefText(s.Notes, "Ссылка: "+s.WebsiteOrInstagram)
+	}
+	for _, link := range analysis.ReferenceLinks {
+		link = strings.TrimSpace(link)
+		if link == "" {
+			continue
+		}
+		s.ReferenceLinks = appendUniqueString(s.ReferenceLinks, link)
+		s.Notes = appendBriefText(s.Notes, "Референс: "+link)
 	}
 	if updateQualificationFields && analysis.PackageInterest != nil && isValidPackageInterest(*analysis.PackageInterest) {
 		s.SelectedPackage = normalizePackageInterest(*analysis.PackageInterest)
@@ -383,7 +427,10 @@ func (s LeadState) PromptJSON(stage string) string {
 		ClientName         *string  `json:"client_name"`
 		TargetAudience     *string  `json:"target_audience"`
 		ProductOrService   *string  `json:"product_or_service"`
+		StrongSide         *string  `json:"strong_side"`
+		Offer              *string  `json:"offer"`
 		WebsiteOrInstagram *string  `json:"website_or_instagram"`
+		ReferenceLinks     []string `json:"reference_links"`
 		Notes              *string  `json:"notes"`
 		FreeText           *string  `json:"free_text"`
 		PortfolioSent      bool     `json:"portfolio_sent"`
@@ -410,7 +457,10 @@ func (s LeadState) PromptJSON(stage string) string {
 		ClientName:         nullableString(s.ClientName),
 		TargetAudience:     nullableString(s.TargetAudience),
 		ProductOrService:   nullableString(s.ProductOrService),
+		StrongSide:         nullableString(s.StrongSide),
+		Offer:              nullableString(s.Offer),
 		WebsiteOrInstagram: nullableString(s.WebsiteOrInstagram),
+		ReferenceLinks:     append([]string(nil), s.ReferenceLinks...),
 		Notes:              nullableString(s.Notes),
 		FreeText:           nullableString(s.FreeText),
 		PortfolioSent:      s.PortfolioSent,
@@ -423,6 +473,9 @@ func (s LeadState) PromptJSON(stage string) string {
 	}
 	if summary.Platforms == nil {
 		summary.Platforms = []string{}
+	}
+	if summary.ReferenceLinks == nil {
+		summary.ReferenceLinks = []string{}
 	}
 	if summary.LeadStatus == "" {
 		summary.LeadStatus = LeadStatusNew
@@ -618,6 +671,69 @@ func audienceFromDescriptionLine(line string) string {
 	return normalized
 }
 
+func audienceLikeLine(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"крупные компании", "крупных компаний", "компании в сфере", "компании из сферы",
+		"производств", "промышлен", "добыч", "завод", "заводы", "корпоратив",
+		"b2b клиенты", "b2b клиент", "б2б клиенты", "б2б клиент", "для бизнеса",
+		"строительные компании", "компании строитель", "частники",
+	})
+}
+
+func cleanAudienceValue(line string) string {
+	value := audienceFromDescriptionLine(line)
+	if value == "" {
+		value = normalizeForAnalysis(line)
+	}
+	value = strings.Trim(value, " -—:;,.!?")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func briefStrengthLine(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	if containsAny(normalized, []string{
+		"сильн", "преимущ", "ценность", "отлич", "уникаль", "качество",
+		"гарант", "быстро", "на заказ", "опыт", "экспертиз", "premium", "преми",
+	}) {
+		return true
+	}
+	return strings.HasPrefix(normalized, "мы ") && containsAny(normalized, []string{"умеем", "делаем", "создаем", "создаём"})
+}
+
+func cleanBriefFactValue(value string) string {
+	value = normalizeForAnalysis(value)
+	for _, marker := range []string{
+		"сильная сторона", "преимущество", "преимущества", "главная ценность",
+		"ценность", "оффер", "офер", "акция", "скидка", "промо",
+	} {
+		value = strings.ReplaceAll(value, marker, " ")
+	}
+	value = strings.Trim(value, " -—:;,.!?")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func shortServiceLine(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" || strings.Contains(normalized, "?") {
+		return false
+	}
+	if normalizeGoal(normalized) != "" || normalizeDeadline(normalized) != "" {
+		return false
+	}
+	words := strings.Fields(normalized)
+	if len(words) == 0 || len(words) > 6 {
+		return false
+	}
+	return containsAny(normalized, []string{"услуг", "услуга", "сервис", "service", "services", "b2b", "b2c"})
+}
+
 func extractPlatforms(text string) []string {
 	normalized := normalizeForAnalysis(text)
 	platforms := make([]string, 0, 4)
@@ -777,11 +893,16 @@ func extractBudget(text string) string {
 func extractTargetAudience(text string) string {
 	normalized := normalizeForAnalysis(text)
 	if value := extractPrefixedValue(normalized, []string{
-		"аудитория", "ца", "target audience", "клиенты", "клиенттер",
+		"аудитория", "ца", "target audience", "клиенты", "клиенттер", "клиент", "client", "clients",
 	}, []string{
 		"ниша", "сфера", "сала", "цель", "максат", "goal", "срок", "сроки", "мерзим", "deadline", "площад", "platform",
 	}); value != "" {
 		return strings.Trim(value, " -—:;,.!?")
+	}
+	for _, line := range meaningfulMessageLines(text) {
+		if audienceLikeLine(normalizeForAnalysis(line)) {
+			return cleanAudienceValue(line)
+		}
 	}
 	if strings.Contains(normalized, "женщины 25") {
 		return "женщины 25+"
@@ -792,10 +913,63 @@ func extractTargetAudience(text string) string {
 	return ""
 }
 
+func extractStrongSide(text string) string {
+	for _, line := range meaningfulMessageLines(text) {
+		normalized := normalizeForAnalysis(line)
+		if normalized == "" || strings.Contains(normalized, "?") {
+			continue
+		}
+		if value := extractPrefixedValue(normalized, []string{
+			"сильная сторона", "сильная сторона у нас", "преимущество", "преимущества",
+			"главная ценность", "ценность", "usp", "strong side", "advantage",
+		}, []string{
+			"клиент", "клиенты", "аудитория", "ца", "оффер", "офер", "акция", "скидка",
+			"сайт", "instagram", "цель", "goal", "ниша", "сфера",
+		}); value != "" {
+			return cleanBriefFactValue(value)
+		}
+		if briefStrengthLine(normalized) {
+			return cleanBriefFactValue(line)
+		}
+	}
+	return ""
+}
+
+func extractOffer(text string) string {
+	for _, line := range meaningfulMessageLines(text) {
+		normalized := normalizeForAnalysis(line)
+		if normalized == "" || strings.Contains(normalized, "?") {
+			continue
+		}
+		if isNoOfferBriefAnswer(normalized) {
+			return "нет текущего оффера"
+		}
+		if value := extractPrefixedValue(normalized, []string{
+			"оффер", "офер", "акция", "скидка", "промо", "promo", "offer", "discount",
+		}, []string{
+			"клиент", "клиенты", "аудитория", "ца", "сайт", "instagram", "цель", "goal", "ниша", "сфера",
+		}); value != "" {
+			return cleanBriefFactValue(value)
+		}
+		if containsAny(normalized, []string{"скидк", "акци", "бонус", "подар", "рассроч"}) {
+			return cleanBriefFactValue(line)
+		}
+	}
+	return ""
+}
+
 func extractBusinessLink(text string) string {
+	links := extractReferenceLinks(text)
+	if len(links) > 0 {
+		return links[0]
+	}
+	return ""
+}
+
+func extractReferenceLinks(text string) []string {
 	normalized := strings.TrimSpace(text)
 	if normalized == "" {
-		return ""
+		return nil
 	}
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bhttps?://[^\s<>"']+`),
@@ -804,13 +978,17 @@ func extractBusinessLink(text string) string {
 		regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?:/[^\s<>"']*)?`),
 		regexp.MustCompile(`(?i)(?:^|\s)@[a-z0-9_.]{3,}`),
 	}
+	links := make([]string, 0, 2)
 	for _, pattern := range patterns {
-		match := pattern.FindString(normalized)
-		if strings.TrimSpace(match) != "" {
-			return strings.Trim(strings.TrimSpace(match), ".,;!?)(")
+		for _, match := range pattern.FindAllString(normalized, -1) {
+			link := strings.Trim(strings.TrimSpace(match), ".,;!?)(")
+			if link == "" {
+				continue
+			}
+			links = appendUniqueString(links, link)
 		}
 	}
-	return ""
+	return links
 }
 
 type messyQualificationFacts struct {
@@ -819,11 +997,13 @@ type messyQualificationFacts struct {
 	deadline         string
 	productOrService string
 	audience         string
+	strongSide       string
+	offer            string
 	platforms        []string
 }
 
 func (f messyQualificationFacts) hasAny() bool {
-	return f.niche != "" || f.goal != "" || f.deadline != "" || f.productOrService != "" || f.audience != "" || len(f.platforms) > 0
+	return f.niche != "" || f.goal != "" || f.deadline != "" || f.productOrService != "" || f.audience != "" || f.strongSide != "" || f.offer != "" || len(f.platforms) > 0
 }
 
 func extractMessyQualificationFacts(text string, current LeadState) messyQualificationFacts {
@@ -853,11 +1033,25 @@ func extractMessyQualificationFacts(text string, current LeadState) messyQualifi
 		if strings.Contains(normalized, "?") {
 			continue
 		}
+		if facts.strongSide == "" && briefStrengthLine(normalized) {
+			facts.strongSide = cleanBriefFactValue(line)
+			continue
+		}
+		if facts.offer == "" {
+			if isNoOfferBriefAnswer(normalized) {
+				facts.offer = "нет текущего оффера"
+				continue
+			}
+			if containsAny(normalized, []string{"оффер", "офер", "акци", "скид", "бонус", "подар"}) {
+				facts.offer = cleanBriefFactValue(line)
+				continue
+			}
+		}
 		// Audience statements ("Основные клиенты строительные компании,
 		// частники") are stored as the audience and never as a goal/niche.
-		if isAudienceDescriptionText(normalized) && !hasExplicitGoalSignal(normalized) {
+		if (isAudienceDescriptionText(normalized) || audienceLikeLine(normalized)) && !hasExplicitGoalSignal(normalized) {
 			if facts.audience == "" {
-				facts.audience = audienceFromDescriptionLine(line)
+				facts.audience = cleanAudienceValue(line)
 			}
 			continue
 		}
@@ -947,6 +1141,9 @@ func shortProductOrNicheLine(line string, current LeadState) string {
 	}
 	if value := nicheFromProductEnumeration(line); value != "" {
 		return value
+	}
+	if shortServiceLine(normalized) {
+		return normalizeNiche(normalized)
 	}
 	if value := knownNicheFromText(normalized); value != "" {
 		return value
@@ -1052,6 +1249,17 @@ func containsPriceQuestion(normalized string) bool {
 	})
 }
 
+func isFreeTestRequest(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"если бесплатно", "бесплатно попроб", "попробуем бесплатно", "попробовать бесплатно",
+		"free test", "if free", "for free", "бесплатный тест", "тест бесплатно",
+	})
+}
+
 func containsDeadlineQuestion(normalized string) bool {
 	return strings.Contains(normalized, "?") && containsAny(normalized, []string{
 		"срок", "сроки", "когда", "успеете", "48", "мерзим", "кашан", "deadline", "timeline", "how long",
@@ -1064,6 +1272,19 @@ func isNegativeReaction(normalized string) bool {
 		"желание пропало", "пропало желание", "уже не интересно", "вообще не понимаете",
 		"не понимаете", "бот тупит", "бот тупой", "оставьте", "не надо", "стоп",
 		"шаршатты", "мазалама", "жоғал", "annoying", "stop asking", "not interested",
+	})
+}
+
+func isFrustrationComplaint(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"читай внимательно", "читать внимательно", "внимательно читай", "уже написал",
+		"уже писала", "я уже писал", "я уже писала", "данные уже есть", "не повторяй",
+		"сколько можно", "бот читай", "бот не понял", "бот не понимает", "дорогой бот",
+		"вы не читаете", "не читаете", "не понимаете", "бот тупит",
 	})
 }
 
@@ -1111,6 +1332,9 @@ func isAgreement(normalized string) bool {
 }
 
 func isRefusal(normalized string) bool {
+	if isNoOfferBriefAnswer(normalized) {
+		return false
+	}
 	return containsAny(normalized, []string{
 		"нет", "не надо", "не интересно", "не актуально", "отказыва", "жоқ", "керек емес", "no thanks", "not interested",
 	})
@@ -1464,7 +1688,8 @@ func knownNicheFromText(normalized string) string {
 		"плиточный клей", "плиточные клея", "строительные материалы",
 		"отделочные материалы", "сухие смеси", "стройматериалы",
 		"шпаклевка", "штукатурка", "ламинат", "керамогранит", "гипсокартон",
-		"спорт", "фитнес", "йога", "стоматология", "медицина", "косметология",
+		"мед услуги", "медицинские услуги", "индустриальная медицина",
+		"промышленная медицина", "спорт", "фитнес", "йога", "стоматология", "медицина", "косметология",
 		"салон красоты", "ресторан", "кафе", "доставка", "одежда", "обувь",
 		"недвижимость", "ремонт", "строительство", "строительная компания", "образование", "курсы",
 		"мебель", "мебельная ниша", "тв зона", "тв зоны", "кофейня", "детская одежда",
@@ -1675,6 +1900,19 @@ func mergePlatforms(existing []string, incoming []string) []string {
 		result = append(result, platform)
 	}
 	return result
+}
+
+func appendUniqueString(existing []string, incoming string) []string {
+	incoming = strings.TrimSpace(incoming)
+	if incoming == "" {
+		return existing
+	}
+	for _, item := range existing {
+		if strings.EqualFold(strings.TrimSpace(item), incoming) {
+			return existing
+		}
+	}
+	return append(existing, incoming)
 }
 
 func nullableString(value string) *string {

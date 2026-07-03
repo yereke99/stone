@@ -181,6 +181,7 @@ func isBusinessRelevantMessage(text string, analysis CustomerAnalysis, faqDetect
 		IntentReadyToOrder,
 		IntentObjection,
 		IntentDefer,
+		IntentFrustration,
 		IntentNegativeReaction,
 		IntentBriefAnswer,
 		IntentHumanRequest,

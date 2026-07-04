@@ -109,6 +109,7 @@ func TestSuppressedIncomingMessagesDoNotSendBotMessages(t *testing.T) {
 			sender := &fakeSender{}
 			ai := &fakeAI{}
 			service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil, "77019519013@c.us")
+			service.llmReply.Enabled = true
 
 			err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
 				IDMessage: "suppressed-" + tt.name,
@@ -124,6 +125,9 @@ func TestSuppressedIncomingMessagesDoNotSendBotMessages(t *testing.T) {
 			}
 			if ai.analysisCalled {
 				t.Fatal("suppressed chat reached AnalyzeCustomerMessage")
+			}
+			if ai.called {
+				t.Fatal("suppressed chat reached GenerateSalesReply")
 			}
 		})
 	}

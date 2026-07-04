@@ -416,6 +416,137 @@ func shortPriceReminderText(language string) string {
 	}
 }
 
+type quantityDiscountReply struct {
+	text        string
+	templateID  string
+	askedFields []string
+}
+
+func quantityDiscountResponse(language string, lead LeadState) quantityDiscountReply {
+	language = normalizeLanguageCode(language)
+	quantity := formatVideoQuantityForReply(lead.VideoQuantity)
+	niche := quantityDiscountNicheForReply(lead)
+	missing := qualificationMissingFields(lead)
+	askedFields := normalizeFieldList(missing)
+
+	parts := make([]string, 0, 3)
+	switch language {
+	case "kk":
+		if quantity != "" && niche != "" {
+			parts = append(parts, fmt.Sprintf("Түсіндім, %s, көлемі %s ролик.", niche, quantity))
+		} else if quantity != "" {
+			parts = append(parts, fmt.Sprintf("Түсіндім, көлемі %s ролик.", quantity))
+		}
+		if quantity == "" {
+			parts = append(parts, "Көлем бойынша пакеттік шарттарды жеке талқылай аламыз.")
+			parts = append(parts, "Нақты құнын міндет пен ролик санына қарай есептеген дұрыс.")
+		} else {
+			parts = append(parts, "Мұндай көлемде шарттарды жеке есептеген дұрыс.")
+		}
+		if followup := quantityDiscountFollowupQuestion(language, missing); followup != "" {
+			parts = append(parts, followup)
+		}
+	case "en":
+		if quantity != "" && niche != "" {
+			parts = append(parts, fmt.Sprintf("Got it: %s, %s videos.", niche, quantity))
+		} else if quantity != "" {
+			parts = append(parts, fmt.Sprintf("Got it, %s videos.", quantity))
+		}
+		if quantity == "" {
+			parts = append(parts, "For volume, we can discuss package terms individually.")
+			parts = append(parts, "The exact cost is better calculated for the task and number of videos.")
+		} else {
+			parts = append(parts, "For that volume, terms are better calculated individually.")
+		}
+		if followup := quantityDiscountFollowupQuestion(language, missing); followup != "" {
+			parts = append(parts, followup)
+		}
+	default:
+		if quantity != "" && niche != "" {
+			parts = append(parts, fmt.Sprintf("Понял, %s, объём %s роликов.", niche, quantity))
+		} else if quantity != "" {
+			parts = append(parts, fmt.Sprintf("Понял, объём %s роликов.", quantity))
+		}
+		if quantity == "" {
+			parts = append(parts, "По объёму можем обсудить пакетные условия индивидуально.")
+			parts = append(parts, "Точную стоимость лучше посчитать под задачу и количество роликов.")
+		} else {
+			parts = append(parts, "По такому количеству условия лучше посчитать индивидуально.")
+		}
+		if followup := quantityDiscountFollowupQuestion(language, missing); followup != "" {
+			parts = append(parts, followup)
+		}
+	}
+
+	return quantityDiscountReply{
+		text:        strings.Join(parts, " "),
+		templateID:  quantityDiscountTemplateID(quantity, missing),
+		askedFields: askedFields,
+	}
+}
+
+func quantityDiscountFollowupQuestion(language string, missing []string) string {
+	missing = normalizeFieldList(missing)
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		if sameFields(missing, []string{fieldNiche, fieldGoal}) {
+			return "Қай ниша және ролик мақсаты қандай: өтінім, сату немесе танымалдық?"
+		}
+		if sameFields(missing, []string{fieldGoal}) {
+			return "Роликтердің негізгі мақсаты қандай: өтінім, сату немесе танымалдық?"
+		}
+	case "en":
+		if sameFields(missing, []string{fieldNiche, fieldGoal}) {
+			return "Please share the niche and video goal: leads, sales, or awareness."
+		}
+		if sameFields(missing, []string{fieldGoal}) {
+			return "What is the main goal of the videos: leads, sales, or awareness?"
+		}
+	default:
+		if sameFields(missing, []string{fieldNiche, fieldGoal}) {
+			return "Подскажите, пожалуйста, нишу и цель роликов: заявки, продажи или узнаваемость?"
+		}
+		if sameFields(missing, []string{fieldGoal}) {
+			return "Какая основная цель роликов: заявки, продажи или узнаваемость?"
+		}
+	}
+	if sameFields(missing, []string{fieldNiche}) {
+		return singleMissingQuestion(language, fieldNiche, LeadState{})
+	}
+	return ""
+}
+
+func quantityDiscountTemplateID(quantity string, missing []string) string {
+	templateID := "quantity_discount_individual"
+	if strings.TrimSpace(quantity) != "" {
+		templateID += "_with_quantity"
+	} else {
+		templateID += "_without_quantity"
+	}
+	missing = normalizeFieldList(missing)
+	if len(missing) > 0 {
+		templateID += "_ask_" + strings.Join(missing, "_")
+	}
+	return templateID
+}
+
+func quantityDiscountNicheForReply(lead LeadState) string {
+	value := strings.TrimSpace(lead.ProductOrService)
+	if value == "" {
+		value = strings.TrimSpace(lead.Niche)
+	}
+	value = normalizeNiche(value)
+	return value
+}
+
+func formatVideoQuantityForReply(quantity string) string {
+	quantity = strings.TrimSpace(quantity)
+	if quantity == "" {
+		return ""
+	}
+	return strings.ReplaceAll(quantity, "-", "–")
+}
+
 func packageChoiceNoPricesText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":

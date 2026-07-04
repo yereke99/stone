@@ -12,125 +12,47 @@ import (
 
 const customerUnderstandingTimeout = 8 * time.Second
 
-const customerUnderstandingSystemPrompt = `You are a strict JSON lead analyzer for a WhatsApp sales bot.
-The bot sells Stone Production AI advertising videos made within 48 hours without filming.
-Use Russian, Kazakh, English, and mixed informal WhatsApp text. Treat every short or multiline line as potentially meaningful.
-Return valid JSON only. Do not write a free-form chatbot reply. Do not invent facts.
+const customerUnderstandingSystemPrompt = `You are a strict JSON understanding layer for the Stone Production WhatsApp sales bot.
+Return JSON only, matching the provided schema exactly. Do not write markdown or free text outside JSON.
 
-Your job:
-- extract structured facts from the latest customer message and conversation context before any reply is chosen;
-- merge meaning with existing lead state mentally, but never overwrite good existing values with null;
-- never ask for a field that is already known;
-- identify direct requests for examples, packages/options, price, deadline, human manager, or questionnaire.
+Stone Production sells AI advertising videos made in 48 hours without filming. The Go service sends messages/media and enforces STOP, admin takeover, suppression, dedupe, prices, legal safety, and state updates. Your job is to understand the latest valid customer message in context.
 
-Fields:
+Output contract:
 - language: ru, kk, en, mixed, or unknown.
-- intent: greeting, qualification_answer, provide_link, provide_reference, asks_examples, asks_packages, asks_price, asks_discount, free_test_request, asks_deadline, asks_duration, asks_human, ready_to_order, defer, frustration, unclear, or irrelevant.
-- niche: business category or product niche if known.
-- goal: business/video goal if known.
-- deadline: launch or production deadline if known.
-- platform: advertising/use context such as Instagram, TikTok, site, or advertising.
-- product_or_service: concrete product/service if present.
-- strong_side: USP / strongest side / experience / advantage, if present.
-- target_audience: who the customer's clients are, if the customer describes them.
-- offer: current offer/promo/discount, including "no current offer" when the customer says there is none.
-- website_or_instagram: website, Instagram handle, or business link if present.
-- reference_links: all site, Instagram, TikTok, reel, video, or reference links from incoming.text only.
-- budget: budget/price objection/free-test context if present.
-- package_interest: test, basic, standard, unknown, or null.
-- asks_for_food_examples: true when the customer asks whether food/farm-product videos/examples exist.
-- asks_for_more_options: true when the customer asks for more execution/package/format options.
-- ready_for_questionnaire: true when the customer wants to proceed/open the brief.
-- needs_manager: true only for a direct manager/human/operator request.
-- missing_fields: only missing core fields among niche and goal after considering existing state. Deadline is NOT a core field and must never be in missing_fields.
+- intent: one of qualification_answer, business_link, reference_link, price_question, discount_question, quantity_answer, case_request, niche_specific_case_request, feasibility_question, format_preference, confusion, objection, voice_question, copyright_question, package_selection, human_request, stop_or_opt_out, greeting, defer, other.
+- extracted_fields: always include every field from the schema. Use null for unknown scalar fields and [] for unknown arrays.
+- answered_questions: bot question/customer answer pairs when the context shows which question was answered.
+- missing_fields: only fields still missing after persisted state + extracted_fields + answered_questions. Do not include deadline unless the bot explicitly asked it. Core first-stage fields are niche and goal.
+- reply_text: a safe suggested short reply, but do not claim that media was sent. The Go service may ignore this in dry-run or system flows.
+- next_action: send_text, send_cases, send_video, ask_next_question, handoff, or no_reply.
+- needs_human: true only for explicit human/manager requests or when a safe answer requires a manager.
 - confidence: 0..1.
 
-Rules:
-- Understand answers even if they are not formal sentences.
-- The current incoming.text is primary. quoted_text and quoted_caption are context only.
-- The input JSON may contain incoming.quoted_text / quoted_caption: this is the message the customer replied to (usually the bot's own earlier question). Use it ONLY as context to understand which question the customer is answering. NEVER extract niche/goal/deadline/audience from the quoted text itself; extract facts only from incoming.text.
-- Multiline natural replies often answer several questions at once: extract niche/products from product lines, strong_side from advantage/experience lines, audience from client/company lines, and offer from promo/no-offer lines.
-- "мед услуги для b2b / опыт в крупных проектах / крупные компании в сфере производства, промышленность, добыча, строительство / нет оффера" means niche/product_or_service = B2B medical services / industrial medicine, strong_side = experience in large projects, target_audience = large companies in manufacturing/industry/mining/construction, offer = no current offer.
-- "Плиточные клея, шпаклёвка, штукатурка и т.д." is a niche/products answer (construction/finishing materials). "Основные клиенты строительные компании, частники" is target_audience, NOT a goal.
-- "По рекламе" is platform/context, not the product niche.
-- "Пылесосы" can be the niche/product.
-- "Продажи" is a goal.
-- "Через 2 дня" is a deadline only when the customer volunteers timing; never ask for it.
-- Food/farm products count as a valid niche.
-- A website or Instagram handle is business context.
-- A URL-only message is useful context/reference material: intent "provide_link" or "provide_reference"; save the link and never restart the questionnaire.
-- Instagram reels, TikTok, video URLs, and reference examples are reference material: intent "provide_reference"; save the link and do not restart the questionnaire.
-- Frustrated messages like "дорогой бот читай внимательно" are intent "frustration"; do not classify them as stop/unsubscribe unless the customer explicitly asks not to be messaged.
-- Free-test/discount requests like "давайте попробуем если бесплатно" are intent "free_test_request" or "asks_discount"; never promise free work.
-- If niche + goal are known, missing_fields must be [].
-- "Хронометраж видео какой", "сколько секунд ролик", "длина видео какая" are direct questions about the video duration: intent "asks_duration" with niche=null and goal=null. NEVER save such question text as a niche or a goal.
-- NEVER classify a greeting as a niche: "доброе утро", "добрый день", "здравствуйте", "привет", "салем" are intent "greeting" with niche=null.
-- NEVER classify confirmations ("да", "ок", "понял", "хорошо", "принято") or timing words ("сейчас", "завтра", "сегодня") as a niche; they carry no niche/goal facts.
-- Soft deferrals like "спасибо, позже напишу", "я подумаю", "на днях отпишусь", "свяжусь позже", "пока не готов", "понял спасибо" are intent "defer". They are not negative, not a manager request, not a stop/unsubscribe, and must not need a manager.
-- NEVER classify questions about cases/examples ("есть кейсы?", "как отправите кейсы?", "покажите примеры") as a niche; that is intent "asks_examples" with niche=null unless a real product is also named.
-- NEVER classify price/package/format questions or "стоп"/"stop" as a niche.
-- Extract niche only when the text clearly names a business, product, or service (e.g. "мебель", "ТВ зоны", "продаём обувь", "салон красоты", "кофейня", "онлайн курс").
-- If the customer asks examples/formats/packages, classify that request first while still extracting facts.
-- If unclear but related, use intent "unclear"; if unrelated, use "irrelevant". Low-meaning fragments like "бот собираюсь" are "unclear" with niche=null.
-- Do not confuse outgoing API bot messages with human moderator messages; this analyzer only sees customer messages.
+Context rules:
+- current_message.text is the only source for new facts. quoted_context, recent_messages, last bot questions, and question_answer_pairs explain what the customer is answering.
+- If the customer replied to a quoted bot message, use quoted_context as primary question context.
+- Multiline, paragraph, comma-separated, and short replies can answer several questions at once.
+- A URL-only message must never set goal. Save Instagram/Reels/TikTok/YouTube/video links as reference_links unless the customer explicitly says it is their business account/site.
+- Extract goal only from explicit text such as "нужно больше заявок", "цель продажи", "для узнаваемости", "хочу продать", "запуск продаж".
+- "Плиточные клея, шпаклёвка, штукатурка..." is product_or_service and niche around construction/finishing mixtures. "Основные клиенты..." is target_audience, not goal.
+- "оба хороши" means format_preference with liked_formats ["both"].
+- "20-30" after a quantity/discount question means quantity/video_quantity, not budget, niche, goal, or deadline.
+- "Делаете примерно такое видео?", "можете как тут?", "такой формат делаете?" are feasibility_question, not case_request.
+- "пример" should only mean examples/cases as a real word; "примерно" is not an examples request.
+- "Чет суть не уловил" and similar messages are confusion, not other.
+- Voice questions include "Озвучку кто делать будет?", "Голос выбрать можно?", "можно голос актёра?".
+- Never promise exact cloning/use of a real actor, celebrity, public figure, face, image, or voice without rights. Offer a similar mood/tone/style without copying identity.
+- Do not invent prices, discounts, deadlines, guarantees, rights, package details, links, files, or case availability. Prices are Test 35 000 тг, Basic 50 000 тг, Standard from 75 000 тг.
+- Answer the customer's latest direct question first, then confirm extracted facts if useful, then ask at most one next useful question.
+- Never ask for a field already known in known_state, extracted_fields, answered_questions, recent history, or quoted context.
+- Soft deferrals like "подумаю", "позже напишу", "на днях отпишусь", "понял спасибо" are defer with next_action no_reply and empty reply_text.
 
-Example 1:
-Input:
-"По рекламе
-Пылесосы
-Продажи
-Через 2 дня"
-Expected:
-{"language":"ru","intent":"qualification_answer","niche":"пылесосы","goal":"продажи","deadline":"через 2 дня","platform":"реклама","product_or_service":"пылесосы","strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.95}
-
-Example 2:
-Input:
-"С едой есть ролики?
-Фермерские продукты.
-superferma.kz наш инстаграмм"
-Expected:
-{"language":"ru","intent":"asks_examples","niche":"фермерские продукты / еда","goal":null,"deadline":null,"platform":null,"product_or_service":"фермерские продукты","strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":"superferma.kz","reference_links":["superferma.kz"],"budget":null,"package_interest":null,"asks_for_food_examples":true,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.9}
-
-Example 4:
-Input:
-"Доброе утро"
-Expected:
-{"language":"ru","intent":"greeting","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}
-
-Example 5:
-Input:
-"Есть кейсы?"
-Expected:
-{"language":"ru","intent":"asks_examples","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.9}
-
-Example 3:
-Input:
-"в целом интересно, давайте еще варианты исполнения подумаем"
-Expected:
-{"language":"ru","intent":"asks_packages","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":"unknown","asks_for_food_examples":false,"asks_for_more_options":true,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":[],"confidence":0.85}
-
-Example 6 (reply to a quoted bot question):
-Input text:
-"Плиточные клея, шпаклёвка, штукатурка и т.д.
-Основные клиенты строительные компании, частники!"
-Quoted text (context only): "Чтобы предложить точный формат, напишите, пожалуйста, что именно продвигаем, кто ваша аудитория и какая цель: заявки, продажи или узнаваемость."
-Expected:
-{"language":"ru","intent":"qualification_answer","niche":"строительные и отделочные материалы (плиточный клей, шпаклёвка, штукатурка)","goal":null,"deadline":null,"platform":null,"product_or_service":"плиточный клей, шпаклёвка, штукатурка","strong_side":null,"target_audience":"строительные компании и частники","offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.93}
-
-Example 7:
-Input:
-"Хронометраж видео какой"
-Expected:
-{"language":"ru","intent":"asks_duration","niche":null,"goal":null,"deadline":null,"platform":null,"product_or_service":null,"strong_side":null,"target_audience":null,"offer":null,"website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["niche","goal"],"confidence":0.95}
-
-Example 8:
-Input:
-"мед услуги для b2b
-опыт в крупных проектах
-крупные компании в сфере производства, промышленность, добыча, строительство и тд
-нет оффера"
-Expected:
-{"language":"ru","intent":"qualification_answer","niche":"мед услуги для b2b","goal":null,"deadline":null,"platform":null,"product_or_service":"мед услуги для b2b","strong_side":"опыт в крупных проектах","target_audience":"крупные компании в сфере производства, промышленность, добыча, строительство","offer":"нет текущего оффера","website_or_instagram":null,"reference_links":[],"budget":null,"package_interest":null,"asks_for_food_examples":false,"asks_for_more_options":false,"ready_for_questionnaire":false,"needs_manager":false,"missing_fields":["goal"],"confidence":0.95}`
+Examples:
+- Bot asked "Что продвигаем, кто аудитория и какая цель?" Customer: "Плиточные клея, шпаклёвка, штукатурка и т.д.\nОсновные клиенты строительные компании, частники!" -> product_or_service "плиточный клей, шпаклёвка, штукатурка", niche "строительные смеси", target_audience "строительные компании и частные клиенты", goal null, missing_fields ["goal"].
+- Customer: "https://www.instagram.com/reel/abc" -> intent reference_link, reference_links contains URL, goal null.
+- Customer: "Вот референс, нужно больше заявок https://..." -> reference_links contains URL, goal "заявки".
+- Customer: "Очень нравится голос от актёра Вин Дизеля" -> intent copyright_question, voice_preference "низкий уверенный кинематографичный голос", copyright_concern explains real actor voice cannot be copied without rights.
+- Customer: "Актёров ИИ тоже можно любых ставить или будут потом проблемы с авторским правом?" -> intent copyright_question, reply_text explains real actors/public people require rights and offers original AI character or style.`
 
 func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, msg IncomingMessage, text string, language string, conversation Conversation) (CustomerAnalysis, bool) {
 	fallback := AnalyzeCustomerMessage(text, conversation.Lead, language)
@@ -189,12 +111,54 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 	return analysis, true
 }
 
+type understandingMessage struct {
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	MessageID string `json:"message_id,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+type understandingQuotedContext struct {
+	IsReplyToBot    bool   `json:"is_reply_to_bot"`
+	QuotedBotText   string `json:"quoted_bot_text,omitempty"`
+	QuotedMessageID string `json:"quoted_message_id,omitempty"`
+	QuotedType      string `json:"quoted_type,omitempty"`
+}
+
+type understandingQuestionAnswerPair struct {
+	BotQuestion    string `json:"bot_question"`
+	CustomerAnswer string `json:"customer_answer,omitempty"`
+	ExpectedField  string `json:"expected_field,omitempty"`
+}
+
+type understandingPendingQuestion struct {
+	Text   string   `json:"text"`
+	Fields []string `json:"fields"`
+}
+
 func customerUnderstandingPayload(msg IncomingMessage, text string, language string, conversation Conversation) string {
 	state := json.RawMessage(conversationPromptJSON(conversation))
 	if !json.Valid(state) {
 		state = json.RawMessage(`{}`)
 	}
 	payload := struct {
+		CurrentMessage struct {
+			Role      string `json:"role"`
+			Text      string `json:"text"`
+			MessageID string `json:"message_id,omitempty"`
+			Timestamp string `json:"timestamp,omitempty"`
+		} `json:"current_message"`
+		QuotedContext       understandingQuotedContext        `json:"quoted_context"`
+		RecentMessages      []understandingMessage            `json:"recent_messages"`
+		PendingQuestions    []understandingPendingQuestion    `json:"pending_questions"`
+		QuestionAnswerPairs []understandingQuestionAnswerPair `json:"question_answer_pairs"`
+		KnownState          json.RawMessage                   `json:"known_state"`
+		OfficialPackages    []struct {
+			Key      string `json:"key"`
+			Name     string `json:"name"`
+			Price    string `json:"price"`
+			FileName string `json:"file_name"`
+		} `json:"official_packages"`
 		Incoming struct {
 			Text           string `json:"text"`
 			Type           string `json:"type"`
@@ -212,7 +176,42 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 		MissingFields []string `json:"current_missing_fields"`
 	}{
 		ConversationState: state,
+		KnownState:        state,
 		MissingFields:     requiredLeadMissingFields(conversation),
+	}
+	payload.CurrentMessage.Role = "customer"
+	payload.CurrentMessage.Text = strings.TrimSpace(text)
+	payload.CurrentMessage.MessageID = strings.TrimSpace(msg.IDMessage)
+	if !msg.Timestamp.IsZero() {
+		payload.CurrentMessage.Timestamp = msg.Timestamp.UTC().Format(time.RFC3339)
+	}
+	payload.QuotedContext = quotedUnderstandingContext(msg)
+	payload.RecentMessages = recentUnderstandingMessages(conversation)
+	payload.PendingQuestions = pendingUnderstandingQuestions(conversation)
+	payload.QuestionAnswerPairs = questionAnswerPairsForUnderstanding(msg, text, conversation)
+	for level := 1; level <= 3; level++ {
+		offer, ok := OfferByLevel(level)
+		if !ok {
+			continue
+		}
+		price := "от 75 000 тг"
+		if level == 1 {
+			price = "35 000 тг"
+		}
+		if level == 2 {
+			price = "50 000 тг"
+		}
+		payload.OfficialPackages = append(payload.OfficialPackages, struct {
+			Key      string `json:"key"`
+			Name     string `json:"name"`
+			Price    string `json:"price"`
+			FileName string `json:"file_name"`
+		}{
+			Key:      packageKey(offer.Level),
+			Name:     offer.TitleRU,
+			Price:    price,
+			FileName: offer.FileName,
+		})
 	}
 	payload.Incoming.Text = strings.TrimSpace(text)
 	payload.Incoming.Type = strings.TrimSpace(msg.TypeMessage)
@@ -231,6 +230,146 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 	return string(data)
 }
 
+func quotedUnderstandingContext(msg IncomingMessage) understandingQuotedContext {
+	text := strings.TrimSpace(msg.QuotedText)
+	if text == "" {
+		text = strings.TrimSpace(msg.QuotedCaption)
+	}
+	return understandingQuotedContext{
+		IsReplyToBot:    text != "",
+		QuotedBotText:   text,
+		QuotedMessageID: strings.TrimSpace(msg.QuotedMessageID),
+		QuotedType:      strings.TrimSpace(msg.QuotedType),
+	}
+}
+
+func recentUnderstandingMessages(conversation Conversation) []understandingMessage {
+	messages := conversation.Messages
+	if len(messages) > 10 {
+		messages = messages[len(messages)-10:]
+	}
+	result := make([]understandingMessage, 0, len(messages))
+	for _, message := range messages {
+		text := strings.TrimSpace(message.Content)
+		if text == "" {
+			continue
+		}
+		role := strings.TrimSpace(message.Role)
+		switch role {
+		case "assistant", "bot":
+			role = "bot"
+		case "user", "customer":
+			role = "customer"
+		default:
+			role = "system"
+		}
+		item := understandingMessage{Role: role, Text: text}
+		if !message.CreatedAt.IsZero() {
+			item.Timestamp = message.CreatedAt.UTC().Format(time.RFC3339)
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func pendingUnderstandingQuestions(conversation Conversation) []understandingPendingQuestion {
+	question := strings.TrimSpace(conversation.LastReplyText)
+	if question == "" {
+		return nil
+	}
+	fields := fieldsAskedByMessage(question, conversation.Stage)
+	filtered := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if !fieldKnownInConversation(conversation, field) {
+			filtered = append(filtered, field)
+		}
+	}
+	if len(filtered) == 0 && !strings.Contains(question, "?") {
+		return nil
+	}
+	return []understandingPendingQuestion{{Text: question, Fields: filtered}}
+}
+
+func questionAnswerPairsForUnderstanding(msg IncomingMessage, text string, conversation Conversation) []understandingQuestionAnswerPair {
+	answer := strings.TrimSpace(text)
+	if answer == "" {
+		return nil
+	}
+	question := strings.TrimSpace(msg.QuotedText)
+	if question == "" {
+		question = strings.TrimSpace(msg.QuotedCaption)
+	}
+	if question == "" {
+		question = strings.TrimSpace(conversation.LastReplyText)
+	}
+	if question == "" {
+		return nil
+	}
+	fields := expectedFieldsForBotQuestion(question, conversation.Stage)
+	if len(fields) == 0 {
+		return []understandingQuestionAnswerPair{{BotQuestion: question, CustomerAnswer: answer}}
+	}
+	pairs := make([]understandingQuestionAnswerPair, 0, len(fields))
+	for _, field := range fields {
+		pairs = append(pairs, understandingQuestionAnswerPair{
+			BotQuestion:    question,
+			CustomerAnswer: answer,
+			ExpectedField:  field,
+		})
+	}
+	return pairs
+}
+
+func expectedFieldsForBotQuestion(question string, stage string) []string {
+	fields := fieldsAskedByMessage(question, stage)
+	normalized := normalizeForAnalysis(question)
+	if containsAny(normalized, []string{"что именно продвигаем", "что продвигаем", "что продаете", "что продаёте"}) {
+		fields = append(fields, fieldProductService)
+	}
+	if containsAny(normalized, []string{"кто ваша аудитория", "ваша аудитория", "кто ваш клиент", "клиенты"}) {
+		fields = append(fields, fieldTargetAudience)
+	}
+	if containsAny(normalized, []string{"какой срок", "срок"}) {
+		fields = append(fields, fieldDeadline)
+	}
+	return normalizeFieldList(fields)
+}
+
+func fieldKnownInConversation(conversation Conversation, field string) bool {
+	field = normalizeFieldName(field)
+	if field == "" {
+		return false
+	}
+	if conversation.CompletedFields[field] {
+		return true
+	}
+	lead := conversation.Lead
+	switch field {
+	case fieldNiche:
+		return isValidNiche(lead.Niche)
+	case fieldGoal:
+		return isValidGoal(lead.Goal)
+	case fieldProductService:
+		return strings.TrimSpace(lead.ProductOrService) != ""
+	case fieldTargetAudience:
+		return strings.TrimSpace(lead.TargetAudience) != ""
+	case fieldDeadline:
+		return isValidDeadline(lead.Deadline)
+	case fieldVideoQuantity:
+		return strings.TrimSpace(lead.VideoQuantity) != ""
+	case fieldPackageInterest:
+		return isValidPackageInterest(lead.SelectedPackage)
+	case fieldReferenceLinks:
+		return len(lead.ReferenceLinks) > 0 || strings.TrimSpace(lead.WebsiteOrInstagram) != ""
+	case fieldLikedFormats:
+		return len(lead.LikedFormats) > 0
+	case fieldVoicePreference:
+		return strings.TrimSpace(lead.VoicePreference) != ""
+	default:
+		return false
+	}
+}
+
 func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding, current LeadState, language string) (CustomerAnalysis, bool) {
 	if understanding.Confidence < 0 || understanding.Confidence > 1 {
 		return CustomerAnalysis{}, false
@@ -242,60 +381,83 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	}
 	lowConfidence := understanding.Confidence > 0 && understanding.Confidence < 0.35
 	if !lowConfidence {
-		if value := normalizedAIString(firstStringPointer(understanding.Niche, understanding.Extracted.Niche)); isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
+		extracted := understanding.ExtractedFields
+		legacyExtracted := understanding.Extracted
+		if value := normalizedAIString(firstStringPointer(understanding.Niche, extracted.Niche, legacyExtracted.Niche)); isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
 			analysis.Niche = stringPointer(normalizeNiche(value))
 		}
-		if value := normalizeCity(normalizedAIString(understanding.Extracted.City)); value != "" {
+		if value := normalizeCity(normalizedAIString(firstStringPointer(understanding.City, extracted.City, legacyExtracted.City))); value != "" {
 			analysis.City = stringPointer(value)
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Goal, understanding.Extracted.Goal)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Goal, extracted.Goal, legacyExtracted.Goal)); value != "" {
 			if isValidGoal(value) {
 				analysis.Goal = stringPointer(value)
 			} else if goal := normalizeGoal(value); goal != "" {
 				analysis.Goal = stringPointer(goal)
 			}
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Deadline, understanding.Extracted.Deadline)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Deadline, extracted.Deadline, legacyExtracted.Deadline)); value != "" {
 			if isValidDeadline(value) {
 				analysis.Deadline = stringPointer(value)
 			} else if deadline := normalizeDeadline(value); deadline != "" {
 				analysis.Deadline = stringPointer(deadline)
 			}
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Platform, understanding.Extracted.Platform)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Platform, extracted.Platform, legacyExtracted.Platform)); value != "" {
 			analysis.Platforms = mergePlatforms(analysis.Platforms, platformsFromAIString(value))
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.TargetAudience, understanding.Extracted.TargetAudience)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.TargetAudience, extracted.TargetAudience, legacyExtracted.TargetAudience)); value != "" {
 			analysis.TargetAudience = stringPointer(value)
 		}
-		if value := normalizedAIString(understanding.ProductOrService); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.ProductOrService, extracted.ProductOrService)); value != "" {
 			analysis.ProductOrService = stringPointer(value)
 			if analysis.Niche == nil && isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
 				analysis.Niche = stringPointer(normalizeNiche(value))
 			}
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.StrongSide, understanding.Extracted.StrongSide)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.StrongSide, extracted.StrongSide, legacyExtracted.StrongSide)); value != "" {
 			analysis.StrongSide = stringPointer(value)
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Offer, understanding.Extracted.Offer)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Offer, extracted.Offer, legacyExtracted.Offer)); value != "" {
 			analysis.Offer = stringPointer(value)
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Budget, understanding.Extracted.Budget)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Budget, extracted.Budget, legacyExtracted.Budget)); value != "" {
 			analysis.Budget = stringPointer(value)
 		}
-		if value := normalizedAIString(understanding.WebsiteOrInstagram); value != "" {
+		if value := normalizeVideoQuantity(normalizedAIString(firstStringPointer(understanding.VideoQuantity, understanding.Quantity, extracted.VideoQuantity, extracted.Quantity, legacyExtracted.VideoQuantity))); value != "" {
+			analysis.VideoQuantity = stringPointer(value)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.VoicePreference, extracted.VoicePreference)); value != "" {
+			analysis.VoicePreference = stringPointer(value)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.CopyrightConcern, extracted.CopyrightConcern)); value != "" {
+			analysis.CopyrightConcern = stringPointer(value)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.CampaignContext, extracted.CampaignContext)); value != "" {
+			analysis.CampaignContext = stringPointer(value)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.HookIdea, extracted.HookIdea)); value != "" {
+			analysis.HookIdea = stringPointer(value)
+		}
+		for _, liked := range append(understanding.LikedFormats, extracted.LikedFormats...) {
+			analysis.LikedFormats = appendUniqueString(analysis.LikedFormats, liked)
+		}
+		if value := normalizedAIString(firstStringPointer(understanding.WebsiteOrInstagram, extracted.WebsiteOrInstagram)); value != "" {
 			analysis.BusinessLink = stringPointer(value)
 		}
-		if value := normalizedAIString(understanding.Extracted.BusinessLink); value != "" && analysis.BusinessLink == nil {
+		if value := normalizedAIString(firstStringPointer(extracted.BusinessLink, legacyExtracted.BusinessLink)); value != "" && analysis.BusinessLink == nil {
 			analysis.BusinessLink = stringPointer(value)
 		}
 		for _, link := range understanding.ReferenceLinks {
 			analysis.ReferenceLinks = appendUniqueString(analysis.ReferenceLinks, link)
 		}
+		for _, link := range extracted.ReferenceLinks {
+			analysis.ReferenceLinks = appendUniqueString(analysis.ReferenceLinks, link)
+		}
 		if analysis.BusinessLink != nil {
 			analysis.ReferenceLinks = appendUniqueString(analysis.ReferenceLinks, *analysis.BusinessLink)
 		}
-		if value := normalizePackageInterest(normalizedAIString(firstStringPointer(understanding.PackageInterest, understanding.Extracted.PackageInterest))); value != "" {
+		if value := normalizePackageInterest(normalizedAIString(firstStringPointer(understanding.PackageInterest, understanding.SelectedPackage, extracted.PackageInterest, extracted.SelectedPackage, legacyExtracted.PackageInterest))); value != "" {
 			analysis.PackageInterest = stringPointer(value)
 			analysis.SelectedLevel = levelByPackageKey(value)
 		}
@@ -310,23 +472,37 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		if analysis.HasBusinessSignal() {
 			analysis.Intent = IntentAnswer
 		}
-	case "provide_link", "provide_reference":
+	case "provide_link", "provide_reference", "business_link", "reference_link":
 		analysis.Intent = IntentBusinessLink
-	case "asks_examples":
+	case "asks_examples", "case_request":
 		analysis.Intent = IntentPortfolioRequest
+	case "niche_specific_case_request":
+		analysis.Intent = IntentNicheSpecificCaseRequest
+	case "feasibility_question":
+		analysis.Intent = IntentFeasibilityQuestion
+	case "confusion":
+		analysis.Intent = IntentConfusion
+	case "voice_question":
+		analysis.Intent = IntentVoiceQuestion
+	case "copyright_question":
+		analysis.Intent = IntentCopyrightQuestion
+	case "format_preference":
+		analysis.Intent = IntentFormatPreference
 	case "asks_packages":
 		analysis.Intent = IntentPackageQuestion
 		analysis.AsksForMoreOptions = true
-	case "asks_price":
+	case "asks_price", "price_question":
 		analysis.Intent = IntentPriceQuestion
-	case "asks_discount", "free_test_request":
+	case "asks_discount", "discount_question", "quantity_answer":
+		analysis.Intent = IntentQuantityDiscountQuestion
+	case "free_test_request":
 		analysis.Intent = IntentObjection
 	case "asks_deadline":
 		analysis.Intent = IntentDeadlineQuestion
 	case "asks_duration":
 		analysis.Intent = IntentFAQ
 		analysis.FAQKey = faqDuration
-	case "asks_human":
+	case "asks_human", "human_request":
 		analysis.Intent = IntentHumanRequest
 	case "ready_to_order":
 		analysis.Intent = IntentReadyToOrder
@@ -343,7 +519,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	case "frustration":
 		analysis.Intent = IntentFrustration
 		analysis.Frustrated = true
-	case "stop":
+	case "stop", "stop_or_opt_out":
 		analysis.Intent = IntentMute
 	case "provide_info":
 		if analysis.HasBusinessSignal() {
@@ -373,7 +549,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	if understanding.ReadyForQuestionnaire {
 		analysis.WantsQuestionnaire = true
 	}
-	if understanding.NeedsManager {
+	if understanding.NeedsManager || understanding.NeedsHuman {
 		analysis.ShouldHandoff = true
 		if analysis.Intent == IntentOther {
 			analysis.Intent = IntentHumanRequest
@@ -394,6 +570,16 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	updated := current
 	updated.ApplyAnalysis(analysis)
 	analysis.MissingFields = updated.MissingCoreFields()
+	for _, answered := range understanding.AnsweredQuestions {
+		if field := normalizeFieldName(answered.Field); field != "" {
+			analysis.AnsweredQuestions = append(analysis.AnsweredQuestions, AnsweredQuestion{
+				BotQuestion:    strings.TrimSpace(answered.BotQuestion),
+				CustomerAnswer: strings.TrimSpace(answered.CustomerAnswer),
+				Field:          field,
+				Confidence:     answered.Confidence,
+			})
+		}
+	}
 	return analysis, true
 }
 
@@ -422,6 +608,24 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	}
 	if ai.Budget != nil {
 		result.Budget = ai.Budget
+	}
+	if ai.VideoQuantity != nil {
+		result.VideoQuantity = ai.VideoQuantity
+	}
+	if ai.VoicePreference != nil {
+		result.VoicePreference = ai.VoicePreference
+	}
+	if ai.CopyrightConcern != nil {
+		result.CopyrightConcern = ai.CopyrightConcern
+	}
+	if ai.CampaignContext != nil {
+		result.CampaignContext = ai.CampaignContext
+	}
+	if ai.HookIdea != nil {
+		result.HookIdea = ai.HookIdea
+	}
+	for _, liked := range ai.LikedFormats {
+		result.LikedFormats = appendUniqueString(result.LikedFormats, liked)
 	}
 	if ai.TargetAudience != nil {
 		result.TargetAudience = ai.TargetAudience
@@ -462,6 +666,9 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	result.Frustrated = result.Frustrated || ai.Frustrated
 	result.AsksForFoodExamples = result.AsksForFoodExamples || ai.AsksForFoodExamples
 	result.AsksForMoreOptions = result.AsksForMoreOptions || ai.AsksForMoreOptions
+	if len(ai.AnsweredQuestions) > 0 {
+		result.AnsweredQuestions = append(result.AnsweredQuestions, ai.AnsweredQuestions...)
+	}
 	return result
 }
 
@@ -535,11 +742,29 @@ func extractedAnalysisFields(analysis CustomerAnalysis) []string {
 	if analysis.Deadline != nil {
 		fields = append(fields, fieldDeadline)
 	}
+	if analysis.VideoQuantity != nil {
+		fields = append(fields, fieldVideoQuantity)
+	}
+	if analysis.VoicePreference != nil {
+		fields = append(fields, fieldVoicePreference)
+	}
+	if analysis.CopyrightConcern != nil {
+		fields = append(fields, "copyright_concern")
+	}
+	if analysis.CampaignContext != nil {
+		fields = append(fields, "campaign_context")
+	}
+	if analysis.HookIdea != nil {
+		fields = append(fields, "hook_idea")
+	}
+	if len(analysis.LikedFormats) > 0 {
+		fields = append(fields, fieldLikedFormats)
+	}
 	if analysis.TargetAudience != nil {
-		fields = append(fields, "target_audience")
+		fields = append(fields, fieldTargetAudience)
 	}
 	if analysis.ProductOrService != nil {
-		fields = append(fields, "product_or_service")
+		fields = append(fields, fieldProductService)
 	}
 	if analysis.StrongSide != nil {
 		fields = append(fields, "strong_side")

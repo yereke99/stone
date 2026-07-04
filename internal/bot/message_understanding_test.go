@@ -97,6 +97,36 @@ func TestBusinessMessagesAreExtracted(t *testing.T) {
 	}
 }
 
+func TestQuantityDiscountUnderstandingExtractsVideoQuantity(t *testing.T) {
+	discount := AnalyzeCustomerMessage("Есть скидка за количество видео", LeadState{}, "ru")
+	if discount.Intent != IntentQuantityDiscountQuestion {
+		t.Fatalf("discount intent = %q, want %q", discount.Intent, IntentQuantityDiscountQuestion)
+	}
+	if discount.Offer != nil {
+		t.Fatalf("quantity discount question was saved as customer offer: %q", *discount.Offer)
+	}
+
+	lead := LeadState{Niche: "производство мебели"}
+	lead.ApplyAnalysis(discount)
+	if !lead.QuantityDiscountInterest {
+		t.Fatal("quantity discount context was not saved on lead")
+	}
+
+	quantity := AnalyzeCustomerMessage("20 -30", lead, "ru")
+	if quantity.Intent != IntentQuantityDiscountQuestion {
+		t.Fatalf("quantity intent = %q, want %q", quantity.Intent, IntentQuantityDiscountQuestion)
+	}
+	if quantity.VideoQuantity == nil || *quantity.VideoQuantity != "20-30" {
+		t.Fatalf("video quantity = %#v, want 20-30", quantity.VideoQuantity)
+	}
+	if quantity.Budget != nil {
+		t.Fatalf("video quantity was misread as budget: %q", *quantity.Budget)
+	}
+	if quantity.Niche != nil || quantity.Goal != nil || quantity.Deadline != nil || quantity.PackageInterest != nil {
+		t.Fatalf("quantity polluted other fields: %#v", quantity)
+	}
+}
+
 func TestSamrukStyleMultilineBriefFactsAreExtracted(t *testing.T) {
 	text := "мед услуги для b2b\nопыт в крупных проектах\nкрупные компании в сфере производства, промышленность, добыча, строительство и тд\nнет оффера"
 

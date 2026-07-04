@@ -1199,6 +1199,24 @@ func completedFieldsForLead(lead LeadState) map[string]bool {
 	if isValidDeadline(lead.Deadline) {
 		completed[fieldDeadline] = true
 	}
+	if strings.TrimSpace(lead.VideoQuantity) != "" {
+		completed[fieldVideoQuantity] = true
+	}
+	if strings.TrimSpace(lead.ProductOrService) != "" {
+		completed[fieldProductService] = true
+	}
+	if strings.TrimSpace(lead.TargetAudience) != "" {
+		completed[fieldTargetAudience] = true
+	}
+	if len(lead.ReferenceLinks) > 0 || strings.TrimSpace(lead.WebsiteOrInstagram) != "" {
+		completed[fieldReferenceLinks] = true
+	}
+	if len(lead.LikedFormats) > 0 {
+		completed[fieldLikedFormats] = true
+	}
+	if strings.TrimSpace(lead.VoicePreference) != "" {
+		completed[fieldVoicePreference] = true
+	}
 	if lead.PreviousAIAds != nil || strings.TrimSpace(lead.AIExperience) != "" {
 		completed[fieldPreviousAIAds] = true
 	}
@@ -1236,7 +1254,9 @@ func normalizeFieldName(field string) string {
 		return fieldPreviousAIAds
 	case fieldPackage:
 		return fieldPackageInterest
-	case fieldNiche, fieldCity, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds, fieldPackageInterest, fieldBrief:
+	case fieldNiche, fieldCity, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds,
+		fieldPackageInterest, fieldVideoQuantity, fieldProductService, fieldTargetAudience,
+		fieldReferenceLinks, fieldLikedFormats, fieldVoicePreference, fieldBrief:
 		return strings.TrimSpace(field)
 	default:
 		return ""

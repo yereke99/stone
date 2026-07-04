@@ -557,14 +557,14 @@ func TestTwentyFourHourFollowupSendsReminderOnce(t *testing.T) {
 	}
 }
 
-func TestWeeklyFollowupSendsDiscountOnce(t *testing.T) {
+func TestWeeklyFollowupSendsReengagementVideoOnce(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
 	service.SetDelayedPackageOptions(DelayedPackageOptions{Enabled: true, After: 15 * time.Minute})
 	chatID := "chat-followup-weekly"
 	now := time.Now().UTC()
-	wantText := "Здравствуйте! 👋\n\n🎬 Сделали новый AI-проект и решили поделиться результатом.\n\n🎁 Для новых клиентов действует скидка 15% на первый заказ.\n\n⏳ Акция действует только 3 дня.\n\nЕсли интересно протестировать напишите + в ответ."
+	wantText := "Здравствуйте! 👋\n\n🎬 Сделали новый AI-проект и решили поделиться результатом.\n\n🎁 Для новых клиентов условия можно обсудить индивидуально под задачу.\n\nЕсли интересно протестировать, напишите + в ответ."
 	seedPresentedQualifiedLead(store, chatID)
 	store.Update(chatID, func(conversation *Conversation) {
 		conversation.QuestionnaireOfferSent = true
@@ -599,8 +599,9 @@ func TestWeeklyFollowupSendsDiscountOnce(t *testing.T) {
 		t.Fatalf("weekly discount caption mismatch:\n%s", got)
 	}
 	if got := sender.captions[0]; strings.Contains(got, "отправляю вам пример") ||
-		strings.Contains(got, "скидку -15") {
-		t.Fatalf("weekly discount still contains old copy:\n%s", got)
+		strings.Contains(got, "скидку -15") ||
+		strings.Contains(got, "15%") {
+		t.Fatalf("weekly follow-up still contains old discount copy:\n%s", got)
 	}
 	before := len(sender.messages)
 	beforeFiles := len(sender.files)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,11 @@ import (
 	"go.uber.org/zap"
 )
 
-const videoSendDelay = 1500 * time.Millisecond
+const (
+	videoSendDelay                     = 1500 * time.Millisecond
+	quantityDiscountPricingSource      = "individual_manager_calculation"
+	quantityDiscountOfficialConfigUsed = false
+)
 
 type outgoingCounterKey struct{}
 
@@ -71,6 +76,15 @@ type Service struct {
 	chatLocks    sync.Map
 	historyGuard historyGuardRuntime
 	autoPackages delayedPackageRuntime
+	llmReply     llmReplyOptions
+}
+
+type llmReplyOptions struct {
+	Enabled         bool
+	DryRun          bool
+	Timeout         time.Duration
+	Model           string
+	MaxOutputTokens int
 }
 
 func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoDir string, portfolio PortfolioLinks, languageMode string, logger *zap.Logger, adminChatIDs ...string) *Service {
@@ -83,7 +97,55 @@ func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoD
 		languageMode: languageMode,
 		adminChatIDs: normalizeAdminChatIDs(adminChatIDs),
 		logger:       logger,
+		llmReply:     loadLLMReplyOptionsFromEnv(),
 	}
+}
+
+func loadLLMReplyOptionsFromEnv() llmReplyOptions {
+	return llmReplyOptions{
+		Enabled:         parseBoolEnv("BOT_LLM_REPLY_ENABLED", false),
+		DryRun:          parseBoolEnv("BOT_LLM_REPLY_DRY_RUN", false),
+		Timeout:         parseDurationEnv("BOT_LLM_REPLY_TIMEOUT", 15*time.Second),
+		Model:           strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MODEL")),
+		MaxOutputTokens: parsePositiveIntEnv("BOT_LLM_REPLY_MAX_TOKENS", 500),
+	}
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "t", "true", "yes", "y", "on":
+		return true
+	case "0", "f", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func parseDurationEnv(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	if duration, err := time.ParseDuration(raw); err == nil && duration > 0 {
+		return duration
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return fallback
+}
+
+func parsePositiveIntEnv(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage) error {
@@ -348,6 +410,44 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 
 	_ = hadLanguage
 	_ = lead
+	llmReply := s.maybeGenerateConversationReply(ctx, chatID, msg, text, language, conversation, analysis)
+	if llmReply.Called {
+		if err := s.applyLLMExtractedFields(ctx, chatID, llmReply.Response, language, conversation); err != nil {
+			return err
+		}
+		if s.llmReply.DryRun {
+			s.info("openai conversation reply dry-run kept state-machine reply",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("incoming_message_id", strings.TrimSpace(msg.IDMessage)),
+				zap.String("final_reply_source", "state_machine"),
+				zap.String("llm_reply_preview", previewText(salesResponseReplyText(llmReply.Response), 180)),
+			)
+			conversation, err = s.store.Snapshot(ctx, chatID)
+			if err != nil {
+				return err
+			}
+			return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
+		}
+		if llmReply.Usable && llmReply.Response.NextAction != "send_cases" && llmReply.Response.NextAction != "send_video" && llmReply.Response.NextAction != "handoff" {
+			conversation, err = s.store.Snapshot(ctx, chatID)
+			if err != nil {
+				return err
+			}
+			reply := salesResponseReplyText(llmReply.Response)
+			stage := conversation.Stage
+			if stage == "" || stage == ClientStateNeutralNew {
+				stage = ClientStateAwaitingQualification
+			}
+			askedFields := normalizeFieldList(append(llmReply.Response.AskedFields, llmReply.Response.MissingFields...))
+			s.info("selected next action",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("action", "send_llm_reply"),
+				zap.String("final_reply_source", "llm"),
+				zap.String("final_reply_preview", previewText(reply, 180)),
+			)
+			return s.sendAndRemember(ctx, chatID, reply, stage, selectedLevelFromConversation(conversation), askedFields...)
+		}
+	}
 	return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
 }
 
@@ -402,6 +502,31 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 			level = selectedLevelFromConversation(conversation)
 		}
 		return s.sendQualifiedLeadHandoff(ctx, chatID, language, level)
+	}
+	if analysis.Intent == IntentQuantityDiscountQuestion {
+		return s.handleQuantityDiscount(ctx, chatID, text, language, conversation, analysis)
+	}
+	if analysis.Intent == IntentConfusion {
+		return s.handleConfusionReply(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentFeasibilityQuestion {
+		return s.handleFeasibilityQuestion(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentVoiceQuestion {
+		return s.handleVoiceQuestion(ctx, chatID, text, language, conversation)
+	}
+	if analysis.Intent == IntentCopyrightQuestion {
+		return s.handleCopyrightQuestion(ctx, chatID, language, conversation)
+	}
+	if analysis.Intent == IntentFormatPreference {
+		return s.handleFormatPreference(ctx, chatID, language, conversation, analysis)
+	}
+	if analysis.Intent == IntentNicheSpecificCaseRequest {
+		return s.handleNicheSpecificCaseRequest(ctx, chatID, language, conversation, analysis)
+	}
+	if conversation.QuestionnaireOfferSent && isAdsFitQuestion(text) {
+		message := FAQAnswerText(faqAds, language) + "\n\n" + questionnaireConfirmationFallbackText(language)
+		return s.sendAndRemember(ctx, chatID, message, ClientStateAwaitingQuestionnaireConfirm, selectedLevelFromConversation(conversation))
 	}
 	if analysis.Intent == IntentFAQ && strings.TrimSpace(analysis.FAQKey) != "" {
 		return s.handleFAQ(ctx, chatID, language, conversation, analysis)
@@ -557,6 +682,39 @@ func (s *Service) presentPortfolioAndPackages(ctx context.Context, chatID string
 	return s.sendPackageVideosAndAskFormat(ctx, chatID, language, false, time.Now().UTC())
 }
 
+func (s *Service) handleQuantityDiscount(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	reply := quantityDiscountResponse(language, latest.Lead)
+	quantity := strings.TrimSpace(latest.Lead.VideoQuantity)
+	if analysis.VideoQuantity != nil && strings.TrimSpace(*analysis.VideoQuantity) != "" {
+		quantity = strings.TrimSpace(*analysis.VideoQuantity)
+	}
+	s.info("quantity discount handling selected",
+		zap.String("chat_hash", chatFingerprint(chatID)),
+		zap.String("incoming_text", strings.TrimSpace(text)),
+		zap.String("detected_intent", analysis.Intent),
+		zap.String("extracted_quantity", quantity),
+		zap.String("pricing_discount_source", quantityDiscountPricingSource),
+		zap.Bool("official_discount_config_used", quantityDiscountOfficialConfigUsed),
+		zap.String("response_template_id", reply.templateID),
+	)
+	return s.sendAndRemember(ctx, chatID, reply.text, quantityDiscountReplyStage(conversation), selectedLevelFromConversation(latest), reply.askedFields...)
+}
+
+func quantityDiscountReplyStage(conversation Conversation) string {
+	switch conversation.Stage {
+	case ClientStatePackagesPresented,
+		ClientStateAwaitingQuestionnaireConfirm,
+		StageBriefRequested:
+		return conversation.Stage
+	default:
+		return ClientStateAwaitingQualification
+	}
+}
+
 func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
 	normalized := normalizeText(text)
 	level := analysis.SelectedLevel
@@ -585,7 +743,7 @@ func (s *Service) handlePackagesPresented(ctx context.Context, chatID string, te
 		}
 		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
 	}
-	if analysis.Intent == IntentPortfolioRequest || hasAny(normalized, []string{"портфолио", "видео", "пример", "примеры", "мысал", "көрсет", "portfolio", "example"}) {
+	if analysis.Intent == IntentPortfolioRequest || containsPortfolioRequest(normalized) {
 		if conversation.SentPortfolio || conversation.Lead.PortfolioSent {
 			if isExplicitVideoRepeatRequest(text) {
 				return s.sendVideos(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, true)
@@ -643,6 +801,10 @@ func (s *Service) handleQuestionnaireConfirmation(ctx context.Context, chatID st
 
 	if isPositiveConfirmation(text) || analysis.Intent == IntentReadyToOrder || analysis.Intent == IntentPackageSelection {
 		return s.sendQuestionnaireAndAwaitBrief(ctx, chatID, language, level)
+	}
+	if isAdsFitQuestion(normalized) {
+		message := FAQAnswerText(faqAds, language) + "\n\n" + questionnaireConfirmationFallbackText(language)
+		return s.sendAndRemember(ctx, chatID, message, ClientStateAwaitingQuestionnaireConfirm, level)
 	}
 	if analysis.Intent == IntentHumanRequest {
 		return s.sendHumanHandoff(ctx, chatID, language, level)
@@ -1100,7 +1262,7 @@ func (s *Service) handleLocalCommand(ctx context.Context, chatID string, text st
 		return true, s.sendAndRemember(ctx, chatID, PriceText(language), StagePackageSuggested, 0)
 	}
 
-	if analysis.Intent == IntentPortfolioRequest || hasAny(normalized, []string{"портфолио", "видео", "пример", "примеры", "мысал", "көрсет", "варианты", "вариант", "portfolio", "example"}) {
+	if analysis.Intent == IntentPortfolioRequest || containsPortfolioRequest(normalized) || hasAny(normalized, []string{"көрсет", "варианты", "вариант"}) {
 		s.info("local rule used", zap.String("chat_hash", chatFingerprint(chatID)), zap.String("rule", "portfolio_request"))
 		level := requestedLevelFromText(text)
 		allowRepeat := isExplicitVideoRepeatRequest(text)
@@ -1317,6 +1479,24 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		s.info("outgoing whatsapp reply skipped because automation is closed",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("stage", stage),
+		)
+		return nil
+	}
+	validation := validateOutgoingReply(message, stage, latest)
+	if validation.Prevented {
+		s.warn("outgoing whatsapp reply adjusted by validation gate",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+			zap.String("final_reply_validation", validation.Status),
+			zap.String("final_reply_preview", previewText(validation.Message, 180)),
+		)
+	}
+	message = strings.TrimSpace(validation.Message)
+	if message == "" {
+		s.info("outgoing whatsapp reply skipped by validation gate",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+			zap.String("final_reply_validation", validation.Status),
 		)
 		return nil
 	}
@@ -1694,6 +1874,7 @@ func adminLeadNotificationText(conversation Conversation) string {
 		"Ниша: "+valueOrDash(lead.Niche),
 		"Цель: "+valueOrDash(lead.Goal),
 		"Срок: "+valueOrDash(lead.Deadline),
+		"Объём роликов: "+valueOrDash(lead.VideoQuantity),
 		"Пакет: "+adminPackageLabel(lead.SelectedPackage),
 		"",
 		"Намерение клиента: "+adminClientIntent(conversation),
@@ -2234,13 +2415,16 @@ func fieldsAskedByMessage(message string, stage string) []string {
 		return normalizeFieldList(fields)
 	}
 
-	if containsAny(normalized, []string{"ниша", "niche", "қай ниша", "сала"}) {
+	if containsAny(normalized, []string{"ниша", "niche", "қай ниша", "сала", "что продаете", "что продаёте", "что продвигаем", "что именно продвигаем"}) {
 		add(fieldNiche)
+	}
+	if containsAny(normalized, []string{"кто ваша аудитория", "ваша аудитория", "кто ваш клиент", "кто клиенты", "target audience"}) {
+		add(fieldTargetAudience)
 	}
 	if containsAny(normalized, []string{"цель", "мақсат", "goal", "заяв", "продаж", "узнаваем", "leads", "sales", "awareness"}) {
 		add(fieldGoal)
 	}
-	if containsAny(normalized, []string{"instagram", "tiktok", "facebook", "whatsapp", "сайт", "website", "площад", "платформ", "қай жерде", "where will you use"}) {
+	if containsAny(normalized, []string{"instagram", "tiktok", "facebook", "whatsapp", "сайт", "website", "референс", "reference", "площад", "платформ", "қай жерде", "where will you use"}) {
 		add(fieldPlatform)
 	}
 	if containsAny(normalized, []string{"срок", "мерзім", "timeline", "когда", "deadline"}) {
@@ -2249,7 +2433,13 @@ func fieldsAskedByMessage(message string, stage string) []string {
 	if containsAny(normalized, []string{"ии-ролик", "ai ролик", "ai video", "бұрын ai", "previously used"}) {
 		add(fieldPreviousAIAds)
 	}
-	if containsAny(normalized, []string{"пакет", "формат", "test", "basic", "standard", "тест", "базов", "стандарт", "premium", "премиум"}) {
+	if containsAny(normalized, []string{"какой формат вам понравился", "какой формат понравился", "какой формат ближе", "which format do you like", "what format did you like"}) {
+		add(fieldLikedFormats)
+	} else if containsAny(normalized, []string{
+		"какой пакет", "какой формат берем", "какой формат берём", "выберите подходящий формат",
+		"выберите формат", "қай формат", "which package", "choose your format", "choose package",
+		"test", "basic", "standard", "тест", "базов", "стандарт", "premium", "премиум",
+	}) {
 		add(fieldPackageInterest)
 	}
 	if stage == StageBriefRequested || containsAny(normalized, []string{"бриф", "brief"}) {
@@ -2471,8 +2661,8 @@ func shouldAcknowledgePostHandoffBrief(text string, language string, conversatio
 
 func isExplicitVideoRequest(text string) bool {
 	normalized := normalizeText(text)
-	return hasAny(normalized, []string{
-		"портфолио", "видео", "пример", "примеры", "мысал", "көрсет", "покаж", "отправ", "жібер",
+	return containsPortfolioRequest(normalized) || hasAny(normalized, []string{
+		"көрсет", "покаж", "отправ", "жібер",
 		"тестовый", "базовый", "стандарт", "премиум", "test", "basic", "standard", "premium",
 	})
 }

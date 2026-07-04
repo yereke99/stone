@@ -85,6 +85,11 @@ func (m *Manager) nextReplies(state *State, text string, exists bool) []Reply {
 		state.Step = StepClosing
 		return singleReply(refusalText(string(state.Language)))
 	}
+	if analysis.Intent == IntentQuantityDiscountQuestion {
+		reply := quantityDiscountResponse(string(state.Language), state.Lead)
+		state.Step = StepDiagnosticsGoal
+		return singleReply(reply.text)
+	}
 	if analysis.Intent == IntentPriceQuestion || containsAny(normalize(text), []string{"цена", "стоимость", "сколько", "прайс", "қанша", "баға", "price", "cost"}) {
 		level := requestedLevelFromText(text)
 		if level == 0 {
@@ -258,10 +263,20 @@ func containsObjection(text string) bool {
 }
 
 func containsPortfolioRequest(text string) bool {
-	return containsAny(normalize(text), []string{
-		"портфолио", "пример", "примеры", "кейс", "кейсы", "portfolio", "example", "examples",
-		"case", "cases", "мысал",
-	})
+	normalized := normalizeForAnalysis(text)
+	if normalized == "" {
+		return false
+	}
+	for _, phrase := range []string{
+		"портфолио", "пример", "примеры", "кейс", "кейсы", "кейстер", "образец", "образцы",
+		"есть образцы", "есть примеры", "покажите примеры", "покажи пример",
+		"portfolio", "example", "examples", "case", "cases", "мысал",
+	} {
+		if containsWordOrPhrase(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsReadySignal(text string) bool {

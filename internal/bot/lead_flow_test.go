@@ -545,7 +545,7 @@ func TestSelectedPackageContinuesCollectingMissingQualificationFields(t *testing
 
 	conversation = snapshotConversation(t, store, chatID)
 	if conversation.Stage != ClientStateAwaitingQuestionnaireConfirm || conversation.QuestionnaireSent {
-		t.Fatalf("unexpected state after qualification completed: stage=%q questionnaire=%v", conversation.Stage, conversation.QuestionnaireSent)
+		t.Fatalf("unexpected state after qualification completed: stage=%q questionnaire=%v lead=%#v", conversation.Stage, conversation.QuestionnaireSent, conversation.Lead)
 	}
 	last = sender.messages[len(sender.messages)-1]
 	if !strings.Contains(last, "Отправить анкету?") {
@@ -588,7 +588,7 @@ func TestPendingQuestionnaireOpensBriefAfterQualificationCompleted(t *testing.T)
 
 	conversation := snapshotConversation(t, store, chatID)
 	if conversation.Stage != StageBriefRequested || !conversation.QuestionnaireSent || !conversation.Lead.BriefRequested {
-		t.Fatalf("brief was not opened after pending questionnaire became qualified: stage=%q questionnaire=%v brief=%v", conversation.Stage, conversation.QuestionnaireSent, conversation.Lead.BriefRequested)
+		t.Fatalf("brief was not opened after pending questionnaire became qualified: stage=%q questionnaire=%v brief=%v lead=%#v", conversation.Stage, conversation.QuestionnaireSent, conversation.Lead.BriefRequested, conversation.Lead)
 	}
 	last := sender.messages[len(sender.messages)-1]
 	if last != BriefText("ru") {

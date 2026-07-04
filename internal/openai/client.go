@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -30,61 +32,101 @@ type Message struct {
 }
 
 type SalesResponse struct {
-	Reply            string   `json:"reply"`
-	Language         string   `json:"language"`
-	Stage            string   `json:"stage"`
-	RecommendedLevel int      `json:"recommended_level"`
-	SendVideos       []string `json:"send_videos"`
-	AskBrief         bool     `json:"ask_brief"`
-	NeedHuman        bool     `json:"need_human"`
-	LeadStatus       string   `json:"lead_status"`
-	CompletedFields  []string `json:"completed_fields"`
-	AskedFields      []string `json:"asked_fields"`
+	Intent            string                         `json:"intent"`
+	ExtractedFields   CustomerUnderstandingExtracted `json:"extracted_fields"`
+	AnsweredQuestions []CustomerAnsweredQuestion     `json:"answered_questions"`
+	MissingFields     []string                       `json:"missing_fields"`
+	ReplyText         string                         `json:"reply_text"`
+	NextAction        string                         `json:"next_action"`
+	NeedsHuman        bool                           `json:"needs_human"`
+	Confidence        float64                        `json:"confidence"`
+	Reply             string                         `json:"reply"`
+	Language          string                         `json:"language"`
+	Stage             string                         `json:"stage"`
+	RecommendedLevel  int                            `json:"recommended_level"`
+	SendVideos        []string                       `json:"send_videos"`
+	AskBrief          bool                           `json:"ask_brief"`
+	NeedHuman         bool                           `json:"need_human"`
+	LeadStatus        string                         `json:"lead_status"`
+	CompletedFields   []string                       `json:"completed_fields"`
+	AskedFields       []string                       `json:"asked_fields"`
 }
 
 type CustomerUnderstanding struct {
-	Language              string   `json:"language"`
-	Intent                string   `json:"intent"`
-	Niche                 *string  `json:"niche"`
-	Goal                  *string  `json:"goal"`
-	Deadline              *string  `json:"deadline"`
-	Platform              *string  `json:"platform"`
-	ProductOrService      *string  `json:"product_or_service"`
-	StrongSide            *string  `json:"strong_side"`
-	TargetAudience        *string  `json:"target_audience"`
-	Offer                 *string  `json:"offer"`
-	WebsiteOrInstagram    *string  `json:"website_or_instagram"`
-	ReferenceLinks        []string `json:"reference_links"`
-	Budget                *string  `json:"budget"`
-	PackageInterest       *string  `json:"package_interest"`
-	AsksForFoodExamples   bool     `json:"asks_for_food_examples"`
-	AsksForMoreOptions    bool     `json:"asks_for_more_options"`
-	ReadyForQuestionnaire bool     `json:"ready_for_questionnaire"`
-	NeedsManager          bool     `json:"needs_manager"`
-	MissingFields         []string `json:"missing_fields"`
-	Confidence            float64  `json:"confidence"`
+	Language              string                     `json:"language"`
+	Intent                string                     `json:"intent"`
+	Niche                 *string                    `json:"niche"`
+	Goal                  *string                    `json:"goal"`
+	Deadline              *string                    `json:"deadline"`
+	Platform              *string                    `json:"platform"`
+	ProductOrService      *string                    `json:"product_or_service"`
+	StrongSide            *string                    `json:"strong_side"`
+	TargetAudience        *string                    `json:"target_audience"`
+	Offer                 *string                    `json:"offer"`
+	WebsiteOrInstagram    *string                    `json:"website_or_instagram"`
+	ReferenceLinks        []string                   `json:"reference_links"`
+	Budget                *string                    `json:"budget"`
+	Quantity              *string                    `json:"quantity"`
+	VideoQuantity         *string                    `json:"video_quantity"`
+	PackageInterest       *string                    `json:"package_interest"`
+	SelectedPackage       *string                    `json:"selected_package"`
+	LikedFormats          []string                   `json:"liked_formats"`
+	VoicePreference       *string                    `json:"voice_preference"`
+	CopyrightConcern      *string                    `json:"copyright_concern"`
+	CampaignContext       *string                    `json:"campaign_context"`
+	HookIdea              *string                    `json:"hook_idea"`
+	City                  *string                    `json:"city"`
+	AsksForFoodExamples   bool                       `json:"asks_for_food_examples"`
+	AsksForMoreOptions    bool                       `json:"asks_for_more_options"`
+	ReadyForQuestionnaire bool                       `json:"ready_for_questionnaire"`
+	NeedsManager          bool                       `json:"needs_manager"`
+	NeedsHuman            bool                       `json:"needs_human"`
+	MissingFields         []string                   `json:"missing_fields"`
+	AnsweredQuestions     []CustomerAnsweredQuestion `json:"answered_questions"`
+	ReplyText             string                     `json:"reply_text"`
+	NextAction            string                     `json:"next_action"`
+	Confidence            float64                    `json:"confidence"`
 
 	// Legacy fields are kept for old tests and deployments that still return the
 	// previous nested analyzer shape. The live schema below now asks for the flat
 	// lead-analyzer contract.
-	Extracted   CustomerUnderstandingExtracted `json:"extracted,omitempty"`
-	Sentiment   CustomerUnderstandingSentiment `json:"sentiment,omitempty"`
-	StateUpdate CustomerUnderstandingState     `json:"state_update,omitempty"`
-	ReplyPlan   CustomerUnderstandingReplyPlan `json:"reply_plan,omitempty"`
+	ExtractedFields CustomerUnderstandingExtracted `json:"extracted_fields,omitempty"`
+	Extracted       CustomerUnderstandingExtracted `json:"extracted,omitempty"`
+	Sentiment       CustomerUnderstandingSentiment `json:"sentiment,omitempty"`
+	StateUpdate     CustomerUnderstandingState     `json:"state_update,omitempty"`
+	ReplyPlan       CustomerUnderstandingReplyPlan `json:"reply_plan,omitempty"`
 }
 
 type CustomerUnderstandingExtracted struct {
-	Niche           *string `json:"niche"`
-	City            *string `json:"city"`
-	Goal            *string `json:"goal"`
-	Deadline        *string `json:"deadline"`
-	Platform        *string `json:"platform"`
-	TargetAudience  *string `json:"target_audience"`
-	StrongSide      *string `json:"strong_side"`
-	Offer           *string `json:"offer"`
-	BusinessLink    *string `json:"business_link"`
-	Budget          *string `json:"budget"`
-	PackageInterest *string `json:"package_interest"`
+	Niche              *string  `json:"niche"`
+	ProductOrService   *string  `json:"product_or_service"`
+	TargetAudience     *string  `json:"target_audience"`
+	Goal               *string  `json:"goal"`
+	Deadline           *string  `json:"deadline"`
+	Quantity           *string  `json:"quantity"`
+	VideoQuantity      *string  `json:"video_quantity"`
+	Budget             *string  `json:"budget"`
+	ReferenceLinks     []string `json:"reference_links"`
+	LikedFormats       []string `json:"liked_formats"`
+	SelectedPackage    *string  `json:"selected_package"`
+	PackageInterest    *string  `json:"package_interest"`
+	VoicePreference    *string  `json:"voice_preference"`
+	CopyrightConcern   *string  `json:"copyright_concern"`
+	CampaignContext    *string  `json:"campaign_context"`
+	HookIdea           *string  `json:"hook_idea"`
+	City               *string  `json:"city"`
+	WebsiteOrInstagram *string  `json:"website_or_instagram"`
+	BusinessLink       *string  `json:"business_link"`
+	Platform           *string  `json:"platform"`
+	StrongSide         *string  `json:"strong_side"`
+	Offer              *string  `json:"offer"`
+}
+
+type CustomerAnsweredQuestion struct {
+	BotQuestion    string  `json:"bot_question"`
+	CustomerAnswer string  `json:"customer_answer"`
+	Field          string  `json:"field"`
+	Confidence     float64 `json:"confidence"`
 }
 
 type CustomerUnderstandingSentiment struct {
@@ -146,10 +188,21 @@ func (c *Client) GenerateSalesReply(ctx context.Context, systemPrompt string, me
 		input = append(input, newInput(role, content))
 	}
 
+	model := strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MODEL"))
+	if model == "" {
+		model = c.model
+	}
+	maxOutputTokens := c.maxOutputTokens
+	if raw := strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MAX_TOKENS")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			maxOutputTokens = value
+		}
+	}
+
 	payload := responseRequest{
-		Model:           c.model,
+		Model:           model,
 		Input:           input,
-		MaxOutputTokens: c.maxOutputTokens,
+		MaxOutputTokens: maxOutputTokens,
 		Temperature:     c.temperature,
 		Store:           false,
 		Text: responseText{
@@ -407,103 +460,54 @@ func extractOutputText(data []byte) (string, error) {
 }
 
 func salesResponseSchema() map[string]any {
+	return conversationDecisionSchema("stone_sales_response")
+}
+
+func conversationDecisionSchema(name string) map[string]any {
+	_ = name
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"required": []string{
-			"reply",
-			"language",
-			"stage",
-			"recommended_level",
-			"send_videos",
-			"ask_brief",
-			"need_human",
-			"lead_status",
-			"completed_fields",
-			"asked_fields",
+			"intent",
+			"extracted_fields",
+			"answered_questions",
+			"missing_fields",
+			"reply_text",
+			"next_action",
+			"needs_human",
+			"confidence",
 		},
 		"properties": map[string]any{
-			"reply": map[string]any{
-				"type": "string",
-			},
-			"language": map[string]any{
-				"type": "string",
-				"enum": []string{"ru", "kk", "en"},
-			},
-			"stage": map[string]any{
-				"type": "string",
-				"enum": []string{
-					"new_lead",
-					"qualification",
-					"platform_detected",
-					"ai_experience_checked",
-					"package_suggested",
-					"package_selected",
-					"portfolio_sent",
-					"brief_requested",
-					"brief_collected",
-					"handoff_required",
-					"muted",
-					"greeting",
-					"diagnosis",
-					"offer",
-					"portfolio",
-					"objection",
-					"closing",
-					"offtopic",
-				},
-			},
-			"recommended_level": map[string]any{
-				"type":    "integer",
+			"intent":             conversationIntentSchema(),
+			"extracted_fields":   extractedFieldsSchema(),
+			"answered_questions": answeredQuestionsSchema(),
+			"missing_fields":     businessFieldListSchema(),
+			"reply_text":         map[string]any{"type": "string"},
+			"next_action":        nextActionSchema(),
+			"needs_human":        map[string]any{"type": "boolean"},
+			"confidence": map[string]any{
+				"type":    "number",
 				"minimum": 0,
-				"maximum": 3,
+				"maximum": 1,
 			},
-			"send_videos": map[string]any{
-				"type": "array",
-				"items": map[string]any{
-					"type": "string",
-					"enum": []string{"video_level_1.mp4", "video_level_2.mp4", "video_level_3.mp4"},
-				},
-			},
-			"ask_brief": map[string]any{
-				"type": "boolean",
-			},
-			"need_human": map[string]any{
-				"type": "boolean",
-			},
-			"lead_status": map[string]any{
-				"type": "string",
-				"enum": []string{"neutral", "new", "warm", "hot", "handoff_required", "closed", "muted"},
-			},
-			"completed_fields": fieldListSchema(),
-			"asked_fields":     fieldListSchema(),
 		},
 	}
 }
 
 func customerUnderstandingSchema() map[string]any {
-	nullableString := func() map[string]any {
-		return map[string]any{"type": []string{"string", "null"}}
-	}
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"required": []string{
 			"language",
 			"intent",
-			"niche",
-			"goal",
-			"deadline",
-			"platform",
-			"product_or_service",
-			"target_audience",
-			"website_or_instagram",
-			"package_interest",
-			"asks_for_food_examples",
-			"asks_for_more_options",
-			"ready_for_questionnaire",
-			"needs_manager",
+			"extracted_fields",
+			"answered_questions",
 			"missing_fields",
+			"reply_text",
+			"next_action",
+			"needs_human",
 			"confidence",
 		},
 		"properties": map[string]any{
@@ -511,51 +515,166 @@ func customerUnderstandingSchema() map[string]any {
 				"type": "string",
 				"enum": []string{"ru", "kk", "en", "mixed", "unknown"},
 			},
-			"intent": map[string]any{
-				"type": "string",
-				"enum": []string{
-					"greeting",
-					"qualification_answer",
-					"asks_examples",
-					"asks_packages",
-					"asks_price",
-					"asks_discount",
-					"asks_deadline",
-					"asks_duration",
-					"asks_human",
-					"ready_to_order",
-					"defer",
-					"unclear",
-					"irrelevant",
-				},
-			},
-			"niche":                nullableString(),
-			"goal":                 nullableString(),
-			"deadline":             nullableString(),
-			"platform":             nullableString(),
-			"product_or_service":   nullableString(),
-			"target_audience":      nullableString(),
-			"website_or_instagram": nullableString(),
-			"package_interest": map[string]any{
-				"type": []string{"string", "null"},
-				"enum": []any{"test", "basic", "standard", "unknown", nil},
-			},
-			"asks_for_food_examples":  map[string]any{"type": "boolean"},
-			"asks_for_more_options":   map[string]any{"type": "boolean"},
-			"ready_for_questionnaire": map[string]any{"type": "boolean"},
-			"needs_manager":           map[string]any{"type": "boolean"},
-			"missing_fields": map[string]any{
-				"type": "array",
-				"items": map[string]any{
-					"type": "string",
-					"enum": []string{"niche", "goal", "deadline"},
-				},
-			},
+			"intent":             conversationIntentSchema(),
+			"extracted_fields":   extractedFieldsSchema(),
+			"answered_questions": answeredQuestionsSchema(),
+			"missing_fields":     businessFieldListSchema(),
+			"reply_text":         map[string]any{"type": "string"},
+			"next_action":        nextActionSchema(),
+			"needs_human":        map[string]any{"type": "boolean"},
 			"confidence": map[string]any{
 				"type":    "number",
 				"minimum": 0,
 				"maximum": 1,
 			},
+		},
+	}
+}
+
+func nullableStringSchema() map[string]any {
+	return map[string]any{"type": []string{"string", "null"}}
+}
+
+func nullablePackageSchema() map[string]any {
+	return map[string]any{
+		"type": []string{"string", "null"},
+		"enum": []any{"test", "basic", "standard", "needs_manager_recommendation", "unknown", nil},
+	}
+}
+
+func stringArraySchema() map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type": "string",
+		},
+	}
+}
+
+func conversationIntentSchema() map[string]any {
+	return map[string]any{
+		"type": "string",
+		"enum": []string{
+			"qualification_answer",
+			"business_link",
+			"reference_link",
+			"price_question",
+			"discount_question",
+			"quantity_answer",
+			"case_request",
+			"niche_specific_case_request",
+			"feasibility_question",
+			"format_preference",
+			"confusion",
+			"objection",
+			"voice_question",
+			"copyright_question",
+			"package_selection",
+			"human_request",
+			"stop_or_opt_out",
+			"greeting",
+			"defer",
+			"other",
+		},
+	}
+}
+
+func nextActionSchema() map[string]any {
+	return map[string]any{
+		"type": "string",
+		"enum": []string{"send_text", "send_cases", "send_video", "ask_next_question", "handoff", "no_reply"},
+	}
+}
+
+func businessFieldListSchema() map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type": "string",
+			"enum": []string{
+				"niche",
+				"product_or_service",
+				"target_audience",
+				"goal",
+				"deadline",
+				"quantity",
+				"video_quantity",
+				"budget",
+				"reference_links",
+				"liked_formats",
+				"selected_package",
+				"package_interest",
+				"voice_preference",
+				"copyright_concern",
+				"campaign_context",
+				"hook_idea",
+				"city",
+				"website_or_instagram",
+			},
+		},
+	}
+}
+
+func answeredQuestionsSchema() map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"bot_question", "customer_answer", "field", "confidence"},
+			"properties": map[string]any{
+				"bot_question":    map[string]any{"type": "string"},
+				"customer_answer": map[string]any{"type": "string"},
+				"field":           map[string]any{"type": "string"},
+				"confidence": map[string]any{
+					"type":    "number",
+					"minimum": 0,
+					"maximum": 1,
+				},
+			},
+		},
+	}
+}
+
+func extractedFieldsSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"niche",
+			"product_or_service",
+			"target_audience",
+			"goal",
+			"deadline",
+			"quantity",
+			"budget",
+			"reference_links",
+			"liked_formats",
+			"selected_package",
+			"voice_preference",
+			"copyright_concern",
+			"campaign_context",
+			"hook_idea",
+			"city",
+			"website_or_instagram",
+		},
+		"properties": map[string]any{
+			"niche":                nullableStringSchema(),
+			"product_or_service":   nullableStringSchema(),
+			"target_audience":      nullableStringSchema(),
+			"goal":                 nullableStringSchema(),
+			"deadline":             nullableStringSchema(),
+			"quantity":             nullableStringSchema(),
+			"budget":               nullableStringSchema(),
+			"reference_links":      stringArraySchema(),
+			"liked_formats":        stringArraySchema(),
+			"selected_package":     nullablePackageSchema(),
+			"voice_preference":     nullableStringSchema(),
+			"copyright_concern":    nullableStringSchema(),
+			"campaign_context":     nullableStringSchema(),
+			"hook_idea":            nullableStringSchema(),
+			"city":                 nullableStringSchema(),
+			"website_or_instagram": nullableStringSchema(),
 		},
 	}
 }

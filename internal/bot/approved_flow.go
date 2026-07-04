@@ -57,7 +57,7 @@ func WeeklyDiscountFollowupText(language string) string {
 	return weeklyDiscountFollowupText
 }
 
-const weeklyDiscountFollowupText = "Здравствуйте! 👋\n\n🎬 Сделали новый AI-проект и решили поделиться результатом.\n\n🎁 Для новых клиентов действует скидка 15% на первый заказ.\n\n⏳ Акция действует только 3 дня.\n\nЕсли интересно протестировать напишите + в ответ."
+const weeklyDiscountFollowupText = "Здравствуйте! 👋\n\n🎬 Сделали новый AI-проект и решили поделиться результатом.\n\n🎁 Для новых клиентов условия можно обсудить индивидуально под задачу.\n\nЕсли интересно протестировать, напишите + в ответ."
 
 func BriefContextReturnText(language string) string {
 	switch normalizeLanguageCode(language) {
@@ -143,7 +143,7 @@ func detectFAQIntent(text string) (string, bool) {
 		return faqNoShooting, true
 	case containsAny(normalized, []string{"что входит", "что включено", "входит в стоимость", "включено в стоимость", "за что плат", "что получу"}):
 		return faqIncluded, true
-	case containsAny(normalized, []string{"под рекламу", "для рекламы", "рекламный кабинет", "запуск рекламы", "подойдет для рекламы", "подойдёт для рекламы", "лиды через рекламу"}):
+	case isAdsFitQuestion(normalized):
 		return faqAds, true
 	case containsAny(normalized, []string{"правки", "исправ", "передел", "корректиров", "можно изменить"}):
 		return faqRevisions, true
@@ -164,6 +164,15 @@ func detectFAQIntent(text string) (string, bool) {
 	}
 }
 
+func isAdsFitQuestion(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	return containsAny(normalized, []string{
+		"под рекламу", "для рекламы", "рекламный кабинет", "запуск рекламы",
+		"подойдет для рекламы", "подойдёт для рекламы", "подойдет под рекламу", "подойдёт под рекламу",
+		"лиды через рекламу",
+	})
+}
+
 func isBusinessRelevantMessage(text string, analysis CustomerAnalysis, faqDetected bool, conversation Conversation) bool {
 	if faqDetected || analysis.HasBusinessSignal() {
 		return true
@@ -172,9 +181,16 @@ func isBusinessRelevantMessage(text string, analysis CustomerAnalysis, faqDetect
 	case IntentGreeting,
 		IntentAnswer,
 		IntentPortfolioRequest,
+		IntentNicheSpecificCaseRequest,
+		IntentFeasibilityQuestion,
+		IntentConfusion,
+		IntentVoiceQuestion,
+		IntentCopyrightQuestion,
+		IntentFormatPreference,
 		IntentPriceQuestion,
 		IntentPackageQuestion,
 		IntentPackageSelection,
+		IntentQuantityDiscountQuestion,
 		IntentAgreement,
 		IntentRefusal,
 		IntentDeadlineQuestion,
@@ -199,6 +215,9 @@ func isBusinessRelevantMessage(text string, analysis CustomerAnalysis, faqDetect
 	}
 	if conversationIsWaitingForBrief(conversation) {
 		return isBriefLikeBusinessText(normalized)
+	}
+	if conversation.Stage == ClientStatePackagesPresented || conversation.PackagesSent || conversation.SentPortfolio || conversation.Lead.OfferSent || conversation.Lead.PortfolioSent || conversation.QuestionnaireOfferSent {
+		return true
 	}
 	return containsAny(normalized, []string{
 		"ролик", "видео", "ai", "ии", "нейросет", "реклама", "креатив", "пакет", "формат",

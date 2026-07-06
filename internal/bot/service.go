@@ -306,6 +306,14 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 			return err
 		}
 	}
+	if isExplicitOptOutText(text) {
+		s.info("incoming customer stop trigger detected",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+			zap.String("normalized_text", NormalizeAdminStopCommand(text)),
+		)
+		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut, true)
+	}
 	if isConversationClosedForAutomation(conversation) {
 		s.info("incoming message saved without automation reply",
 			automationSilenceFields(chatID, conversation, "protected_conversation_state")...,
@@ -428,7 +436,7 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 			}
 			return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
 		}
-		if llmReply.Usable && llmReply.Response.NextAction != "send_cases" && llmReply.Response.NextAction != "send_video" && llmReply.Response.NextAction != "handoff" {
+		if llmReply.Usable && llmReply.Response.NextAction != "send_cases" && llmReply.Response.NextAction != "send_video" && llmReply.Response.NextAction != "send_relevant_examples" && llmReply.Response.NextAction != "handoff" && llmReply.Response.RecommendedAction != "send_relevant_examples" && llmReply.Response.RecommendedAction != "stop_bot" {
 			conversation, err = s.store.Snapshot(ctx, chatID)
 			if err != nil {
 				return err
@@ -521,8 +529,14 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	if analysis.Intent == IntentFormatPreference {
 		return s.handleFormatPreference(ctx, chatID, language, conversation, analysis)
 	}
+	if analysis.Intent == IntentNegativeSelection {
+		return s.handleNegativeSelection(ctx, chatID, language, conversation, analysis)
+	}
 	if analysis.Intent == IntentNicheSpecificCaseRequest {
 		return s.handleNicheSpecificCaseRequest(ctx, chatID, language, conversation, analysis)
+	}
+	if s.shouldSendRelevantAIWorkExamples(conversation, analysis) {
+		return s.sendRelevantAIWorkExamples(ctx, chatID, language, conversation, analysis, "")
 	}
 	if conversation.QuestionnaireOfferSent && isAdsFitQuestion(text) {
 		message := FAQAnswerText(faqAds, language) + "\n\n" + questionnaireConfirmationFallbackText(language)
@@ -1054,6 +1068,9 @@ func (s *Service) stopAutomationSilently(ctx context.Context, chatID string, lev
 		}
 		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, note)
 	})
+	if err := s.store.SuppressAutomation(context.WithoutCancel(ctx), chatID, reason); err != nil {
+		return err
+	}
 	return s.cancelFollowups(ctx, chatID)
 }
 
@@ -1125,6 +1142,9 @@ func (s *Service) stopClient(ctx context.Context, chatID string, optOut bool) er
 		}
 	})
 	if err := s.store.UpdateState(ctx, chatID, stage, 0); err != nil {
+		return err
+	}
+	if err := s.store.SuppressAutomation(context.WithoutCancel(ctx), chatID, StopReasonCustomerOptOut); err != nil {
 		return err
 	}
 	return s.cancelFollowups(ctx, chatID)
@@ -1687,7 +1707,7 @@ func (s *Service) sendVideosWithCaptions(ctx context.Context, chatID string, fil
 			continue
 		}
 
-		filePath := filepath.Join(s.videoDir, fileName)
+		filePath := s.videoFilePath(fileName)
 		if _, err := os.Stat(filePath); err != nil {
 			s.warn("portfolio video file is unavailable; video not sent",
 				zap.String("chat_hash", chatFingerprint(chatID)),
@@ -2192,6 +2212,14 @@ func conversationPromptJSON(conversation Conversation) string {
 		}
 	}
 	sort.Ints(sentVideos)
+	sentVideoFiles := make([]string, 0, len(conversation.SentVideoFiles))
+	for fileName := range conversation.SentVideoFiles {
+		fileName = strings.TrimSpace(fileName)
+		if fileName != "" {
+			sentVideoFiles = append(sentVideoFiles, fileName)
+		}
+	}
+	sort.Strings(sentVideoFiles)
 
 	payload := struct {
 		Stage                string              `json:"stage"`
@@ -2201,6 +2229,7 @@ func conversationPromptJSON(conversation Conversation) string {
 		CompletedFields      []string            `json:"completed_fields"`
 		AskedFields          []string            `json:"asked_fields"`
 		SentVideos           []int               `json:"sent_videos"`
+		SentVideoFiles       []string            `json:"sent_video_files"`
 		SentPortfolio        bool                `json:"sent_portfolio"`
 		PackagesSent         bool                `json:"packages_sent"`
 		WantsQuestionnaire   bool                `json:"wants_questionnaire"`
@@ -2221,6 +2250,7 @@ func conversationPromptJSON(conversation Conversation) string {
 		CompletedFields:      mapKeys(conversation.CompletedFields),
 		AskedFields:          mapKeys(conversation.AskedFields),
 		SentVideos:           sentVideos,
+		SentVideoFiles:       sentVideoFiles,
 		SentPortfolio:        conversation.SentPortfolio || conversation.Lead.PortfolioSent,
 		PackagesSent:         conversation.PackagesSent || conversation.Lead.OfferSent,
 		WantsQuestionnaire:   conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire,
@@ -2258,8 +2288,8 @@ func dedupeVideos(files []string) []string {
 	seen := make(map[string]struct{}, len(files))
 	result := make([]string, 0, len(files))
 	for _, fileName := range files {
-		fileName = strings.TrimSpace(filepath.Base(fileName))
-		if _, ok := allowed[fileName]; !ok {
+		fileName = normalizeVideoFileForSend(fileName, allowed)
+		if fileName == "" {
 			continue
 		}
 		if _, exists := seen[fileName]; exists {
@@ -2269,6 +2299,28 @@ func dedupeVideos(files []string) []string {
 		result = append(result, fileName)
 	}
 	return result
+}
+
+func normalizeVideoFileForSend(fileName string, allowedPackageVideos map[string]struct{}) string {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return ""
+	}
+	if aiWorkPath := normalizeAIWorkVideoPath(fileName); aiWorkPath != "" {
+		return aiWorkPath
+	}
+	base := strings.TrimSpace(filepath.Base(fileName))
+	if _, ok := allowedPackageVideos[base]; ok {
+		return base
+	}
+	return ""
+}
+
+func (s *Service) videoFilePath(fileName string) string {
+	if aiWorkPath := normalizeAIWorkVideoPath(fileName); aiWorkPath != "" {
+		return aiWorkPath
+	}
+	return filepath.Join(s.videoDir, strings.TrimSpace(filepath.Base(fileName)))
 }
 
 func needsPortfolioExamplesBeforeFormatQuestion(message string) bool {
@@ -2862,6 +2914,202 @@ func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {
 	}
 }
 
+func (s *Service) shouldSendRelevantAIWorkExamples(conversation Conversation, analysis CustomerAnalysis) bool {
+	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested || conversation.QuestionnaireOfferSent {
+		return false
+	}
+	switch analysis.Intent {
+	case IntentPriceQuestion,
+		IntentPackageQuestion,
+		IntentPackageSelection,
+		IntentQuantityDiscountQuestion,
+		IntentHumanRequest,
+		IntentReadyToOrder,
+		IntentBriefAnswer,
+		IntentMute,
+		IntentDefer,
+		IntentNegativeReaction,
+		IntentFrustration:
+		return false
+	}
+	if len(qualificationMissingFields(conversation.Lead)) > 0 {
+		return false
+	}
+	selection := selectAIWorkExamples(conversation.Lead, analysis, maxAIWorkExamples)
+	if len(selection.Videos) == 0 {
+		return false
+	}
+	for _, video := range selection.Videos {
+		if _, sent := conversation.SentVideoFiles[video.Path]; !sent {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) handleNegativeSelection(ctx context.Context, chatID string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+	if s.shouldSendRelevantAIWorkExamples(conversation, analysis) {
+		intro := negativeSelectionRelevantExamplesText(language, conversation.Lead)
+		return s.sendRelevantAIWorkExamples(ctx, chatID, language, conversation, analysis, intro)
+	}
+	if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
+		message := negativeSelectionMissingText(language, conversation.Lead)
+		return s.sendAndRemember(ctx, chatID, message, ClientStateAwaitingQualification, selectedLevelFromConversation(conversation), qualificationFollowupAskedFields(message, missing)...)
+	}
+	return s.sendAndRemember(ctx, chatID, negativeSelectionFallbackText(language), replyStageForConversation(conversation), selectedLevelFromConversation(conversation), fieldPackageInterest)
+}
+
+func (s *Service) sendRelevantAIWorkExamples(ctx context.Context, chatID string, language string, conversation Conversation, analysis CustomerAnalysis, introOverride string) error {
+	selection := selectAIWorkExamples(conversation.Lead, analysis, maxAIWorkExamples)
+	if len(selection.Videos) == 0 {
+		return nil
+	}
+
+	files := make([]string, 0, len(selection.Videos))
+	captions := make(map[string]string, len(selection.Videos))
+	for _, video := range selection.Videos {
+		if _, sent := conversation.SentVideoFiles[video.Path]; sent {
+			continue
+		}
+		files = append(files, video.Path)
+		captions[video.Path] = aiWorkCaption(video, language, selection.Exact)
+	}
+	if len(files) == 0 {
+		return nil
+	}
+
+	intro := strings.TrimSpace(introOverride)
+	if intro == "" {
+		intro = relevantAIWorkIntroText(language, conversation.Lead, selection)
+	}
+	s.info("selected portfolio tags and videos",
+		zap.String("chat_hash", chatFingerprint(chatID)),
+		zap.String("action", "send_relevant_examples"),
+		zap.Strings("portfolio_tags", selection.Tags),
+		zap.Strings("video_files", files),
+		zap.Bool("exact_match", selection.Exact),
+	)
+	if err := s.sendAndRemember(ctx, chatID, intro, StagePortfolioSent, selectedLevelFromConversation(conversation)); err != nil {
+		return err
+	}
+	_, err := s.sendVideosWithCaptions(ctx, chatID, files, language, false, captions)
+	return err
+}
+
+func relevantAIWorkIntroText(language string, lead LeadState, selection AIWorkSelection) string {
+	label := aiWorkSelectionLabel(selection, language)
+	summary := aiWorkLeadSummary(lead)
+	need := aiWorkNeedSummary(lead, selection)
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		if summary != "" && need != "" {
+			return "Түсіндім: " + summary + ", " + need + ". Қазір осы бағытқа жақын мысалдарды жіберемін."
+		}
+		if summary != "" {
+			return "Түсіндім: " + summary + ". Қазір " + label + " бойынша жақын мысалдарды жіберемін."
+		}
+		return "Түсіндім. Қазір сіздің бағытыңызға жақын мысалдарды жіберемін."
+	case "en":
+		if summary != "" && need != "" {
+			return "Got it: " + summary + ", " + need + ". I will send relevant examples now."
+		}
+		if summary != "" {
+			return "Got it: " + summary + ". I will send relevant " + label + " examples now."
+		}
+		return "Got it. I will send the closest relevant examples now."
+	default:
+		if summary != "" && need != "" {
+			return "Понял вас: " + summary + ", " + need + ". Сейчас отправлю подходящие примеры по " + label + ". После этого смогу предложить формат и цену."
+		}
+		if summary != "" {
+			return "Понял вас: " + summary + ". Сейчас отправлю подходящие примеры по " + label + ". После этого смогу предложить формат и цену."
+		}
+		return "Понял вас. Сейчас отправлю ближайшие подходящие примеры. После этого смогу предложить формат и цену."
+	}
+}
+
+func negativeSelectionRelevantExamplesText(language string, lead LeadState) string {
+	summary := aiWorkLeadSummary(lead)
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		if summary != "" {
+			return "Түсіндім, ол форматтардың ешқайсысы жақын емес. Онда " + summary + " бағытына жақынырақ мысалдарды жіберемін."
+		}
+		return "Түсіндім, ол форматтардың ешқайсысы жақын емес. Онда жақынырақ мысалдарды жіберемін."
+	case "en":
+		if summary != "" {
+			return "Got it, none of those formats fit. I will send examples closer to " + summary + "."
+		}
+		return "Got it, none of those formats fit. I will send closer examples."
+	default:
+		if summary != "" {
+			return "Понял, из тех форматов ничего не выбрали. Тогда отправлю примеры ближе под вашу задачу: " + summary + "."
+		}
+		return "Понял, из тех форматов ничего не выбрали. Тогда отправлю примеры ближе под вашу задачу."
+	}
+}
+
+func negativeSelectionMissingText(language string, lead LeadState) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім, ол форматтардан ешқайсысы жақын емес. Дұрысын ұсыну үшін нақтылайын: " + lowerFirst(qualificationFollowupText(language, Conversation{Lead: lead}))
+	case "en":
+		return "Got it, none of those formats fit. To suggest the right one: " + lowerFirst(qualificationFollowupText(language, Conversation{Lead: lead}))
+	default:
+		return "Понял, из этих форматов ничего не выбрали. Чтобы подобрать точнее: " + lowerFirst(qualificationFollowupText(language, Conversation{Lead: lead}))
+	}
+}
+
+func negativeSelectionFallbackText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім, ол форматтарды бекітпейміз. Жақынырақ стиль немесе пакет ұсыну үшін міндетіңізге қарай қайта қараймын."
+	case "en":
+		return "Got it, we will not lock those formats. I can suggest a closer style or package for your task."
+	default:
+		return "Понял, эти форматы не фиксируем. Могу предложить другой стиль или пакет ближе под вашу задачу."
+	}
+}
+
+func aiWorkLeadSummary(lead LeadState) string {
+	for _, value := range []string{lead.ProductOrService, lead.Niche} {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func aiWorkNeedSummary(lead LeadState, selection AIWorkSelection) string {
+	tags := normalizePortfolioTags(selection.Tags)
+	hasDrone := stringInSlice("drone", tags)
+	hasVisualization := stringInSlice("visualization", tags)
+	if hasDrone && hasVisualization {
+		return "нужна визуализация перспектив и съёмка с дрона для продажи"
+	}
+	if goal := strings.TrimSpace(lead.Goal); goal != "" {
+		return "цель — " + goal
+	}
+	return ""
+}
+
+func aiWorkSelectionLabel(selection AIWorkSelection, language string) string {
+	if len(selection.Videos) > 0 {
+		return aiWorkCategoryLabel(selection.Videos[0].Category, language)
+	}
+	return "вашей нише"
+}
+
+func stringInSlice(value string, values []string) bool {
+	for _, item := range values {
+		if strings.TrimSpace(item) == value {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) handleFoodExamplesRequest(ctx context.Context, chatID string, language string, conversation Conversation) error {
 	missing := qualificationMissingFields(conversation.Lead)
 	stage := ClientStateAwaitingQualification
@@ -3148,6 +3396,9 @@ func isClientDeferText(text string) bool {
 }
 
 func isExplicitOptOutText(text string) bool {
+	if IsAdminStopCommand(text) {
+		return true
+	}
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" {
 		return false

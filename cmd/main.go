@@ -244,15 +244,6 @@ func processNotification(
 	}
 	messageID, dedupeMessageID = notificationMessageKeys(notification, chatID, text)
 
-	if conversationStore.IsSuppressedPhoneOrChatID(chatID, bot.NormalizePhone(chatID)) {
-		zapLogger.Info("incoming message skipped because chat is in automation suppression list",
-			zap.String("message_id", messageID),
-			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
-		)
-		shouldDelete = true
-		return
-	}
-
 	zapLogger.Info("incoming notification accepted",
 		zap.String("message_type", notification.TypeMessage()),
 		zap.String("message_id", messageID),
@@ -298,6 +289,32 @@ func processNotification(
 		return
 	}
 	processingStarted = dedupeDecision == bot.MessageDedupeNew
+	if conversationStore.IsSuppressedPhoneOrChatID(chatID, bot.NormalizePhone(chatID)) {
+		if err := conversationStore.AppendMessage(ctx, chatID, "user", text); err != nil {
+			zapLogger.Warn("suppressed incoming message transcript save failed",
+				zap.String("message_id", messageID),
+				zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+				zap.Error(err),
+			)
+			return
+		}
+		if err := conversationStore.MarkIncoming(ctx, chatID, text); err != nil {
+			zapLogger.Warn("suppressed incoming state update failed",
+				zap.String("message_id", messageID),
+				zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+				zap.Error(err),
+			)
+			return
+		}
+		processingSucceeded = true
+		conversationStore.MarkProcessedMessage(chatID, dedupeMessageID)
+		zapLogger.Info("incoming message saved and skipped because chat is in automation suppression list",
+			zap.String("message_id", messageID),
+			zap.String("chat_hash", bot.ChatFingerprintForLog(chatID)),
+		)
+		shouldDelete = true
+		return
+	}
 
 	msg := bot.IncomingMessage{
 		IDMessage:       messageID,

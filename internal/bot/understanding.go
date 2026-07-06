@@ -19,12 +19,17 @@ Stone Production sells AI advertising videos made in 48 hours without filming. T
 
 Output contract:
 - language: ru, kk, en, mixed, or unknown.
-- intent: one of qualification_answer, business_link, reference_link, price_question, discount_question, quantity_answer, case_request, niche_specific_case_request, feasibility_question, format_preference, confusion, objection, voice_question, copyright_question, package_selection, human_request, stop_or_opt_out, greeting, defer, other.
+- intent: one of qualification_answer, business_link, reference_link, price_question, discount_question, quantity_answer, case_request, niche_specific_case_request, feasibility_question, format_preference, negative_selection, confusion, objection, voice_question, copyright_question, package_selection, human_request, stop_or_opt_out, greeting, defer, other.
+- message_meaning: short plain-language meaning of the latest customer message in context.
+- should_update_state: true only when the latest message carries clear new business facts or a clear stop/handoff/proceed signal.
 - extracted_fields: always include every field from the schema. Use null for unknown scalar fields and [] for unknown arrays.
+- do_not_overwrite_fields: fields that must stay unchanged because the latest message is weak, negative, contextual, or only answers a bot question.
 - answered_questions: bot question/customer answer pairs when the context shows which question was answered.
 - missing_fields: only fields still missing after persisted state + extracted_fields + answered_questions. Do not include deadline unless the bot explicitly asked it. Core first-stage fields are niche and goal.
+- recommended_action: send_text, send_relevant_examples, ask_goal, ask_next_question, send_price_options, send_questionnaire, answer_question, handoff, stop_bot, or no_reply.
 - reply_text: a safe suggested short reply, but do not claim that media was sent. The Go service may ignore this in dry-run or system flows.
-- next_action: send_text, send_cases, send_video, ask_next_question, handoff, or no_reply.
+- next_action: send_text, send_cases, send_video, send_relevant_examples, ask_next_question, handoff, or no_reply.
+- portfolio_tags: normalized tags for example selection, e.g. real_estate, land, property, drone, visualization, tourism, travel, hotel, auto, fashion, food, restaurant.
 - needs_human: true only for explicit human/manager requests or when a safe answer requires a manager.
 - confidence: 0..1.
 
@@ -37,6 +42,10 @@ Context rules:
 - "Плиточные клея, шпаклёвка, штукатурка..." is product_or_service and niche around construction/finishing mixtures. "Основные клиенты..." is target_audience, not goal.
 - "оба хороши" means format_preference with liked_formats ["both"].
 - "20-30" after a quantity/discount question means quantity/video_quantity, not budget, niche, goal, or deadline.
+- If the bot asked "Какой формат вам понравился?" and the customer answers "Никакой", this is negative_selection. It means no shown format was chosen. It is not niche, not goal, and must put "niche" in do_not_overwrite_fields.
+- If the customer already described a project, preserve that as the main business context. Short replies like "никакой", "нет", "не знаю", "ок", "да", "потом", "сейчас", "завтра", "посмотрю" must not overwrite niche or goal.
+- Real estate, land, apartment, construction, realtor -> portfolio_tags should include real_estate/property; land plots -> land; drone shooting -> drone; perspective visualization/renders -> visualization.
+- Tourism/travel/hotel/resort -> tourism/travel. Cars/dealership -> auto. Clothes/fashion -> fashion. Restaurant/food/cafe -> food/restaurant.
 - "Делаете примерно такое видео?", "можете как тут?", "такой формат делаете?" are feasibility_question, not case_request.
 - "пример" should only mean examples/cases as a real word; "примерно" is not an examples request.
 - "Чет суть не уловил" and similar messages are confusion, not other.
@@ -376,27 +385,30 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	}
 
 	analysis := CustomerAnalysis{
-		Platforms: []string{},
-		Intent:    IntentOther,
+		Platforms:         []string{},
+		Intent:            IntentOther,
+		PortfolioTags:     normalizePortfolioTags(understanding.PortfolioTags),
+		RecommendedAction: strings.TrimSpace(understanding.RecommendedAction),
 	}
+	protected := protectedFieldsMap(understanding.DoNotOverwrite)
 	lowConfidence := understanding.Confidence > 0 && understanding.Confidence < 0.35
 	if !lowConfidence {
 		extracted := understanding.ExtractedFields
 		legacyExtracted := understanding.Extracted
-		if value := normalizedAIString(firstStringPointer(understanding.Niche, extracted.Niche, legacyExtracted.Niche)); isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
+		if value := normalizedAIString(firstStringPointer(understanding.Niche, extracted.Niche, legacyExtracted.Niche)); !protected[fieldNiche] && isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
 			analysis.Niche = stringPointer(normalizeNiche(value))
 		}
 		if value := normalizeCity(normalizedAIString(firstStringPointer(understanding.City, extracted.City, legacyExtracted.City))); value != "" {
 			analysis.City = stringPointer(value)
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Goal, extracted.Goal, legacyExtracted.Goal)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Goal, extracted.Goal, legacyExtracted.Goal)); !protected[fieldGoal] && value != "" {
 			if isValidGoal(value) {
 				analysis.Goal = stringPointer(value)
 			} else if goal := normalizeGoal(value); goal != "" {
 				analysis.Goal = stringPointer(goal)
 			}
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Deadline, extracted.Deadline, legacyExtracted.Deadline)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Deadline, extracted.Deadline, legacyExtracted.Deadline)); !protected[fieldDeadline] && value != "" {
 			if isValidDeadline(value) {
 				analysis.Deadline = stringPointer(value)
 			} else if deadline := normalizeDeadline(value); deadline != "" {
@@ -406,10 +418,10 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		if value := normalizedAIString(firstStringPointer(understanding.Platform, extracted.Platform, legacyExtracted.Platform)); value != "" {
 			analysis.Platforms = mergePlatforms(analysis.Platforms, platformsFromAIString(value))
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.TargetAudience, extracted.TargetAudience, legacyExtracted.TargetAudience)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.TargetAudience, extracted.TargetAudience, legacyExtracted.TargetAudience)); !protected[fieldTargetAudience] && value != "" {
 			analysis.TargetAudience = stringPointer(value)
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.ProductOrService, extracted.ProductOrService)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.ProductOrService, extracted.ProductOrService)); !protected[fieldProductService] && value != "" {
 			analysis.ProductOrService = stringPointer(value)
 			if analysis.Niche == nil && isValidNiche(value) && !isNonNicheCandidateText(normalizeForAnalysis(value)) {
 				analysis.Niche = stringPointer(normalizeNiche(value))
@@ -421,10 +433,10 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		if value := normalizedAIString(firstStringPointer(understanding.Offer, extracted.Offer, legacyExtracted.Offer)); value != "" {
 			analysis.Offer = stringPointer(value)
 		}
-		if value := normalizedAIString(firstStringPointer(understanding.Budget, extracted.Budget, legacyExtracted.Budget)); value != "" {
+		if value := normalizedAIString(firstStringPointer(understanding.Budget, extracted.Budget, legacyExtracted.Budget)); !protected[fieldBudget] && value != "" {
 			analysis.Budget = stringPointer(value)
 		}
-		if value := normalizeVideoQuantity(normalizedAIString(firstStringPointer(understanding.VideoQuantity, understanding.Quantity, extracted.VideoQuantity, extracted.Quantity, legacyExtracted.VideoQuantity))); value != "" {
+		if value := normalizeVideoQuantity(normalizedAIString(firstStringPointer(understanding.VideoQuantity, understanding.Quantity, extracted.VideoQuantity, extracted.Quantity, legacyExtracted.VideoQuantity))); !protected[fieldVideoQuantity] && value != "" {
 			analysis.VideoQuantity = stringPointer(value)
 		}
 		if value := normalizedAIString(firstStringPointer(understanding.VoicePreference, extracted.VoicePreference)); value != "" {
@@ -440,6 +452,9 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 			analysis.HookIdea = stringPointer(value)
 		}
 		for _, liked := range append(understanding.LikedFormats, extracted.LikedFormats...) {
+			if protected[fieldLikedFormats] {
+				continue
+			}
 			analysis.LikedFormats = appendUniqueString(analysis.LikedFormats, liked)
 		}
 		if value := normalizedAIString(firstStringPointer(understanding.WebsiteOrInstagram, extracted.WebsiteOrInstagram)); value != "" {
@@ -457,7 +472,7 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		if analysis.BusinessLink != nil {
 			analysis.ReferenceLinks = appendUniqueString(analysis.ReferenceLinks, *analysis.BusinessLink)
 		}
-		if value := normalizePackageInterest(normalizedAIString(firstStringPointer(understanding.PackageInterest, understanding.SelectedPackage, extracted.PackageInterest, extracted.SelectedPackage, legacyExtracted.PackageInterest))); value != "" {
+		if value := normalizePackageInterest(normalizedAIString(firstStringPointer(understanding.PackageInterest, understanding.SelectedPackage, extracted.PackageInterest, extracted.SelectedPackage, legacyExtracted.PackageInterest))); !protected[fieldPackageInterest] && value != "" {
 			analysis.PackageInterest = stringPointer(value)
 			analysis.SelectedLevel = levelByPackageKey(value)
 		}
@@ -488,6 +503,8 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		analysis.Intent = IntentCopyrightQuestion
 	case "format_preference":
 		analysis.Intent = IntentFormatPreference
+	case "negative_selection":
+		analysis.Intent = IntentNegativeSelection
 	case "asks_packages":
 		analysis.Intent = IntentPackageQuestion
 		analysis.AsksForMoreOptions = true
@@ -540,6 +557,9 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 	}
 	if strings.TrimSpace(understanding.Intent) == "defer" {
 		analysis.Intent = IntentDefer
+	}
+	if strings.TrimSpace(understanding.RecommendedAction) == "send_relevant_examples" && analysis.Intent == IntentOther {
+		analysis.Intent = IntentPortfolioRequest
 	}
 	if analysis.Intent == IntentDefer {
 		analysis.ShouldHandoff = false
@@ -666,10 +686,24 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	result.Frustrated = result.Frustrated || ai.Frustrated
 	result.AsksForFoodExamples = result.AsksForFoodExamples || ai.AsksForFoodExamples
 	result.AsksForMoreOptions = result.AsksForMoreOptions || ai.AsksForMoreOptions
+	if len(ai.PortfolioTags) > 0 {
+		result.PortfolioTags = normalizePortfolioTags(append(result.PortfolioTags, ai.PortfolioTags...))
+	}
+	if strings.TrimSpace(ai.RecommendedAction) != "" {
+		result.RecommendedAction = strings.TrimSpace(ai.RecommendedAction)
+	}
 	if len(ai.AnsweredQuestions) > 0 {
 		result.AnsweredQuestions = append(result.AnsweredQuestions, ai.AnsweredQuestions...)
 	}
 	return result
+}
+
+func protectedFieldsMap(fields []string) map[string]bool {
+	protected := make(map[string]bool, len(fields))
+	for _, field := range normalizeFieldList(fields) {
+		protected[field] = true
+	}
+	return protected
 }
 
 func firstStringPointer(values ...*string) *string {

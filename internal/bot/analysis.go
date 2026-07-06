@@ -17,6 +17,7 @@ const (
 	fieldPreviousAIAds   = "ai_experience"
 	fieldPackage         = "package"
 	fieldPackageInterest = "package_interest"
+	fieldBudget          = "budget"
 	fieldVideoQuantity   = "video_quantity"
 	fieldProductService  = "product_or_service"
 	fieldTargetAudience  = "target_audience"
@@ -34,6 +35,7 @@ const (
 	IntentVoiceQuestion            = "voice_question"
 	IntentCopyrightQuestion        = "copyright_question"
 	IntentFormatPreference         = "format_preference"
+	IntentNegativeSelection        = "negative_selection"
 	IntentPriceQuestion            = "price_question"
 	IntentPackageQuestion          = "package_question"
 	IntentPackageSelection         = "package_selection"
@@ -131,6 +133,8 @@ type CustomerAnalysis struct {
 	Frustrated          bool     `json:"frustrated,omitempty"`
 	AsksForFoodExamples bool     `json:"asks_for_food_examples,omitempty"`
 	AsksForMoreOptions  bool     `json:"asks_for_more_options,omitempty"`
+	PortfolioTags       []string `json:"portfolio_tags,omitempty"`
+	RecommendedAction   string   `json:"recommended_action,omitempty"`
 	FAQKey              string   `json:"faq_key,omitempty"`
 	MissingFields       []string `json:"missing_fields"`
 
@@ -163,6 +167,7 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	voiceQuestion := isVoiceQuestion(normalized)
 	copyrightQuestion := isCopyrightQuestion(normalized)
 	formatPreference := detectLikedFormats(normalized)
+	negativeSelection := isNegativeFormatSelection(normalized)
 
 	if niche := extractNiche(text, current); niche != "" {
 		analysis.Niche = stringPointer(niche)
@@ -309,6 +314,8 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		analysis.Intent = IntentConfusion
 	case len(formatPreference) > 0:
 		analysis.Intent = IntentFormatPreference
+	case negativeSelection:
+		analysis.Intent = IntentNegativeSelection
 	case analysis.AsksForMoreOptions:
 		analysis.Intent = IntentPackageQuestion
 	case analysis.AsksForFoodExamples:
@@ -1351,6 +1358,7 @@ func productFromSalesLaunchText(normalized string) string {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?:продажи|сату|sales)\s+(?:на|по|для)?\s*(.+?)(?:\s*\(|,|\.|$)`),
 		regexp.MustCompile(`(?:продаем|продаём|продаю|сатамыз|sell|selling)\s+(.+?)(?:,|\.|$)`),
+		regexp.MustCompile(`(?:хочу\s+)?продать\s+(.+?)(?:,|\.|$)`),
 	}
 	for _, pattern := range patterns {
 		match := pattern.FindStringSubmatch(normalized)
@@ -1488,7 +1496,8 @@ func isNonNicheShortReply(normalized string) bool {
 	switch clean {
 	case "вот этот", "вот эта", "этот", "эта", "это", "тот", "та", "да", "ок", "окей",
 		"хорошо", "супер", "анкета", "анкету", "бриф", "заявка", "заявку", "давайте",
-		"отправьте", "пришлите", "жду", "ага", "угу", "принято":
+		"отправьте", "пришлите", "жду", "ага", "угу", "принято", "никакой", "никакая",
+		"никакие", "ничего", "нет", "не знаю", "посмотрю":
 		return true
 	default:
 		return false
@@ -1587,6 +1596,18 @@ func detectLikedFormats(normalized string) []string {
 	}
 }
 
+func isNegativeFormatSelection(normalized string) bool {
+	clean := strings.Trim(normalizeForAnalysis(normalized), " .,!?:;")
+	switch clean {
+	case "никакой", "никакая", "никакие", "ничего", "ни один", "ни один не понравился",
+		"ни один не подошел", "ни один не подошёл", "ничего не понравилось",
+		"none", "nothing", "none of them":
+		return true
+	default:
+		return false
+	}
+}
+
 func extractVoicePreference(text string) string {
 	normalized := normalizeForAnalysis(text)
 	if normalized == "" || !containsAny(normalized, []string{"голос", "озвуч", "диктор", "voice"}) {
@@ -1620,7 +1641,7 @@ func extractCampaignContext(text string) string {
 	if normalized == "" {
 		return ""
 	}
-	if containsAny(normalized, []string{"блогер", "розыгрыш", "квартира", "запуск продаж", "открытие продаж"}) {
+	if containsAny(normalized, []string{"блогер", "розыгрыш", "квартира", "запуск продаж", "открытие продаж", "дрон", "визуализац", "перспектив"}) {
 		return strings.TrimSpace(text)
 	}
 	return ""
@@ -2035,7 +2056,7 @@ func normalizeGoal(value string) string {
 		return "привлечь клиентов"
 	case containsAny(value, []string{"reels", "рилс", "контент", "content", "tiktok", "тик ток", "instagram", "инстаграм"}):
 		return "контент для продвижения"
-	case containsAny(value, []string{"продаж", "продав", "выруч", "сбыт", "сатылым", "сату", "sales", "revenue"}):
+	case containsAny(value, []string{"продаж", "продав", "продать", "выруч", "сбыт", "сатылым", "сату", "sales", "revenue"}):
 		return "рост продаж"
 	case containsAny(value, []string{"заяв", "лид", "лиды", "өтінім", "lead", "leads"}):
 		return "получать заявки"
@@ -2190,6 +2211,9 @@ func wordNumberDeadlinePhrase(value string) string {
 }
 
 func knownNicheFromText(normalized string) string {
+	if containsAny(normalized, []string{"земельный участок", "земельного участка", "землю", "продать участок", "участок в пригороде"}) {
+		return "недвижимость / земельный участок"
+	}
 	if containsAny(normalized, []string{"запчаст", "автозапчаст"}) {
 		return "запчасти"
 	}

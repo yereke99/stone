@@ -772,6 +772,9 @@ func (s *ConversationStore) MarkManualStop(ctx context.Context, chatID string, m
 	refreshConversationDerivedState(conversation)
 	conversation.UpdatedAt = now
 	conversation.LastUpdated = now
+	if err := s.SuppressAutomation(ctx, chatID, StopReasonManualAdminStop); err != nil {
+		return err
+	}
 	return s.persistConversationLocked(ctx, conversation)
 }
 
@@ -1199,6 +1202,9 @@ func completedFieldsForLead(lead LeadState) map[string]bool {
 	if isValidDeadline(lead.Deadline) {
 		completed[fieldDeadline] = true
 	}
+	if strings.TrimSpace(lead.Budget) != "" {
+		completed[fieldBudget] = true
+	}
 	if strings.TrimSpace(lead.VideoQuantity) != "" {
 		completed[fieldVideoQuantity] = true
 	}
@@ -1250,12 +1256,14 @@ func normalizeFieldName(field string) string {
 	switch strings.TrimSpace(field) {
 	case "platforms":
 		return fieldPlatform
+	case "quantity":
+		return fieldVideoQuantity
 	case "previous_ai_ads":
 		return fieldPreviousAIAds
 	case fieldPackage:
 		return fieldPackageInterest
 	case fieldNiche, fieldCity, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds,
-		fieldPackageInterest, fieldVideoQuantity, fieldProductService, fieldTargetAudience,
+		fieldPackageInterest, fieldBudget, fieldVideoQuantity, fieldProductService, fieldTargetAudience,
 		fieldReferenceLinks, fieldLikedFormats, fieldVoicePreference, fieldBrief:
 		return strings.TrimSpace(field)
 	default:

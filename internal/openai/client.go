@@ -33,11 +33,16 @@ type Message struct {
 
 type SalesResponse struct {
 	Intent            string                         `json:"intent"`
+	MessageMeaning    string                         `json:"message_meaning"`
+	ShouldUpdateState bool                           `json:"should_update_state"`
 	ExtractedFields   CustomerUnderstandingExtracted `json:"extracted_fields"`
+	DoNotOverwrite    []string                       `json:"do_not_overwrite_fields"`
 	AnsweredQuestions []CustomerAnsweredQuestion     `json:"answered_questions"`
 	MissingFields     []string                       `json:"missing_fields"`
+	RecommendedAction string                         `json:"recommended_action"`
 	ReplyText         string                         `json:"reply_text"`
 	NextAction        string                         `json:"next_action"`
+	PortfolioTags     []string                       `json:"portfolio_tags"`
 	NeedsHuman        bool                           `json:"needs_human"`
 	Confidence        float64                        `json:"confidence"`
 	Reply             string                         `json:"reply"`
@@ -55,6 +60,8 @@ type SalesResponse struct {
 type CustomerUnderstanding struct {
 	Language              string                     `json:"language"`
 	Intent                string                     `json:"intent"`
+	MessageMeaning        string                     `json:"message_meaning"`
+	ShouldUpdateState     bool                       `json:"should_update_state"`
 	Niche                 *string                    `json:"niche"`
 	Goal                  *string                    `json:"goal"`
 	Deadline              *string                    `json:"deadline"`
@@ -82,6 +89,9 @@ type CustomerUnderstanding struct {
 	NeedsManager          bool                       `json:"needs_manager"`
 	NeedsHuman            bool                       `json:"needs_human"`
 	MissingFields         []string                   `json:"missing_fields"`
+	DoNotOverwrite        []string                   `json:"do_not_overwrite_fields"`
+	RecommendedAction     string                     `json:"recommended_action"`
+	PortfolioTags         []string                   `json:"portfolio_tags"`
 	AnsweredQuestions     []CustomerAnsweredQuestion `json:"answered_questions"`
 	ReplyText             string                     `json:"reply_text"`
 	NextAction            string                     `json:"next_action"`
@@ -470,22 +480,32 @@ func conversationDecisionSchema(name string) map[string]any {
 		"additionalProperties": false,
 		"required": []string{
 			"intent",
+			"message_meaning",
+			"should_update_state",
 			"extracted_fields",
+			"do_not_overwrite_fields",
 			"answered_questions",
 			"missing_fields",
+			"recommended_action",
 			"reply_text",
 			"next_action",
+			"portfolio_tags",
 			"needs_human",
 			"confidence",
 		},
 		"properties": map[string]any{
-			"intent":             conversationIntentSchema(),
-			"extracted_fields":   extractedFieldsSchema(),
-			"answered_questions": answeredQuestionsSchema(),
-			"missing_fields":     businessFieldListSchema(),
-			"reply_text":         map[string]any{"type": "string"},
-			"next_action":        nextActionSchema(),
-			"needs_human":        map[string]any{"type": "boolean"},
+			"intent":                  conversationIntentSchema(),
+			"message_meaning":         map[string]any{"type": "string"},
+			"should_update_state":     map[string]any{"type": "boolean"},
+			"extracted_fields":        extractedFieldsSchema(),
+			"do_not_overwrite_fields": businessFieldListSchema(),
+			"answered_questions":      answeredQuestionsSchema(),
+			"missing_fields":          businessFieldListSchema(),
+			"recommended_action":      recommendedActionSchema(),
+			"reply_text":              map[string]any{"type": "string"},
+			"next_action":             nextActionSchema(),
+			"portfolio_tags":          stringArraySchema(),
+			"needs_human":             map[string]any{"type": "boolean"},
 			"confidence": map[string]any{
 				"type":    "number",
 				"minimum": 0,
@@ -502,11 +522,16 @@ func customerUnderstandingSchema() map[string]any {
 		"required": []string{
 			"language",
 			"intent",
+			"message_meaning",
+			"should_update_state",
 			"extracted_fields",
+			"do_not_overwrite_fields",
 			"answered_questions",
 			"missing_fields",
+			"recommended_action",
 			"reply_text",
 			"next_action",
+			"portfolio_tags",
 			"needs_human",
 			"confidence",
 		},
@@ -515,13 +540,18 @@ func customerUnderstandingSchema() map[string]any {
 				"type": "string",
 				"enum": []string{"ru", "kk", "en", "mixed", "unknown"},
 			},
-			"intent":             conversationIntentSchema(),
-			"extracted_fields":   extractedFieldsSchema(),
-			"answered_questions": answeredQuestionsSchema(),
-			"missing_fields":     businessFieldListSchema(),
-			"reply_text":         map[string]any{"type": "string"},
-			"next_action":        nextActionSchema(),
-			"needs_human":        map[string]any{"type": "boolean"},
+			"intent":                  conversationIntentSchema(),
+			"message_meaning":         map[string]any{"type": "string"},
+			"should_update_state":     map[string]any{"type": "boolean"},
+			"extracted_fields":        extractedFieldsSchema(),
+			"do_not_overwrite_fields": businessFieldListSchema(),
+			"answered_questions":      answeredQuestionsSchema(),
+			"missing_fields":          businessFieldListSchema(),
+			"recommended_action":      recommendedActionSchema(),
+			"reply_text":              map[string]any{"type": "string"},
+			"next_action":             nextActionSchema(),
+			"portfolio_tags":          stringArraySchema(),
+			"needs_human":             map[string]any{"type": "boolean"},
 			"confidence": map[string]any{
 				"type":    "number",
 				"minimum": 0,
@@ -565,6 +595,7 @@ func conversationIntentSchema() map[string]any {
 			"niche_specific_case_request",
 			"feasibility_question",
 			"format_preference",
+			"negative_selection",
 			"confusion",
 			"objection",
 			"voice_question",
@@ -582,7 +613,25 @@ func conversationIntentSchema() map[string]any {
 func nextActionSchema() map[string]any {
 	return map[string]any{
 		"type": "string",
-		"enum": []string{"send_text", "send_cases", "send_video", "ask_next_question", "handoff", "no_reply"},
+		"enum": []string{"send_text", "send_cases", "send_video", "send_relevant_examples", "ask_next_question", "handoff", "no_reply"},
+	}
+}
+
+func recommendedActionSchema() map[string]any {
+	return map[string]any{
+		"type": "string",
+		"enum": []string{
+			"send_text",
+			"send_relevant_examples",
+			"ask_goal",
+			"ask_next_question",
+			"send_price_options",
+			"send_questionnaire",
+			"answer_question",
+			"handoff",
+			"stop_bot",
+			"no_reply",
+		},
 	}
 }
 
@@ -647,16 +696,22 @@ func extractedFieldsSchema() map[string]any {
 			"goal",
 			"deadline",
 			"quantity",
+			"video_quantity",
 			"budget",
 			"reference_links",
 			"liked_formats",
 			"selected_package",
+			"package_interest",
 			"voice_preference",
 			"copyright_concern",
 			"campaign_context",
 			"hook_idea",
 			"city",
 			"website_or_instagram",
+			"business_link",
+			"platform",
+			"strong_side",
+			"offer",
 		},
 		"properties": map[string]any{
 			"niche":                nullableStringSchema(),
@@ -665,16 +720,22 @@ func extractedFieldsSchema() map[string]any {
 			"goal":                 nullableStringSchema(),
 			"deadline":             nullableStringSchema(),
 			"quantity":             nullableStringSchema(),
+			"video_quantity":       nullableStringSchema(),
 			"budget":               nullableStringSchema(),
 			"reference_links":      stringArraySchema(),
 			"liked_formats":        stringArraySchema(),
 			"selected_package":     nullablePackageSchema(),
+			"package_interest":     nullablePackageSchema(),
 			"voice_preference":     nullableStringSchema(),
 			"copyright_concern":    nullableStringSchema(),
 			"campaign_context":     nullableStringSchema(),
 			"hook_idea":            nullableStringSchema(),
 			"city":                 nullableStringSchema(),
 			"website_or_instagram": nullableStringSchema(),
+			"business_link":        nullableStringSchema(),
+			"platform":             nullableStringSchema(),
+			"strong_side":          nullableStringSchema(),
+			"offer":                nullableStringSchema(),
 		},
 	}
 }

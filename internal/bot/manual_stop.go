@@ -11,31 +11,48 @@ import (
 // and inner whitespace collapsed. It does NOT fold confusable characters, so it
 // is safe to use in logs (e.g. "стоп" stays "стоп", not a folded token).
 func NormalizeAdminStopCommand(text string) string {
-	clean := strings.ToLower(strings.TrimSpace(text))
-	clean = strings.TrimFunc(clean, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
-	})
-	return strings.Join(strings.Fields(clean), " ")
+	text = strings.ToLower(strings.TrimSpace(text))
+	var builder strings.Builder
+	builder.Grow(len(text))
+	for _, r := range text {
+		if unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) {
+			builder.WriteRune(' ')
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return strings.Join(strings.Fields(builder.String()), " ")
 }
 
-// IsAdminStopCommand reports whether a manual operator message is the stop
-// command. It accepts case, surrounding spaces, simple punctuation and the
-// slash-command form (e.g. "СТОП!", " stop ", "/стоп"). It also tolerates mixed
-// Cyrillic/Latin look-alike characters, which phone keyboards routinely produce
-// for "стоп"/"stop". To avoid false positives it only matches a single short
-// command token, so sentences like "stop motion video" or "останови ролик" do
-// not trigger a stop.
+// IsAdminStopCommand reports whether a manual operator or customer message is
+// a stop command. It accepts case, spaces, punctuation and common RU/EN stop
+// phrases, while still avoiding broad sentences such as "stop motion video".
 func IsAdminStopCommand(text string) bool {
 	normalized := NormalizeAdminStopCommand(text)
 	if normalized == "" {
 		return false
 	}
-	// Only a single command-like token may stop the bot.
-	if strings.ContainsRune(normalized, ' ') {
+	folded := foldStopConfusables(normalized)
+	switch folded {
+	case foldStopConfusables("stop"),
+		foldStopConfusables("стоп"),
+		foldStopConfusables("stop bot"),
+		foldStopConfusables("стоп бот"):
+		return true
+	}
+	switch normalized {
+	case "отключить",
+		"не писать",
+		"не пишите",
+		"не надо писать",
+		"больше не писать",
+		"больше не пишите",
+		"хватит",
+		"остановить":
+		return true
+	default:
 		return false
 	}
-	folded := foldStopConfusables(normalized)
-	return folded == foldStopConfusables("stop") || folded == foldStopConfusables("стоп")
 }
 
 // stopConfusableFolds maps Cyrillic (and a few other Unicode) look-alike runes

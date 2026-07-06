@@ -60,6 +60,40 @@ func (s *ConversationStore) IsSuppressedPhoneOrChatID(chatID string, phone strin
 	return false
 }
 
+func (s *ConversationStore) SuppressAutomation(ctx context.Context, chatID string, reason string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	normalizedPhone := NormalizePhone(chatID)
+	if normalizedPhone == "" {
+		return nil
+	}
+	normalizedChatID := chatID
+	if !strings.Contains(normalizedChatID, "@") {
+		normalizedChatID = chatIDFromNormalizedPhone(normalizedPhone)
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "automation_stop"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO whatsapp_automation_suppression
+		(raw_phone, normalized_phone, chat_id, reason)
+		VALUES (?, ?, ?, ?)`,
+		chatID,
+		normalizedPhone,
+		normalizedChatID,
+		reason,
+	)
+	return err
+}
+
 func suppressionValueExists(ctx context.Context, db *sql.DB, query string, value string) bool {
 	var exists int
 	err := db.QueryRowContext(ctx, query, strings.TrimSpace(value)).Scan(&exists)

@@ -19,6 +19,12 @@ func TestIsAdminStopCommand(t *testing.T) {
 		{name: "russian bang", text: "стоп!", want: true},
 		{name: "russian spaces", text: "  стоп  ", want: true},
 		{name: "russian slash", text: "/стоп", want: true},
+		{name: "russian stop bot", text: "Стоп, бот!", want: true},
+		{name: "russian stop bot spaces", text: "стоп   бот", want: true},
+		{name: "disable", text: "отключить", want: true},
+		{name: "do not write", text: "не писать", want: true},
+		{name: "enough", text: "хватит", want: true},
+		{name: "stop verb", text: "остановить", want: true},
 		{name: "english lower", text: "stop", want: true},
 		{name: "english upper", text: "STOP", want: true},
 		{name: "english punctuation", text: "stop.", want: true},
@@ -26,6 +32,7 @@ func TestIsAdminStopCommand(t *testing.T) {
 		{name: "english capital bang", text: "Stop!", want: true},
 		{name: "english spaces", text: " stop ", want: true},
 		{name: "english slash", text: "/stop", want: true},
+		{name: "english stop bot", text: "stop bot", want: true},
 
 		// Mixed Cyrillic/Latin look-alikes typed on phone keyboards.
 		// Latin c + Cyrillic т о п.
@@ -61,6 +68,9 @@ func TestNormalizeAdminStopCommandStaysReadable(t *testing.T) {
 	}
 	if got := NormalizeAdminStopCommand("/StoP"); got != "stop" {
 		t.Fatalf("NormalizeAdminStopCommand() = %q, want %q", got, "stop")
+	}
+	if got := NormalizeAdminStopCommand("Стоп, бот!"); got != "стоп бот" {
+		t.Fatalf("NormalizeAdminStopCommand() = %q, want %q", got, "стоп бот")
 	}
 }
 

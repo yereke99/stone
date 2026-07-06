@@ -46,6 +46,11 @@ func (ai *fakeAI) GenerateSalesReply(ctx context.Context, systemPrompt string, m
 	}, nil
 }
 
+func (ai *fakeAI) GenerateReplyText(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.ReplyTextResponse, error) {
+	ai.called = true
+	return openai.ReplyTextResponse{ReplyText: "Спасибо, уточню детали."}, nil
+}
+
 func (ai *fakeAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error) {
 	ai.analysisCalled = true
 	return openai.CustomerUnderstanding{

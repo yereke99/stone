@@ -1,0 +1,1008 @@
+# Stone WhatsApp Bot Dialogue Audit
+Date: 2026-07-06
+Scope: customer-dialogue business logic only (message understanding, OpenAI usage,
+state/memory, video/hashtag examples, sales flow, STOP, admin safety).
+Method: full read of cmd/main.go and internal/bot/* (live path traced from the
+GreenAPI polling loop down to every send call). `go build ./...` passes.
+No code was modified.
+
+================================================================================
+## 1. Executive Summary
+================================================================================
+
+How the bot works today (live configuration, .env in repo root):
+
+1. The bot long-polls GreenAPI (cmd/main.go `runPolling`), filters/dedupes
+   notifications, and passes real incoming customer messages to
+   `Service.ProcessIncomingWhatsAppMessage` (internal/bot/service.go:155).
+2. OpenAI IS used live, but only as a JSON "understanding layer"
+   (`understandCustomerMessage`, internal/bot/understanding.go:66): it extracts
+   intent + fields (niche, goal, deadline, tags...) as strict JSON. It does NOT
+   write the text the customer receives.
+3. The final customer reply is produced by a hand-written state machine
+   (`handleSalesState`, service.go:462) that picks from a large library of
+   canned RU/KK/EN template strings (prompts.go, dialogue.go, approved_flow.go).
+4. A full LLM-reply mode exists (`maybeGenerateConversationReply`,
+   llm_reply.go:20, using the polished sales prompt `SystemPrompt` in
+   prompts.go:5) but it is gated behind env var BOT_LLM_REPLY_ENABLED which
+   defaults to FALSE and is NOT set in .env. In the live deployment the
+   polished sales prompt is dead code.
+
+Main problems:
+
+* P0 — MAX_OPENAI_OUTPUT_TOKENS=350 is almost certainly too small for the
+  required strict JSON schema (22 mandatory extracted_fields + message_meaning
+  + reply_text + answered_questions...). When output is truncated the JSON
+  parse fails and the bot silently falls back to the regex analyzer
+  (`AnalyzeCustomerMessage`, analysis.go:152). In that mode the bot is exactly
+  the "rule-based/stupid" bot described in the complaint. (UNCERTAIN how often
+  this fires — needs log check for "openai customer understanding failed".)
+* P0 (UNCERTAIN) — model `gpt-5.5` is called with `temperature` on the
+  Responses API (openai/client.go:283-284). If this model rejects the
+  temperature parameter (as several reasoning-class models do), EVERY analyzer
+  call fails with HTTP 400 and the bot runs 100% on regex rules. This must be
+  verified in production logs; it would explain all "bot is dumb" symptoms.
+* The "Никакой" bug from the complaint is defended in the CURRENT code in
+  three independent places (deterministic guard, AI prompt rule, ApplyAnalysis
+  validity guard) — see section 6, Example B. If it still reproduces in
+  production, the analyzer call is failing (see the two P0s above) AND the
+  running build predates these guards, or an AI paraphrase slips through the
+  guard (possible, see §5 overwrite risks).
+* Human-likeness is limited by design: every reply the customer sees is a
+  static template. The niche/goal qualification question has essentially one
+  phrasing; FAQ answers are canned; the "understanding" quality of OpenAI is
+  only used to route between templates and to fill fields.
+* The history-guard subsystem (protecting old/legacy chats, with its own
+  OpenAI classifier) is configured in config.go but NEVER wired:
+  `SetHistoryGuard` has no caller in cmd/main.go. Only DB-stored legacy flags
+  (from the offline importer) still silence chats.
+
+Biggest risks, in order: (1) analyzer silently failing → regex-only behavior;
+(2) overly broad customer opt-out substrings ("не надо", "передумал")
+permanently suppressing live leads; (3) only-2-videos cap and the
+niche+goal precondition delaying relevant examples; (4) manual admin replies
+do NOT pause the bot (only an explicit "стоп" from the business phone does).
+
+================================================================================
+## 2. Real Incoming Message Flow
+================================================================================
+
+Entry point and polling
+-----------------------
+* cmd/main.go `main` (43): builds GreenAPI client, OpenAI client, SQLite
+  conversation store, `bot.NewService`, sets delayed-package options, then
+  `runPolling`. NOTE: `botService.SetHistoryGuard(...)` is never called →
+  history-guard runtime disabled (live).
+* cmd/main.go `runPolling` (117): infinite ReceiveNotification loop with
+  exponential backoff (1s→10s). LIVE.
+* cmd/main.go `processNotification` (159): the gatekeeper. LIVE.
+  - `outgoingMessageReceived` (manual send from the business phone) →
+    `handleOutgoingPhoneWebhook` (383): journals the message into
+    whatsapp_messages and checks `isManualAdminStopNotification` →
+    `MarkManualStop`. It never generates replies.
+  - `outgoingAPIMessageReceived` (bot's own sends) → logged and deleted,
+    fully ignored. The bot cannot parse its own messages as customer input.
+  - Everything else goes through `shouldProcessNotification` (347):
+    * only `incomingMessageReceived`
+    * timestamp required; drops messages older than service start minus a
+      2-minute grace (`isStartupStaleNotification`, 606) and older than
+      BOT_MAX_MESSAGE_AGE_SECONDS=120 (`isStaleNotification`, 598)
+    * WhatsApp groups always skipped ("whatsapp_group_automation_disabled")
+    * only text or media messages; empty text rejected.
+* Deduplication: `notificationMessageKeys` (573) builds `chatID|messageID` or
+  a sha256 fallback key; `ConversationStore.BeginIncomingMessageProcessing`
+  (sqlite_store.go:462) inserts into whatsapp_messages with a UNIQUE
+  dedupe_key; duplicates/in-flight messages are dropped. LIVE.
+* Suppression check BEFORE the bot service:
+  `conversationStore.IsSuppressedPhoneOrChatID` (suppression.go:34) — if the
+  phone/chat is in whatsapp_automation_suppression, the incoming text is still
+  saved to the transcript (`AppendMessage` + `MarkIncoming`) but no processing
+  and no OpenAI call happens. LIVE.
+
+Bot service entry
+-----------------
+* `Service.HandleIncomingMessage` → `ProcessIncomingWhatsAppMessage`
+  (service.go:151/155). LIVE. Step by step:
+  1. suppression re-check (`isAutomationSuppressed`) and group-chat check
+     (`isUnsafeCustomerWhatsAppChatID`, whatsapp_safety.go:32).
+  2. per-chat mutex `lockChat` (2422) — serializes a chat.
+  3. sender display name saved into conversation + Lead.ClientName (207-214).
+  4. language detected once and persisted (`detectLanguage`, 2061 —
+     Cyrillic→ru, Kazakh markers→kk, default ru).
+  5. media without text → `handleIncomingMediaContext` (1177): stores a
+     placeholder ("[фото] ..."), replies with `NonTextFallbackText` ("напишите
+     текстом...") unless the same fallback was the last reply.
+  6. `AppendMessage(user)` + `MarkIncoming` — transcript + last-incoming.
+  7. `isExplicitOptOutText` (3398) → `stopAutomationSilently` (1039) →
+     permanent row in whatsapp_automation_suppression. No reply is sent.
+  8. `isConversationClosedForAutomation` (safety.go:17) → message saved,
+     silence (handed-off/stopped/legacy chats).
+  9. `maybeApplyHistoryGuard` (history_guard.go:122) — the *runtime* guard is
+     disabled (source==nil, Enabled=false), but `shouldSilenceForStoredHistory`
+     (history_guard.go:445) still silences chats whose legacy classification
+     was written to the DB by the offline importer
+     (cmd/import_historical_contacts). PARTIALLY LIVE.
+  10. `understandCustomerMessage` (understanding.go:66) — the OpenAI analyzer
+      with deterministic fallback. LIVE. Details in §3.
+  11. Post-processing of the analysis: FAQ override (`detectFAQIntent`,
+      approved_flow.go:117), quoted-reply package detection
+      (`detectPackageFromReplyContext`, reply_package.go:8), brief-state
+      normalization, `isBusinessRelevantMessage` gate (approved_flow.go:176)
+      — off-topic messages are silently ignored.
+  12. `lead.ApplyAnalysis(analysis)` + `store.UpdateLead` (analysis.go:400) —
+      guarded merge of extracted fields into the persistent lead.
+  13. `maybeGenerateConversationReply` (llm_reply.go:20) — DEAD in live env
+      (BOT_LLM_REPLY_ENABLED unset → false). When enabled it would produce the
+      final reply from `SystemPrompt` for most next_actions.
+  14. `handleSalesState` (service.go:462) — the live reply engine (see §8).
+
+Sending and persistence
+-----------------------
+* All text replies go through `sendAndRemember` (service.go:1468): re-checks
+  suppression/manual-stop/closed state, runs the final-reply validation gate
+  (`validateOutgoingReply`, final_reply_guard.go:13 — blocks forbidden
+  discount promises, celebrity-voice promises, and questions about
+  already-known fields), enforces "package example videos must be sent before
+  the format question" (`needsPortfolioExamplesBeforeFormatQuestion`, 2326 +
+  `ensurePortfolioExamplesSentBeforeFormatQuestion`, 1588), dedupes identical
+  replies within 2 minutes (`RecentlySentReply`), then sends, journals
+  (`LogOutgoingMessage`), appends to transcript, marks asked fields
+  (`MarkAskedFields`), updates stage (`UpdateState`), and notifies admins
+  (`notifyAdminsIfNeeded`, 1755).
+* Videos go through `sendVideosWithCaptions` (service.go:1657): per-file
+  suppression re-check, `ShouldSendVideo` repeat guard, file existence check,
+  caption resolution (explicit map → `OfferByVideo(...)` package caption),
+  GreenAPI `SendFileByUpload(filePath, caption)` (one WhatsApp message with
+  media + caption), `MarkVideoSent`, `RecordOutgoingPackageMessage`, 1.5s
+  delay between files (`videoSendDelay`).
+* Persistence: every mutation runs `persistConversationLocked`
+  (sqlite_store.go:318) — whole Conversation struct is serialized into
+  whatsapp_clients.conversation_json (including Messages history, Lead,
+  AskedFields, SentVideoFiles), plus flat columns (state, niche, goal,
+  deadline, selected_package, followups...). All messages in/out are also
+  journaled in whatsapp_messages.
+
+Dead / unused code on this path
+-------------------------------
+* `handleLocalCommand` (service.go:1202) — a large local rule engine; NO
+  callers. DEAD. (Its `PriceText` reply is also unreachable.)
+* `Manager`/`HandleIncoming` (manager.go), flow.go, `buildLeadReply`/
+  `buildReturningLeadReply` (dialogue.go:15/40), state.go `State`/`StateStore`
+  — the old Meta Cloud API webhook stack; internal/meta, internal/http,
+  internal/storage are not referenced by cmd/main.go. DEAD.
+* `SetHistoryGuard`/`runHistoryGuard`/`ClassifyHistoryGuard` — never wired in
+  main.go. DEAD live (config HISTORY_GUARD_* is parsed and ignored).
+* `maybeGenerateConversationReply` + `SystemPrompt` + `conversationReplyPayload`
+  — DORMANT (env-gated off).
+* `systemPromptForLanguage` (2183), `toOpenAIMessages` (2099),
+  `normalizeAIResponse` (2122), `applyAIState` (2146) — leftovers of the old
+  direct-LLM-reply flow, no live callers.
+* `ReopenIncompleteHandoff` (store.go:307), `sendQuestionnaireOfferWithSelectedVideo`
+  (service.go:861), `LanguageChoiceText`/`detectLanguageChoice` — no callers.
+* `fieldListSchema` (openai/client.go:824) — unused.
+
+================================================================================
+## 3. OpenAI / ChatGPT Usage
+================================================================================
+
+Q: Is OpenAI generating the final customer reply, or only extracting JSON?
+A: In the live configuration OpenAI ONLY extracts JSON (intent + fields +
+   recommended action). The customer-visible text always comes from templates.
+   The analyzer's reply_text is ignored. The full LLM-reply mode exists but is
+   off (BOT_LLM_REPLY_ENABLED defaults false, absent from .env;
+   service.go:104-112, llm_reply.go:21).
+
+Which functions call OpenAI (internal/openai/client.go):
+* `Client.AnalyzeCustomerMessage` (268) — LIVE, called once per incoming text
+  message from `understandCustomerMessage` (understanding.go:76), 8s timeout,
+  temperature capped to 0.2 (`analysisTemperature`), max_output_tokens =
+  min(MAX_OPENAI_OUTPUT_TOKENS=350, 1200) = 350, strict json_schema
+  `stone_customer_understanding`.
+* `Client.GenerateSalesReply` (189) — DORMANT (only from the disabled LLM
+  reply path), strict json_schema `stone_sales_response` (same shape).
+* `Client.ClassifyHistoryGuard` (333) — DEAD (history guard not wired).
+
+What the analyzer receives (`customerUnderstandingPayload`,
+understanding.go:148) — this is genuinely rich context:
+* current_message (text, id, timestamp);
+* quoted_context — quoted bot text/caption when the customer replied to a
+  specific message;
+* recent_messages — the LAST 10 transcript messages, BOTH bot and customer
+  roles, with timestamps (`recentUnderstandingMessages`, 255). YES, previous
+  bot messages are included;
+* pending_questions — the last bot question + which fields it asked, filtered
+  to still-unknown fields (`pendingUnderstandingQuestions`, 284);
+* question_answer_pairs — pairs the current customer text with the quoted (or
+  last) bot question and the expected field(s)
+  (`questionAnswerPairsForUnderstanding`, 302). This is exactly the mechanism
+  that lets the model know "Никакой" answers "Какой формат вам понравился?";
+* known_state / conversation_state — `conversationPromptJSON` (service.go:2195):
+  stage, lead_status, full LeadState, completed_fields, asked_fields,
+  sent_videos + sent_video_files (yes, already-sent examples are included),
+  packages_sent, brief flags, conversation_summary, last incoming/reply text
+  and (again) recent messages;
+* official_packages with names/prices/filenames;
+* last_bot_question + asked fields; current_missing_fields.
+
+So: recent history YES (10 messages), bot messages YES, saved state YES,
+sent videos YES, sales stage YES.
+
+Does OpenAI return structured JSON / is it validated?
+* Yes — the request uses the Responses API `text.format=json_schema` with
+  `strict: true` and `additionalProperties: false`
+  (`customerUnderstandingSchema`, openai/client.go:518). The Go side
+  unmarshals and then `customerUnderstandingToAnalysis` (understanding.go:382)
+  validates confidence ∈ [0,1], drops all extracted fields when confidence
+  < 0.35, re-validates every field (`isValidNiche`, `normalizeGoal`,
+  `normalizeDeadline`, `normalizePackageInterest`...), and respects
+  do_not_overwrite_fields (`protectedFieldsMap`).
+
+What happens on bad JSON / errors / timeout?
+* Any HTTP error, schema failure, JSON parse failure or 8s timeout →
+  WARN log + deterministic fallback `AnalyzeCustomerMessage` (analysis.go:152),
+  a large regex/keyword analyzer. The dialogue continues, but with noticeably
+  cruder understanding. There is no retry and no alerting.
+
+Schema/struct mismatches (important):
+* The strict schema does NOT include top-level `niche/goal/...`, `sentiment`,
+  `state_update`, `needs_manager`, `ready_for_questionnaire`,
+  `asks_for_food_examples`, `asks_for_more_options`, `quantity`, `reply_plan`.
+  Those struct fields (openai/client.go:60-108) can never be populated by the
+  live schema; all code branches reading them
+  (understanding.go:551-580 sentiment/state_update; "asks_examples",
+  "negative_reaction", "frustration", "ready_to_order", "choose_package"
+  intent cases at 483-549) are unreachable from the live analyzer and only
+  work for the deterministic fallback / legacy tests. Consequences:
+  - AI can flag a human handoff ONLY via needs_human (which IS in schema);
+  - AI can never trigger the "silent stop on negative sentiment" branch;
+  - frustration/negative detection is purely regex
+    (`isFrustrationComplaint`/`isNegativeReaction`, analysis.go:1793/1784).
+* The intent enum the model may return (conversationIntentSchema, 584) and
+  the switch in `customerUnderstandingToAnalysis` overlap only partially —
+  e.g. model-returnable "quantity_answer" maps to discount handling, but
+  "objection" maps to... nothing (falls to default IntentOther) — the word
+  "objection" is missing from the switch, so an AI-detected objection is
+  downgraded to "other". (Deterministic `containsObjection` still catches
+  "дорого".)
+
+Token budget problem (P0 candidate):
+* MAX_OPENAI_OUTPUT_TOKENS=350 (.env) also caps the analyzer
+  (`minPositive(c.maxOutputTokens, 1200)`, openai/client.go:283). The
+  required response includes ALL 22 extracted_fields keys, message_meaning,
+  reply_text, portfolio_tags, missing_fields, answered_questions... A typical
+  full response is 300-600+ tokens. Truncated output → parse error → regex
+  fallback. This silently degrades exactly the cases with the most content
+  (long first messages like Example A).
+
+Ratings (1-10):
+* Context understanding quality (as designed): 8 — payload is excellent.
+  Effective in production: 5-6 (fallback risk, token cap, unverified model
+  params).
+* Prompt quality (analyzer prompt): 8 (see §4).
+* State safety: 7 — do_not_overwrite + validity guards + confidence floor;
+  minus for unconditional overwrites of secondary fields (§5).
+* Human-like reply quality: 3-4 — replies are canned templates; the analyzer's
+  human-sounding reply_text is discarded.
+* Risk of misunderstanding customer messages: 5 (moderate) — good when the
+  analyzer works, regex-only when it doesn't; short/ironic/atypical answers
+  outside the whitelists degrade hard.
+
+================================================================================
+## 4. Prompt Quality Review
+================================================================================
+
+Prompt 1: `customerUnderstandingSystemPrompt` — internal/bot/understanding.go:15
+* Status: LIVE (used on every text message).
+* Task: strict-JSON understanding layer; extract fields, classify intent,
+  suggest recommended_action/next_action/portfolio_tags.
+* Sales context: explained well (48h AI ads, what Go enforces, official
+  prices Test 35k / Basic 50k / Standard from 75k).
+* Short answers: EXPLICITLY teaches "никакой" (line: `If the bot asked "Какой
+  формат вам понравился?" and the customer answers "Никакой", this is
+  negative_selection... must put "niche" in do_not_overwrite_fields`), plus
+  "нет, не знаю, ок, да, потом, сейчас, завтра, посмотрю must not overwrite
+  niche or goal", "20-30 is quantity not budget", URL-only ≠ goal, "примерно"
+  ≠ examples request.
+* Overwrite prevention: yes — do_not_overwrite_fields is a first-class output.
+* Strict JSON: yes; schema enforced server-side.
+* Few-shot examples: yes, 5 concrete ones (construction mixtures multiline,
+  reference link, link+goal, Vin Diesel voice, AI actors copyright).
+* Weaknesses:
+  - It asks for fields the schema forbids (answered_questions is in schema,
+    fine; but the "Output contract" mentions language etc. — consistent), yet
+    the *intent list in prose* matches the schema while the Go mapping switch
+    misses "objection" (see §3) — a prompt-consumer mismatch, not a prompt bug.
+  - No explicit rule for "стоп бот" (handled upstream in Go, acceptable).
+  - No instruction about what to do when recent_messages contradict
+    known_state (e.g. admin edited data) — low priority.
+  - reply_text is requested and then thrown away — wasted tokens (against a
+    350-token cap this matters).
+* Verdict: 8/10 — one of the strongest parts of the codebase.
+
+Prompt 2: `SystemPrompt` (the polished RU sales-manager prompt) —
+internal/bot/prompts.go:5
+* Status: DEAD in live config (only `GenerateSalesReply` path, env-gated off).
+* Quality if enabled: good sales framing ("не анкета-бот", answer direct
+  question first, never re-ask known fields, never ask deadline in first
+  qualification, negative_selection rule for "никакой", real-estate/tourism
+  tag rules, price discipline, copyright safety, defer etiquette). It also
+  demands strict JSON with the same schema.
+* Weaknesses: mixes RU and EN instructions; duplicates the understanding
+  prompt (two sources of truth to keep in sync); the short brief text inside
+  the prompt differs from the live BriefText template (four questions vs
+  three) — if ever enabled, the bot would produce a second brief variant.
+* Verdict: 7/10, but currently irrelevant to customers.
+
+Prompt 3: history-guard classifier prompt — internal/openai/client.go:334
+* Status: DEAD (subsystem not wired). Minimal but adequate for its job.
+
+Everything else the customer reads is NOT a prompt but a static template:
+prompts.go (greeting, price, brief, handoff, objection...), dialogue.go
+(package prices/details, quantity discount), approved_flow.go (FAQ answers,
+format question, questionnaire reminder, weekly follow-up), service.go
+(negative-selection texts, cases texts, AI-work intros), offers.go (video
+captions). These are decent copy but fixed — the bot will repeat the same
+sentence in the same situation every time.
+
+================================================================================
+## 5. Conversation State / Memory
+================================================================================
+
+Where fields live — `LeadState` (analysis.go:68) inside `Conversation`
+(store.go:43), persisted per chat in SQLite whatsapp_clients (flat columns +
+full conversation_json blob):
+* niche → Lead.Niche (+ flat column `niche`)
+* goal → Lead.Goal (+ column `goal`)
+* deadline → Lead.Deadline (+ column `deadline`)
+* budget → Lead.Budget (JSON blob only)
+* video quantity → Lead.VideoQuantity
+* selected package → Lead.SelectedPackage + Conversation.SelectedLevel
+  (+ column `selected_package`)
+* sent examples → Conversation.SentVideos (by level), SentVideoFiles
+  (by file path incl. ai-works paths, with timestamps),
+  OutgoingPackageMessages (messageID → package metadata, used to resolve
+  quoted replies to a specific package video)
+* asked/completed → AskedFields / CompletedFields maps
+* last bot question → LastReplyText/LastReplyAt; last customer text →
+  LastIncomingText/LastIncomingAt
+* transcript → Conversation.Messages, capped at the LAST 10 messages
+  (`AppendMessage`, store.go:496, historyLimit=10). The complete history is
+  additionally journaled in the whatsapp_messages table but is NEVER read
+  back for prompting (only for dedupe) — so "reconstruct last 5-10 messages"
+  = YES (exactly 10), more than 10 = only via SQL, not used.
+
+Can the bot know what question it asked before the customer replied? YES —
+LastReplyText + AskedFields + `fieldsAskedByMessage` (service.go:2453) and it
+forwards that as pending_questions / question_answer_pairs to OpenAI.
+Can it pair "никакой" with the format question? YES (same mechanism; plus the
+quoted context when the customer replies to the message).
+
+Repeat-question protection:
+* AskedFields is recorded on every send; `validateOutgoingReply`
+  (final_reply_guard.go:13) actively REWRITES an outgoing reply that asks
+  about an already-known field (`knownFieldsAskedByReply`) into the next
+  useful question; `RecentlySentReply` blocks resending identical text within
+  2 minutes; the understanding prompt forbids re-asking. This is solid.
+
+Overwrite analysis — `LeadState.ApplyAnalysis` (analysis.go:400):
+* PROTECTED: Niche and Goal are replaced only by values passing
+  `isValidNiche`/`isValidGoal` + `isNonNicheCandidateText` (qualification.go:86,
+  analysis.go:1869). A stored valid niche can never be wiped by "никакой",
+  "да", "не знаю", a question, a greeting, or a timing word. Deadline
+  similarly guarded. During brief answering (Intent=BriefAnswer),
+  qualification fields are frozen entirely (updateQualificationFields=false).
+* AI-side protection: `customerUnderstandingToAnalysis` re-validates and
+  respects do_not_overwrite_fields; confidence<0.35 drops extraction.
+* DANGEROUS overwrites (any new non-empty value wins, valid→valid):
+  - Niche → another *valid-looking* niche. An AI paraphrase like
+    "никакой формат" or "клиент недоволен" passes `isValidNiche` (≥2 letters,
+    not in the short-reply blacklist) and would REPLACE a good niche.
+    isNonNicheCandidateText only blocks known short forms.  << the most
+    realistic remaining path to the reported bug >>
+  - ProductOrService, TargetAudience, StrongSide, Offer, Budget,
+    VideoQuantity, VoicePreference, CampaignContext, HookIdea (analysis.go:
+    428-466): unconditional overwrite, no validity check, not protected by
+    do_not_overwrite handling for most of them (budget/quantity/audience are
+    protected AI-side but not fallback-side).
+  - `recordBriefMessage` (active_flow.go:113) overwrites ProductOrService/
+    TargetAudience/StrongSide/Offer from every brief message.
+  - `Conversation.DisplayName`→Lead.ClientName only when empty (safe).
+* `sanitizeLeadForQualification` (qualification.go:61) runs on every store
+  Update and CLEARS invalid niche/goal/deadline/package — good self-healing,
+  but it also means a junk value that passed validation once will be asked
+  again only if it later fails validation (it won't), so junk persists.
+
+Restart safety: full Conversation JSON (incl. Messages, SentVideoFiles,
+AskedFields) is reloaded at startup (`loadConversations`, sqlite_store.go:261).
+Memory is NOT lost on restart.
+
+Missing:
+* No long-term memory beyond 10 transcript messages for the LLM.
+* whatsapp_messages journal unused for context reconstruction.
+* No per-field provenance/confidence stored (can't tell "niche came from a
+  weak guess" later).
+
+================================================================================
+## 6. Customer Understanding Evaluation (Examples A–E)
+================================================================================
+
+Example A — "Здравствуйте. Я хочу продать земельный участок в пригороде. Мне
+нужна визуализация перспектив и съёмка с дрона"
+* Deterministic path (works even if OpenAI fails):
+  - `knownNicheFromText` (analysis.go:2213) has an EXPLICIT rule:
+    "земельный участок" → "недвижимость / земельный участок". Niche set.
+  - `extractGoal` (750): "хочу продать" → hasExplicitGoalSignal → normalizeGoal
+    "продать" → "рост продаж". Goal set.
+  - `portfolioTagsFromText` (ai_works.go:218): "земель/участ"→real_estate,
+    property, land; "дрон"→drone; "визуализац/перспектив"→visualization.
+* AI path adds the same tags per prompt rules (real_estate/land/drone/
+  visualization are dictated in both prompts).
+* Flow: niche+goal valid → `shouldSendRelevantAIWorkExamples` (service.go:2917)
+  = true → `sendRelevantAIWorkExamples` (2962): intro "Понял вас: ... нужна
+  визуализация перспектив и съёмка с дрона для продажи. Сейчас отправлю
+  подходящие примеры по недвижимость / земля." then top-2 videos.
+  Ranking: realtor_land.mp4 (tags real_estate+property+land+drone+
+  visualization+realtor) scores ~5, wins; second is real_estate.mp4 (~score 3).
+* Verdict: PASSES — does not ask "какая ниша?", sends 2 relevant examples with
+  captions. Two caveats: (1) it never addresses that Stone does NOT do real
+  drone shooting (AI video without filming) — no template corrects the
+  misconception; (2) if the analyzer call fails AND the greeting-first branch
+  triggers on a *new* chat, the state machine still routes to relevant
+  examples because both fields extracted deterministically.
+* Responsible code: understanding.go:66, analysis.go:2213/750,
+  ai_works.go:138/218, service.go:538/2917/2962.
+
+Example B — Bot: "Какой формат вам понравился?" Customer: "Никакой"
+* Deterministic: `isNegativeFormatSelection` (analysis.go:1599) matches
+  "никакой" exactly → Intent=negative_selection. `extractNiche` returns ""
+  ("никакой" is in `isNonNicheShortReply`, 1494, → isNonNicheCandidateText).
+* AI: prompt rule forces negative_selection + do_not_overwrite ["niche","goal"];
+  even if it returned niche="никакой", `isValidNiche`+`isNonNicheCandidateText`
+  filtering in customerUnderstandingToAnalysis (understanding.go:398) drops it.
+* Flow: handleSalesState → `handleNegativeSelection` (service.go:2950):
+  - niche+goal known → "Понял, из тех форматов ничего не выбрали. Тогда
+    отправлю примеры ближе под вашу задачу: <ниша>." + relevant examples;
+  - fields missing → politely asks ONLY the missing field, WITHOUT saving
+    "никакой" anywhere;
+  - nothing matches → neutral fallback offer.
+* Verdict: PASSES in the current code. The reported reply "Понял, никакой.
+  Какая цель ролика..." is NOT producible by the current templates (no
+  template echoes the raw text like that). If the bug still reproduces, the
+  deployed binary is older than these guards, or the value arrived as a
+  paraphrase ("никакой формат") through the AI path (see §5 risk).
+* Responsible code: analysis.go:1599/1494, understanding.go:45(prompt)/398,
+  service.go:532/2950, analysis.go:404.
+
+Example C — "у нас туризм, нужны ролики для привлечения клиентов"
+* `cleanNicheSource` strips "у нас"; `knownNicheFromText` matches candidate
+  "туризм" → niche="туризм". `extractGoal`: "привлеч"→"привлечь клиентов".
+  Tags: tourism/travel → normalized to "tourism".
+* Flow: same relevant-examples branch → intro + top-2 of 4 tourism videos
+  (almaty_tour.mp4, east_kazakhstan_presentation.mp4 — order = map order,
+  score 1 each). talgar_fairytale.mp4 / umrah.mp4 are never reachable for a
+  generic "туризм" request because of the 2-video cap.
+* Verdict: PASSES (niche+goal+examples), minor loss: only 2 of 4 examples.
+
+Example D — "сколько стоит?"
+* `containsPriceQuestion` → Intent=price_question. AI path same.
+* New chat (neutral_new): `hasQualificationSignal` includes price intent, but
+  MissingCoreFields ≠ ∅ → `sendGreetingAndSchedule` — greeting DOES answer
+  "Стоимость от 35 000 тг" and asks niche+goal. Acceptable but not a direct
+  price list.
+* awaiting_qualification: service.go:660 → `presentPortfolioAndPackages` →
+  three package videos with price captions + "Какой формат вам понравился?".
+  Direct, relevant.
+* packages_presented / questionnaire stages: `packagePriceText`/
+  `shortPriceReminderText` — direct price answer.
+* Verdict: MOSTLY PASSES. Weak spot: brand-new chat answers with the greeting
+  (contains "от 35 000 тг" but buried in a template) instead of the price
+  breakdown.
+* Responsible: analysis.go:1664, service.go:624-667/772-777, prompts.go:145.
+
+Example E — "стоп бот"
+* `isExplicitOptOutText` → `IsAdminStopCommand` (manual_stop.go:30):
+  normalization (case, punctuation, whitespace) + Cyrillic/Latin confusable
+  folding matches "стоп бот" exactly → `stopAutomationSilently`
+  (service.go:1039): Stage=opt_out, OptOut=true, Stopped=true, permanent row
+  in whatsapp_automation_suppression, follow-ups cancelled, NO reply sent.
+* Future messages: suppression is checked in cmd/main.go BEFORE any OpenAI
+  call and again in the service and before every send. No self-re-enable path
+  exists anywhere in the code.
+* Verdict: PASSES robustly.
+* Responsible: service.go:309/3398/1039, manual_stop.go:13/30,
+  suppression.go:34/63, cmd/main.go:292.
+
+================================================================================
+## 7. Portfolio / Hashtag / Video Sending Logic
+================================================================================
+
+Two separate video systems:
+
+A) Package/format videos — video/video_level_{1..4}.mp4 (offers.go:6).
+   Sent by `ensurePortfolioExamplesSentBeforeFormatQuestion` (levels 1-3, each
+   with a full package caption: title + description + price, offers.go:141)
+   right before the first "Какой формат вам понравился?", by
+   `selectPackageWithoutOpeningBrief` (the chosen package's video), and
+   video_level_4.mp4 as the weekly follow-up creative
+   (`sendWeeklyDiscountFollowup`, followup_actions.go:68).
+
+B) Niche examples ("hashtag" videos) — ai-works/<category>/*.mp4.
+   * Storage: files on disk; metadata is HARDCODED in
+     internal/bot/ai_works.go — `aiWorksByCategory` (27; 15 categories,
+     58 files — verified to match the disk exactly), category tags
+     `aiWorkCategoryTags` (120), plus per-file extra tags in `aiWorkVideo`
+     (307; e.g. realtor_land.mp4 += land, drone, visualization, property).
+   * Tag sources for a customer: AI `portfolio_tags` + keyword scan of lead
+     fields and current analysis (`aiWorkTagsForLead`, 190;
+     `portfolioTagsFromText`, 218 — RU/EN substring rules for real estate,
+     land, drone, visualization, tourism, auto, fashion, food, medicine,
+     logistics). `normalizePortfolioTags` (263) lower-cases, maps aliases
+     (travel→tourism, car→auto, clinic→medicine...).
+   * Matching type: exact intersection of normalized tag sets, scored by the
+     COUNT of shared tags (`aiWorkMatchScore`, 337). Not fuzzy, not embedding,
+     keyword-driven. OpenAI helps only by supplying portfolio_tags.
+   * Selection: `selectAIWorkExamples` (138) scores every video, stable-sorts
+     by score desc then map order, cuts to `limit`.
+
+THE LIMIT — direct answers to the required questions:
+* «Если по хэштегу найдено 1 видео — сколько отправляется?»  → 1.
+* «Если найдено 2 видео — сколько отправляется?»            → 2.
+* «Если найдено 3 видео — сколько отправляется?»            → 2 (top-2 by
+  score; the third is silently dropped).
+* «Есть ли лимит?»  → Да: `maxAIWorkExamples = 2`.
+* «Где этот лимит в коде?» → internal/bot/ai_works.go:11 (constant) and both
+  call sites pass it: internal/bot/service.go:2938 and :2963
+  (`selectAIWorkExamples(conversation.Lead, analysis, maxAIWorkExamples)`).
+* «Можно ли отправить все найденные или только top N?» → Сейчас только top-2.
+  `selectAIWorkExamples` already accepts a `limit` parameter (limit<=0 →
+  default 2), so sending all matches is a one-line change at the call sites;
+  no other code assumes exactly 2.
+
+No matches / fallback:
+* 0 matching videos → `shouldSendRelevantAIWorkExamples` returns false; the
+  state machine continues (qualification question or format question). In the
+  negative-selection handler → `negativeSelectionFallbackText`. There is NO
+  generic fallback example video (the "closest related example" caption
+  exists — `aiWorkCaption` exact=false — but only fires when some tag matched
+  with low specificity, e.g. category matched via a broad tag).
+
+Duplicates & repeats:
+* `sendRelevantAIWorkExamples` skips files already in SentVideoFiles (2971);
+  `ShouldSendVideo` (store.go:966) blocks re-sends unless the customer
+  explicitly asks again (`isExplicitVideoRepeatRequest`).
+* If ALL matching examples were already sent, `shouldSendRelevantAIWorkExamples`
+  = false and — in the negative-selection case with complete fields — the
+  intro branch can degrade to the generic fallback text. Edge case: race
+  between the two `selectAIWorkExamples` calls is harmless (same inputs).
+
+Captions / message shape:
+* Video + caption ARE one WhatsApp message: GreenAPI `SendFileByUpload`
+  includes `caption` in the multipart body (greenapi/client.go:190-207).
+* ai-works videos get a short RU/KK/EN caption ("Подходящий пример под вашу
+  задачу: недвижимость / земля." or the honest "Точного кейса нет, отправляю
+  ближайший по смыслу пример"), package videos get the full offer text.
+* The flow for examples is: 1 intro text message ("Понял вас: <ниша>...
+  Сейчас отправлю...") → video1+caption → 1.5s pause → video2+caption. That
+  reads human: acknowledge → deliver, with per-video captions. Not broken.
+
+Gating problem (impacts perceived intelligence):
+* `shouldSendRelevantAIWorkExamples` (service.go:2917) requires BOTH niche and
+  goal to be valid AND the questionnaire flow not started AND intent not in a
+  long exclusion list. A customer who states only the niche ("у нас туризм")
+  gets the goal question first, and generic package videos may arrive (via
+  the 15-minute auto-package follow-up or a price question) BEFORE any
+  tourism example. Relevant examples can also be permanently skipped once
+  QuestionnaireOfferSent=true.
+
+================================================================================
+## 8. Sales Flow Logic
+================================================================================
+
+Stage model: neutral_new → awaiting_qualification → packages_presented →
+awaiting_questionnaire_confirmation → brief_requested → handoff_required /
+handed_off (+ stopped/opt_out/legacy states). `clientStateForConversation`
+(sqlite_store.go:625) derives the effective state from flags.
+
+1. First message (`sendGreetingAndSchedule`, followup_actions.go:34): greeting
+   with "от 35 000 тг" + asks niche and goal (QualificationGreetingText),
+   schedules auto-packages follow-up (default 15 min,
+   NEW_LEAD_AUTO_PACKAGES_* — enabled by default).
+2. Niche/goal detection: OpenAI analyzer + regex extractors merge into
+   LeadState; qualification asks ONLY niche+goal (deadline deliberately never
+   asked — MissingCoreFields, analysis.go:519; several regression tests pin
+   this).
+3. Examples: relevant ai-works examples when niche+goal known (see §7);
+   otherwise the three package videos with price captions are sent right
+   before the first format question
+   (`ensurePortfolioExamplesSentBeforeFormatQuestion`).
+4. Price/packages: format question "Какой формат вам понравился?" →
+   `handlePackagesPresented` (service.go:732) routes package selection, price
+   questions, objections ("дорого" → Test-package pitch), portfolio repeats,
+   business links.
+5. Questionnaire: offer ("Отправить анкету?") → confirmation handler
+   (`handleQuestionnaireConfirmation`, 809) → `sendQuestionnaireAndAwaitBrief`
+   (914) sends the 4-question brief (BriefText).
+6. Brief: `handleBriefRequested`/`recordBriefMessage`/`briefCompletionStatus`
+   (active_flow.go) — keyword heuristics decide which of product/strength/
+   client/offer is still missing and ask exactly one next question; numbered
+   answers complete instantly.
+7. Handoff: `completeBriefAndHandoff` → "Спасибо, бриф получили. Передаю
+   менеджеру..." → stage handoff_required → `notifyAdminsIfNeeded`
+   (service.go:1755) sends the admin (ADMIN_CHAT_IDS) a WhatsApp lead card
+   (name, phone, niche, goal, package, summary, wa.me link) once per chat;
+   automation closes (AutomationClosed=true).
+   Explicit "оператор/менеджер" → `sendHumanHandoff` immediately.
+   `askMissingBeforeManager` blocks handoff until niche+goal+package known.
+8. Follow-ups (delayed_packages.go): packages after 15 min of silence after
+   greeting; questionnaire offer 1h after packages; reminder after 24h;
+   weekly "новый AI-проект" video after 7 days. All follow-ups re-check
+   suppression/stop/closed state and cancel when the client replied.
+
+Problems observed:
+* Silent no-reply branches: `presentPortfolioAndPackages` returns nil when
+  packages already sent (service.go:692); off-topic gate drops messages;
+  `handleBriefRequested` swallows bare "ок". Deliberate anti-spam, but the
+  customer sometimes gets NO answer at all — reads as "bot ignored me".
+* Only one phrasing per situation → repetition across days feels robotic
+  despite the anti-repeat validation gate.
+* Too-early questionnaire pressure: after packages, ANY agreement ("да")
+  moves toward the questionnaire; an FAQ answer is always suffixed with
+  "Отправить анкету?" once the offer stage is reached.
+* Early price is fine (greeting includes it), but a cold "сколько стоит?"
+  gets a greeting template rather than the 3-package price answer.
+* Field extraction on the regex path is whitelist-based: an unknown niche
+  word ("продаём септики") that misses every marker can bounce ("Подскажите,
+  что продаёте...") even though the customer just said it — the OpenAI layer
+  usually rescues this, IF it is working.
+* Hardcoded replies ignoring OpenAI: by design ALL replies ignore OpenAI's
+  reply_text (live). The recommended_action is only partially honored
+  (send_relevant_examples → IntentPortfolioRequest mapping).
+
+================================================================================
+## 9. STOP / Suppression Logic
+================================================================================
+
+Supported customer STOP triggers (`isExplicitOptOutText`, service.go:3398):
+* exact (after normalization): "стоп", "stop", "unsubscribe", "отмена",
+  "cancel";
+* `IsAdminStopCommand` (manual_stop.go:30): "stop", "стоп", "stop bot",
+  "стоп бот" — with lower-casing, punctuation/whitespace stripping
+  (`NormalizeAdminStopCommand`) and Cyrillic↔Latin confusable folding
+  (`stopConfusableFolds`) so "sтоп bот" style mixes still match; plus exact
+  "отключить", "не писать", "хватит", "остановить"...;
+* substrings: "не пишите", "не надо", "не интересно", "не актуально",
+  "передумал", "отписаться", "жазбаңыз", "керек емес", "not interested"...
+
+"стоп бот" → WORKS (exact fold match). Case-insensitive: YES. Punctuation and
+extra spaces: handled. RU/EN/KK variants: yes (KK partially).
+
+Effect (`stopAutomationSilently`, service.go:1039): opt_out stage, Stopped,
+AutomationClosed, StoppedBy=customer, permanent INSERT into
+whatsapp_automation_suppression (suppression.go:63), follow-ups cancelled.
+Suppression is checked BEFORE OpenAI (cmd/main.go:292 — suppressed incoming is
+only journaled) and before every outgoing send (sendAndRemember,
+sendVideosWithCaptions, sendCustomerWhatsAppFile, follow-up scheduler).
+
+Admin manual stop: an outgoing message typed from the business phone
+containing a stop command → `handleOutgoingPhoneWebhook` → `MarkManualStop`
+(store.go:738) → StopReason=manual_admin_stop; `isConversationManuallyStopped`
+(safety.go:46) then blocks every send path. Outgoing API (bot) messages can
+never trigger it (cmd/main.go:211 branch ignores them for stop logic).
+
+Can the bot re-enable itself? NO code path deletes suppression rows or clears
+Stopped/OptOut. `MarkIncoming` even re-asserts Stopped from the stage
+(store.go:300). `ReopenIncompleteHandoff` exists but is never called (dead).
+Migration even force-stops all group chats and seeds several protected phone
+numbers (sqlite_store.go:164-188).
+
+Where it can fail:
+* FALSE POSITIVES, not false negatives: because opt-out uses substring
+  matching, ordinary sentences like "не надо анкету, просто скажите цену",
+  "мы передумали насчёт стандарта, давайте тест", "это не актуально до
+  понедельника" PERMANENTLY silence the lead with no notification to anyone.
+  This is the biggest STOP-related business risk (lost leads, silent).
+* `isNegativeReaction` (analysis.go:1784) also matches substring "стоп" and
+  "не надо" → silent stop through the negative-reaction branch
+  (service.go:479) — same overreach.
+* Suppression queries run on every message and swallow DB errors as
+  "not suppressed" (suppression.go:97-101) — fail-open on DB failure
+  (low likelihood).
+
+================================================================================
+## 10. Admin / Outgoing Message Safety
+================================================================================
+
+* Own bot messages: arrive as `outgoingAPIMessageReceived` → logged/deleted,
+  never parsed as customer input (cmd/main.go:211). Bot replies enter customer
+  state only as role="assistant" transcript entries (sendAndRemember →
+  AppendMessage). SAFE.
+* Admin manual replies (from the business phone): arrive as
+  `outgoingMessageReceived` → journaled into whatsapp_messages
+  (`LogOutgoingWhatsAppMessage`) and checked ONLY for stop commands. They are
+  NOT added to Conversation.Messages, do NOT pause automation, and do NOT
+  reset follow-ups. Consequences:
+  - The bot CAN keep auto-replying in a chat the admin has taken over,
+    unless the admin sends "стоп" (or the chat had reached a handoff/closed
+    state, which does close automation).
+  - The OpenAI context never sees what the admin manually wrote — the model
+    may re-ask something the admin already answered.
+* Group chats: quadruple-protected (incoming skip, outgoing block, conversation
+  force-stop `disableGroupConversationAutomation`, DB migration cleanup).
+* Admin notifications go only to normalized ADMIN_CHAT_IDS via
+  `sendManagerWhatsAppMessage` with a purpose gate (whatsapp/safety.go),
+  and are one-shot per chat (AdminNotifiedAt / AdminOperatorNotifiedAt).
+* After handoff (`sendHumanHandoff`/`completeBriefAndHandoff`) automation is
+  closed; `outgoingStageAllowsClosedAutomation` (service.go:1447) allows only
+  the final handoff texts through. The bot does not send automatic replies
+  after a *flow-triggered* handoff — but again, a purely manual admin
+  takeover without a stop command does not close anything.
+
+================================================================================
+## 11. Ratings (1-10)
+================================================================================
+
+* Customer context understanding ......... 6
+  (excellent analyzer payload/prompt; regex fallback and token cap drag it
+  down; UNCERTAIN production failure rate)
+* OpenAI prompt quality .................. 8 (understanding prompt; the
+  polished sales prompt is dead code)
+* Recent history usage ................... 7 (last 10 msgs + QA pairs + quoted
+  context to OpenAI; full journal unused; admin msgs invisible)
+* State persistence quality .............. 8 (SQLite, full JSON, reload on
+  start, message journal, asked/sent tracking)
+* Field overwrite safety ................. 6 (niche/goal well guarded;
+  secondary fields unguarded; valid→valid niche swap possible)
+* Video hashtag matching quality ......... 6 (deterministic, tags are decent,
+  per-file tags for real estate; hardcoded catalog, top-2 cap, exact-match
+  only, no fallback example)
+* Human-like dialogue quality ............ 4 (all-template replies, single
+  phrasing per situation, silent-ignore branches; good: answers direct
+  questions first, no re-asking, honest "точного кейса нет")
+* STOP reliability ....................... 8 for stopping (robust, permanent,
+  checked everywhere); 4 for precision (broad substrings nuke live leads) →
+  combined 6.5
+* Overall production readiness ........... 6 — engineering (dedupe, locking,
+  suppression, guards, persistence) is strong; the conversational brain is
+  half-installed (LLM reply off, analyzer possibly failing silently).
+
+================================================================================
+## 12. Critical Bugs / Risks (prioritized)
+================================================================================
+
+P0
+1. Analyzer output-token budget: MAX_OPENAI_OUTPUT_TOKENS=350 caps
+   AnalyzeCustomerMessage (openai/client.go:283) below the size of its own
+   mandatory JSON schema → truncation → parse failure → silent regex-only
+   understanding. Evidence: schema requires 22 extracted_fields keys +
+   message_meaning + reply_text (openai/client.go:688-741). Verify via logs
+   ("openai customer understanding failed/invalid"), then raise the analyzer
+   cap (e.g. 900-1200) independently of the reply cap.
+2. UNCERTAIN/verify: model "gpt-5.5" + temperature on /v1/responses
+   (openai/client.go:280-294). If the model rejects `temperature` or the id
+   is wrong, 100% of analyzer calls fail and the bot always runs on regex.
+   One production log line confirms or refutes this.
+
+P1
+3. Over-broad customer opt-out: substrings "не надо", "передумал",
+   "не актуально", "не интересно" in isExplicitOptOutText (service.go:3410)
+   and "стоп"/"не надо" in isNegativeReaction (analysis.go:1784) permanently
+   suppress real leads mid-negotiation, silently, with no admin notification.
+4. Manual admin replies don't pause automation and aren't visible to the
+   model (cmd/main.go:383-436): bot can talk over a human manager and re-ask
+   answered questions.
+5. Niche valid→valid overwrite: an AI-paraphrased weak value ("никакой
+   формат", "клиент недоволен") passes isValidNiche and replaces a good niche
+   (analysis.go:404; understanding.go:398 filters only known short forms).
+6. Relevant-example gating: examples require BOTH niche and goal
+   (service.go:2935) and are skipped entirely after QuestionnaireOfferSent —
+   a tourism client who hasn't stated a goal never sees tourism examples
+   before generic package videos arrive via follow-up.
+7. History-guard subsystem configured but unwired (`SetHistoryGuard` never
+   called from cmd/main.go): cold re-engagement of pre-bot chats is
+   unprotected on fresh databases (legacy protection only exists where the
+   importer wrote flags).
+8. Intent mapping gap: schema intent "objection" is not handled in
+   customerUnderstandingToAnalysis's switch (understanding.go:483) → AI
+   objection becomes IntentOther; sentiment/state_update/legacy intents in
+   that switch are unreachable dead branches that mislead maintainers.
+
+P2
+9. maxAIWorkExamples=2 silently drops the 3rd+ matching example
+   (ai_works.go:11) — product decision needed (see §7 answers).
+10. Silent no-reply branches (presentPortfolioAndPackages early return
+    service.go:692, off-topic drop service.go:372, generic ack swallow
+    active_flow.go:79) — customer sees the bot ignore them.
+11. Dead code volume (handleLocalCommand, Manager/flow.go, meta/http/storage
+    packages, applyAIState/toOpenAIMessages/systemPromptForLanguage,
+    ReopenIncompleteHandoff, fieldListSchema) obscures the real flow.
+12. Cold "сколько стоит?" on a brand-new chat answers with the greeting
+    template instead of the direct 3-package price answer.
+13. Drone/visualization requests are matched to examples but the bot never
+    clarifies it does AI video, not real drone filming.
+14. .env with real GreenAPI/OpenAI keys is committed in the repository
+    (out of dialogue scope, but must be rotated).
+
+================================================================================
+## 13. Recommended Fix Plan (do NOT implement now)
+================================================================================
+
+Step 1 — Verify and fix the OpenAI call itself (P0):
+* Check production logs for "openai customer understanding failed/invalid"
+  frequency; confirm model id and temperature acceptance.
+* Files: internal/openai/client.go (separate analyzer token budget, drop
+  temperature if rejected, log the raw refusal), .env (MAX_OPENAI_OUTPUT_TOKENS
+  or a new ANALYZER_MAX_OUTPUT_TOKENS), internal/bot/understanding.go
+  (surface fallback usage as a metric/alert, consider one retry).
+* Tests: a fake OpenAI server returning truncated JSON must produce a logged
+  fallback; a schema-sized golden response must fit the token budget.
+
+Step 2 — Tighten opt-out precision (P1):
+* Files: internal/bot/service.go (isExplicitOptOutText — require standalone
+  phrases/anchored matching for "не надо"/"передумал"; route ambiguous cases
+  through the analyzer's stop_or_opt_out intent instead of substrings),
+  internal/bot/analysis.go (isNegativeReaction — remove bare "стоп"/"не надо"
+  substrings), plus an admin notification on every auto-suppression.
+* Tests: "не надо анкету, скажите цену" must NOT suppress; "стоп бот" must.
+
+Step 3 — Admin-takeover awareness (P1):
+* Files: cmd/main.go handleOutgoingPhoneWebhook + internal/bot/store.go —
+  record manual outgoing messages into Conversation.Messages (role
+  "manager") and set a cooldown flag (e.g. pause automation N hours after a
+  manual admin message, configurable).
+* Tests: after a manual admin reply, the next customer message gets no
+  auto-reply within the cooldown; the analyzer payload contains the manager
+  message.
+
+Step 4 — Make "никакой"-class overwrites impossible even via paraphrase (P1):
+* Files: internal/bot/analysis.go ApplyAnalysis — when a VALID niche already
+  exists, require the new value to differ semantically (not derived from a
+  negative_selection/confusion/defer intent) before replacing; extend
+  isNonNicheCandidateText with "никакой формат", "ни один из", "не выбрал";
+  apply do_not_overwrite protection to the fallback path as well.
+* Tests: table test where stored niche "туризм" + every weak phrase list
+  entry (and paraphrases) leaves the lead unchanged.
+
+Step 5 — Examples earlier and configurable count (P1/P2):
+* Files: internal/bot/service.go shouldSendRelevantAIWorkExamples (allow
+  sending when only the niche is known, then ask the goal in the SAME intro
+  message), ai_works.go (make the limit a config value; decide 2 vs all),
+  optionally add a per-category fallback video for unmatched niches.
+* Tests: "у нас туризм" → tourism examples + goal question in one turn;
+  3-match niche sends the configured count.
+
+Step 6 — Decide the LLM-reply rollout (strategic):
+* The infrastructure for human-sounding replies already exists
+  (llm_reply.go + SystemPrompt + validation gate + dry-run mode). Recommended
+  path: enable BOT_LLM_REPLY_DRY_RUN=true in production for a week, compare
+  logged LLM previews against state-machine replies, fix SystemPrompt
+  drift (brief wording, RU/EN mixing), then enable for the safe next_actions
+  (send_text/ask_next_question) only — the code already restricts exactly
+  that (service.go:439).
+* How to make OpenAI understand full context: it already receives last-10
+  history, QA pairs, state, sent videos; the missing pieces are (a) manager
+  messages (step 3), (b) more than 10 messages for long chats — read the
+  whatsapp_messages journal tail into the payload, (c) stop discarding
+  reply_text so the model's contextual acknowledgement can be used.
+
+Step 7 — Cleanup (P2):
+* Delete or quarantine: handleLocalCommand, manager.go/flow.go/state.go legacy
+  stack, internal/meta+internal/http+internal/storage, unreachable analyzer
+  switch branches, ReopenIncompleteHandoff, fieldListSchema; either wire
+  SetHistoryGuard in main.go or remove the subsystem and its config.
+* Rotate and gitignore the committed credentials.
+
+================================================================================
+## 14. Evidence
+================================================================================
+
+Claim: OpenAI only extracts JSON; templates write the replies.
+* cmd/main.go has no LLM reply wiring; internal/bot/service.go:421-458 — LLM
+  reply used only `if llmReply.Called` which requires s.llmReply.Enabled;
+  service.go:104-112 `loadLLMReplyOptionsFromEnv` → parseBoolEnv("BOT_LLM_REPLY_ENABLED", false);
+  .env (repo root) contains no BOT_LLM_REPLY_ENABLED → disabled.
+* All customer texts trace to constants: prompts.go, dialogue.go,
+  approved_flow.go, conversation_special_handlers.go, offers.go.
+
+Claim: the analyzer gets recent history, bot questions, state, sent videos.
+* internal/bot/understanding.go:148-240 customerUnderstandingPayload —
+  fields RecentMessages (last 10 via recentUnderstandingMessages:255),
+  PendingQuestions, QuestionAnswerPairs, KnownState/ConversationState =
+  conversationPromptJSON (service.go:2195-2279 includes sent_videos,
+  sent_video_files, asked_fields, stage, lead, recent_messages).
+
+Claim: strict JSON + validation + deterministic fallback.
+* internal/openai/client.go:280-294 (json_schema strict),
+  customerUnderstandingSchema:518; understanding.go:66-96 — on error or
+  invalid response returns AnalyzeCustomerMessage(text,...) fallback;
+  analysis.go:152 the regex analyzer.
+
+Claim: 350-token cap applies to the analyzer.
+* .env MAX_OPENAI_OUTPUT_TOKENS=350; cmd/main.go:66-72 passes it to
+  openai.NewClient; openai/client.go:283 `MaxOutputTokens:
+  minPositive(c.maxOutputTokens, 1200)` → 350; schema requires 22 keys in
+  extracted_fields (openai/client.go:692-715) → high truncation risk.
+
+Claim: "Никакой" cannot overwrite niche in current code.
+* analysis.go:1599 isNegativeFormatSelection ("никакой"...);
+  analysis.go:1494 isNonNicheShortReply includes "никакой";
+  analysis.go:1869 isNonNicheCandidateText uses it;
+  analysis.go:404 ApplyAnalysis requires isValidNiche AND
+  !isNonNicheCandidateText before replacing;
+  understanding.go:45 prompt rule; understanding.go:398 same guard for AI
+  values; service.go:532→2950 handleNegativeSelection sends corrective text +
+  closer examples instead of echoing.
+
+Claim: video limit is 2; 1→1, 2→2, 3→2.
+* internal/bot/ai_works.go:11 `maxAIWorkExamples = 2`;
+  ai_works.go:176-182 loop `if len(videos) >= limit { break }`;
+  call sites service.go:2938 and :2963 pass maxAIWorkExamples.
+
+Claim: video and caption go out as ONE WhatsApp message.
+* internal/greenapi/client.go:190-215 SendFileByUploadWithPurpose writes
+  multipart fields including "caption"; service.go:1721-1728 caption chosen
+  (explicit map or OfferByVideo package text) and passed to
+  sendCustomerWhatsAppFile → SendFileByUpload.
+
+Claim: package videos are forced before the first format question.
+* service.go:1523-1531 needsPortfolioExamplesBeforeFormatQuestion →
+  ensurePortfolioExamplesSentBeforeFormatQuestion (1588) sends missing
+  video_level_1..3 with captions and blocks the question on failure;
+  test TestExamplesRequestSendsThreePortfolioVideosWithCaptionsOnce.
+
+Claim: "стоп бот" works and is permanent; suppressed chats skip OpenAI.
+* manual_stop.go:30-56 IsAdminStopCommand incl. "стоп бот" + confusable
+  folding (63-80); service.go:309-316 → stopAutomationSilently:1039 →
+  SuppressAutomation (suppression.go:63, INSERT INTO
+  whatsapp_automation_suppression); cmd/main.go:292-317 suppressed incoming
+  saved and skipped BEFORE bot service/OpenAI; no code deletes suppression
+  rows (grep: only INSERT/SELECT on that table).
+
+Claim: admin manual replies never pause the bot (only stop commands).
+* cmd/main.go:425-436 — "outgoingMessageReceived received but not a stop
+  command" branch just logs and returns after journaling; nothing sets
+  Stopped/AutomationClosed for non-stop manual messages.
+
+Claim: history guard is dead in live flow.
+* grep "SetHistoryGuard" over cmd+internal: only the definition
+  (history_guard.go:81) — no call in cmd/main.go; history_guard.go:123 returns
+  immediately when options.Enabled==false/source==nil (zero-value runtime).
+  Stored-flag silencing still active: shouldSilenceForStoredHistory
+  (history_guard.go:445) called from safety.go:59 and service.go:489.
+
+Claim: handleLocalCommand and the Meta stack are dead.
+* grep "handleLocalCommand" → only the definition (service.go:1202).
+* grep "NewManager" → no callers outside internal/http/handler/webhook.go,
+  which itself is not referenced by cmd/main.go (grep "internal/http" in cmd:
+  none).
+
+Claim: overly broad opt-out substrings.
+* service.go:3410-3415: list includes "не надо", "передумал", "не актуально",
+  "не интересно" matched with containsAny (substring) on the whole message;
+  triggered at service.go:309 before any state/intent nuance.
+
+Claim: example A niche/goal are extracted even without OpenAI.
+* analysis.go:2213-2216 knownNicheFromText hardcodes "земельный участок" →
+  "недвижимость / земельный участок"; analysis.go:837-842
+  hasExplicitGoalSignal includes "хочу"/"продать" context; analysis.go:2059
+  normalizeGoal "продать" → "рост продаж"; ai_works.go:227-240 maps
+  земель/дрон/визуализац to tags; ai_works.go:312-313 realtor_land.mp4 extra
+  tags land/drone/visualization.
+
+Claim: transcript memory is 10 messages, persisted.
+* store.go:15 defaultHistoryLimit=10; store.go:515-517 trim;
+  sqlite_store.go:350-353 conversation_json = full struct (Messages exported);
+  loadConversations:261 restores on boot.
+
+UNCERTAIN items requiring live verification:
+1. Actual analyzer failure rate (logs: "openai customer understanding
+   failed" / "invalid"). Determines whether P0 #1/#2 are theoretical or the
+   root cause of the reported behavior.
+2. Whether model "gpt-5.5" accepts `temperature` and the 350-token cap on the
+   /v1/responses endpoint (one curl or one log line).
+3. Which binary is deployed — the "Понял, никакой" reply in the complaint is
+   not producible from current templates; the running build may be older than
+   commit beecdae ("fixed logics and added hashtag videos").
+4. Whether the production DB has legacy history flags (affects how exposed
+   old chats are given the unwired history guard).
+
+— End of audit —

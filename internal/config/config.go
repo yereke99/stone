@@ -15,24 +15,25 @@ const (
 )
 
 type Config struct {
-	GreenAPI              GreenAPIConfig
-	OpenAI                OpenAIConfig
-	Database              DatabaseConfig
-	PortfolioVideoDir     string
-	ReceiveTimeoutSeconds int
-	HTTPClientTimeout     time.Duration
-	BotReplyLanguageMode  string
-	BotAutoReplyEnabled   bool
-	BotMaxMessageAge      time.Duration
-	MaxOpenAIOutputTokens int
-	AdminChatIDs          []string
-	AppEnv                string
-	Env                   string
-	AppPort               string
-	Meta                  MetaConfig
-	Portfolio             PortfolioConfig
-	HistoryGuard          HistoryGuardConfig
-	NewLeadAutoPackages   NewLeadAutoPackagesConfig
+	GreenAPI                GreenAPIConfig
+	OpenAI                  OpenAIConfig
+	Database                DatabaseConfig
+	PortfolioVideoDir       string
+	ReceiveTimeoutSeconds   int
+	HTTPClientTimeout       time.Duration
+	BotReplyLanguageMode    string
+	BotAutoReplyEnabled     bool
+	BotMaxMessageAge        time.Duration
+	MaxOpenAIOutputTokens   int
+	AnalyzerMaxOutputTokens int
+	AdminChatIDs            []string
+	AppEnv                  string
+	Env                     string
+	AppPort                 string
+	Meta                    MetaConfig
+	Portfolio               PortfolioConfig
+	HistoryGuard            HistoryGuardConfig
+	NewLeadAutoPackages     NewLeadAutoPackagesConfig
 }
 
 type GreenAPIConfig struct {
@@ -116,6 +117,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	analyzerMaxOutputTokens, err := optionalPositiveInt("ANALYZER_MAX_OUTPUT_TOKENS", 1500)
+	if err != nil {
+		return nil, err
+	}
 
 	openAITemperature, err := optionalFloat("OPENAI_TEMPERATURE", defaultOpenAITemperature)
 	if err != nil {
@@ -192,15 +197,16 @@ func Load() (*Config, error) {
 		Database: DatabaseConfig{
 			Path: envOrDefault("DATABASE_PATH", "./data/stone.sqlite3"),
 		},
-		PortfolioVideoDir:     required("PORTFOLIO_VIDEO_DIR"),
-		ReceiveTimeoutSeconds: receiveTimeout,
-		HTTPClientTimeout:     time.Duration(httpTimeoutSeconds) * time.Second,
-		BotReplyLanguageMode:  replyLanguageMode,
-		BotAutoReplyEnabled:   autoReplyEnabled,
-		BotMaxMessageAge:      time.Duration(maxMessageAgeSeconds) * time.Second,
-		MaxOpenAIOutputTokens: maxOutputTokens,
-		AdminChatIDs:          append(splitCSV(os.Getenv("OWNER_WA_CHAT_ID")), splitCSV(os.Getenv("ADMIN_CHAT_IDS"))...),
-		AppEnv:                required("APP_ENV"),
+		PortfolioVideoDir:       required("PORTFOLIO_VIDEO_DIR"),
+		ReceiveTimeoutSeconds:   receiveTimeout,
+		HTTPClientTimeout:       time.Duration(httpTimeoutSeconds) * time.Second,
+		BotReplyLanguageMode:    replyLanguageMode,
+		BotAutoReplyEnabled:     autoReplyEnabled,
+		BotMaxMessageAge:        time.Duration(maxMessageAgeSeconds) * time.Second,
+		MaxOpenAIOutputTokens:   maxOutputTokens,
+		AnalyzerMaxOutputTokens: analyzerMaxOutputTokens,
+		AdminChatIDs:            append(splitCSV(os.Getenv("OWNER_WA_CHAT_ID")), splitCSV(os.Getenv("ADMIN_CHAT_IDS"))...),
+		AppEnv:                  required("APP_ENV"),
 		HistoryGuard: HistoryGuardConfig{
 			Enabled:              historyGuardEnabled,
 			LookbackCount:        historyGuardLookbackCount,

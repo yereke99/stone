@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,17 +14,95 @@ import (
 )
 
 const (
-	defaultBaseURL   = "https://api.openai.com/v1"
-	maxErrorBodySize = 4096
+	defaultBaseURL                 = "https://api.openai.com/v1"
+	responsesEndpoint              = "/responses"
+	defaultAnalyzerMaxOutputTokens = 1500
+	maxErrorBodySize               = 4096
 )
 
 type Client struct {
-	apiKey          string
-	model           string
-	maxOutputTokens int
-	temperature     float64
-	httpClient      *http.Client
-	baseURL         string
+	apiKey                  string
+	model                   string
+	maxOutputTokens         int
+	analyzerMaxOutputTokens int
+	temperature             float64
+	httpClient              *http.Client
+	baseURL                 string
+}
+
+type APIError struct {
+	Operation       string
+	Model           string
+	Endpoint        string
+	StatusCode      int
+	MaxOutputTokens int
+	Err             error
+}
+
+type APIErrorDetails struct {
+	Operation       string
+	Model           string
+	Endpoint        string
+	StatusCode      int
+	MaxOutputTokens int
+}
+
+func (e *APIError) Error() string {
+	if e == nil {
+		return ""
+	}
+	parts := []string{"openai " + strings.TrimSpace(e.Operation) + " failed"}
+	if e.Model != "" {
+		parts = append(parts, "model="+e.Model)
+	}
+	if e.Endpoint != "" {
+		parts = append(parts, "endpoint="+e.Endpoint)
+	}
+	if e.StatusCode > 0 {
+		parts = append(parts, "status="+strconv.Itoa(e.StatusCode))
+	}
+	if e.MaxOutputTokens > 0 {
+		parts = append(parts, "max_output_tokens="+strconv.Itoa(e.MaxOutputTokens))
+	}
+	if e.Err != nil {
+		parts = append(parts, "error="+e.Err.Error())
+	}
+	return strings.Join(parts, " ")
+}
+
+func (e *APIError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func ErrorDetails(err error) (APIErrorDetails, bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return APIErrorDetails{}, false
+	}
+	return APIErrorDetails{
+		Operation:       apiErr.Operation,
+		Model:           apiErr.Model,
+		Endpoint:        apiErr.Endpoint,
+		StatusCode:      apiErr.StatusCode,
+		MaxOutputTokens: apiErr.MaxOutputTokens,
+	}, true
+}
+
+func SafeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return ""
+	}
+	if len(message) > maxErrorBodySize {
+		message = message[:maxErrorBodySize]
+	}
+	return message
 }
 
 type Message struct {
@@ -55,6 +134,10 @@ type SalesResponse struct {
 	LeadStatus        string                         `json:"lead_status"`
 	CompletedFields   []string                       `json:"completed_fields"`
 	AskedFields       []string                       `json:"asked_fields"`
+}
+
+type ReplyTextResponse struct {
+	ReplyText string `json:"reply_text"`
 }
 
 type CustomerUnderstanding struct {
@@ -175,15 +258,37 @@ type HistoryGuardKnownFields struct {
 	PackageInterest string `json:"package_interest"`
 }
 
-func NewClient(apiKey string, model string, maxOutputTokens int, temperature float64, httpClient *http.Client) *Client {
+func NewClient(apiKey string, model string, maxOutputTokens int, analyzerMaxOutputTokens int, temperature float64, httpClient *http.Client) *Client {
 	return &Client{
-		apiKey:          strings.TrimSpace(apiKey),
-		model:           strings.TrimSpace(model),
-		maxOutputTokens: maxOutputTokens,
-		temperature:     temperature,
-		httpClient:      httpClient,
-		baseURL:         defaultBaseURL,
+		apiKey:                  strings.TrimSpace(apiKey),
+		model:                   strings.TrimSpace(model),
+		maxOutputTokens:         maxOutputTokens,
+		analyzerMaxOutputTokens: analyzerMaxOutputTokens,
+		temperature:             temperature,
+		httpClient:              httpClient,
+		baseURL:                 defaultBaseURL,
 	}
+}
+
+func (c *Client) AnalyzerMaxOutputTokens() int {
+	if c == nil || c.analyzerMaxOutputTokens <= 0 {
+		return defaultAnalyzerMaxOutputTokens
+	}
+	return c.analyzerMaxOutputTokens
+}
+
+func (c *Client) Model() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.model)
+}
+
+func (c *Client) ResponsesEndpoint() string {
+	if c == nil {
+		return ""
+	}
+	return c.endpointURL()
 }
 
 func (c *Client) GenerateSalesReply(ctx context.Context, systemPrompt string, messages []Message) (SalesResponse, error) {
@@ -203,17 +308,15 @@ func (c *Client) GenerateSalesReply(ctx context.Context, systemPrompt string, me
 		model = c.model
 	}
 	maxOutputTokens := c.maxOutputTokens
-	if raw := strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MAX_TOKENS")); raw != "" {
+	if raw := firstEnv("LLM_REPLY_MAX_OUTPUT_TOKENS", "BOT_LLM_REPLY_MAX_TOKENS"); raw != "" {
 		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
 			maxOutputTokens = value
 		}
 	}
-
 	payload := responseRequest{
 		Model:           model,
 		Input:           input,
 		MaxOutputTokens: maxOutputTokens,
-		Temperature:     c.temperature,
 		Store:           false,
 		Text: responseText{
 			Format: responseFormat{
@@ -230,7 +333,7 @@ func (c *Client) GenerateSalesReply(ctx context.Context, systemPrompt string, me
 		return SalesResponse{}, fmt.Errorf("marshal openai responses request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL(), bytes.NewReader(requestBody))
 	if err != nil {
 		return SalesResponse{}, fmt.Errorf("create openai responses request: %w", err)
 	}
@@ -249,17 +352,94 @@ func (c *Client) GenerateSalesReply(ctx context.Context, systemPrompt string, me
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return SalesResponse{}, c.statusError(resp.StatusCode, data)
+		return SalesResponse{}, c.statusError("sales_reply", model, maxOutputTokens, resp.StatusCode, data)
 	}
 
 	outputText, err := extractOutputText(data)
 	if err != nil {
-		return SalesResponse{}, err
+		return SalesResponse{}, c.apiError("sales_reply", model, maxOutputTokens, resp.StatusCode, err)
 	}
 
 	var result SalesResponse
 	if err := json.Unmarshal([]byte(outputText), &result); err != nil {
-		return SalesResponse{}, fmt.Errorf("parse model json response: %w", err)
+		return SalesResponse{}, c.apiError("sales_reply", model, maxOutputTokens, resp.StatusCode, fmt.Errorf("parse model json response: %w", err))
+	}
+
+	return result, nil
+}
+
+func (c *Client) GenerateReplyText(ctx context.Context, systemPrompt string, messages []Message) (ReplyTextResponse, error) {
+	input := make([]responseInput, 0, len(messages)+1)
+	input = append(input, newInput("system", systemPrompt))
+	for _, message := range messages {
+		role := strings.TrimSpace(message.Role)
+		content := strings.TrimSpace(message.Content)
+		if role == "" || content == "" {
+			continue
+		}
+		input = append(input, newInput(role, content))
+	}
+
+	model := strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MODEL"))
+	if model == "" {
+		model = c.model
+	}
+	maxOutputTokens := c.maxOutputTokens
+	if raw := firstEnv("LLM_REPLY_MAX_OUTPUT_TOKENS", "BOT_LLM_REPLY_MAX_TOKENS"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			maxOutputTokens = value
+		}
+	}
+	payload := responseRequest{
+		Model:           model,
+		Input:           input,
+		MaxOutputTokens: maxOutputTokens,
+		Store:           false,
+		Text: responseText{
+			Format: responseFormat{
+				Type:   "json_schema",
+				Name:   "stone_reply_text",
+				Strict: true,
+				Schema: replyTextResponseSchema(),
+			},
+		},
+	}
+
+	requestBody, err := json.Marshal(payload)
+	if err != nil {
+		return ReplyTextResponse{}, fmt.Errorf("marshal openai reply text request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL(), bytes.NewReader(requestBody))
+	if err != nil {
+		return ReplyTextResponse{}, fmt.Errorf("create openai reply text request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ReplyTextResponse{}, c.apiError("reply_text", model, maxOutputTokens, 0, fmt.Errorf("call openai reply text api: %w", err))
+	}
+	defer closeBody(resp.Body)
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ReplyTextResponse{}, c.apiError("reply_text", model, maxOutputTokens, resp.StatusCode, fmt.Errorf("read openai reply text response: %w", err))
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return ReplyTextResponse{}, c.statusError("reply_text", model, maxOutputTokens, resp.StatusCode, data)
+	}
+
+	outputText, err := extractOutputText(data)
+	if err != nil {
+		return ReplyTextResponse{}, c.apiError("reply_text", model, maxOutputTokens, resp.StatusCode, err)
+	}
+
+	var result ReplyTextResponse
+	if err := json.Unmarshal([]byte(outputText), &result); err != nil {
+		return ReplyTextResponse{}, c.apiError("reply_text", model, maxOutputTokens, resp.StatusCode, fmt.Errorf("parse reply text json response: %w", err))
 	}
 
 	return result, nil
@@ -277,11 +457,11 @@ func (c *Client) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string
 		input = append(input, newInput(role, content))
 	}
 
+	maxOutputTokens := c.AnalyzerMaxOutputTokens()
 	payload := responseRequest{
 		Model:           c.model,
 		Input:           input,
-		MaxOutputTokens: minPositive(c.maxOutputTokens, 1200),
-		Temperature:     analysisTemperature(c.temperature),
+		MaxOutputTokens: maxOutputTokens,
 		Store:           false,
 		Text: responseText{
 			Format: responseFormat{
@@ -298,7 +478,7 @@ func (c *Client) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string
 		return CustomerUnderstanding{}, fmt.Errorf("marshal customer understanding request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL(), bytes.NewReader(requestBody))
 	if err != nil {
 		return CustomerUnderstanding{}, fmt.Errorf("create customer understanding request: %w", err)
 	}
@@ -307,25 +487,25 @@ func (c *Client) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return CustomerUnderstanding{}, fmt.Errorf("call openai customer understanding api: %w", err)
+		return CustomerUnderstanding{}, c.apiError("customer_understanding", c.model, maxOutputTokens, 0, fmt.Errorf("call openai customer understanding api: %w", err))
 	}
 	defer closeBody(resp.Body)
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return CustomerUnderstanding{}, fmt.Errorf("read customer understanding response: %w", err)
+		return CustomerUnderstanding{}, c.apiError("customer_understanding", c.model, maxOutputTokens, resp.StatusCode, fmt.Errorf("read customer understanding response: %w", err))
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return CustomerUnderstanding{}, c.statusError(resp.StatusCode, data)
+		return CustomerUnderstanding{}, c.statusError("customer_understanding", c.model, maxOutputTokens, resp.StatusCode, data)
 	}
 
 	outputText, err := extractOutputText(data)
 	if err != nil {
-		return CustomerUnderstanding{}, err
+		return CustomerUnderstanding{}, c.apiError("customer_understanding", c.model, maxOutputTokens, resp.StatusCode, err)
 	}
 	var result CustomerUnderstanding
 	if err := json.Unmarshal([]byte(outputText), &result); err != nil {
-		return CustomerUnderstanding{}, fmt.Errorf("parse customer understanding json response: %w", err)
+		return CustomerUnderstanding{}, c.apiError("customer_understanding", c.model, maxOutputTokens, resp.StatusCode, fmt.Errorf("parse customer understanding json response: %w", err))
 	}
 	return result, nil
 }
@@ -343,7 +523,6 @@ Prefer safety when uncertain.`)
 		Model:           c.model,
 		Input:           input,
 		MaxOutputTokens: minPositive(c.maxOutputTokens, 400),
-		Temperature:     0,
 		Store:           false,
 		Text: responseText{
 			Format: responseFormat{
@@ -378,16 +557,16 @@ Prefer safety when uncertain.`)
 		return HistoryGuardResponse{}, fmt.Errorf("read history guard response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return HistoryGuardResponse{}, c.statusError(resp.StatusCode, data)
+		return HistoryGuardResponse{}, c.statusError("history_guard", c.model, request.MaxOutputTokens, resp.StatusCode, data)
 	}
 
 	outputText, err := extractOutputText(data)
 	if err != nil {
-		return HistoryGuardResponse{}, err
+		return HistoryGuardResponse{}, c.apiError("history_guard", c.model, request.MaxOutputTokens, resp.StatusCode, err)
 	}
 	var result HistoryGuardResponse
 	if err := json.Unmarshal([]byte(outputText), &result); err != nil {
-		return HistoryGuardResponse{}, fmt.Errorf("parse history guard model json response: %w", err)
+		return HistoryGuardResponse{}, c.apiError("history_guard", c.model, request.MaxOutputTokens, resp.StatusCode, fmt.Errorf("parse history guard model json response: %w", err))
 	}
 	return result, nil
 }
@@ -397,7 +576,7 @@ type responseRequest struct {
 	Input           []responseInput `json:"input"`
 	Text            responseText    `json:"text"`
 	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
-	Temperature     float64         `json:"temperature,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
 	Store           bool            `json:"store"`
 }
 
@@ -471,6 +650,17 @@ func extractOutputText(data []byte) (string, error) {
 
 func salesResponseSchema() map[string]any {
 	return conversationDecisionSchema("stone_sales_response")
+}
+
+func replyTextResponseSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"reply_text"},
+		"properties": map[string]any{
+			"reply_text": map[string]any{"type": "string"},
+		},
+	}
 }
 
 func conversationDecisionSchema(name string) map[string]any {
@@ -798,16 +988,6 @@ func historyGuardResponseSchema() map[string]any {
 	}
 }
 
-func analysisTemperature(value float64) float64 {
-	if value < 0 {
-		return 0
-	}
-	if value > 0.2 {
-		return 0.2
-	}
-	return value
-}
-
 func minPositive(a int, b int) int {
 	if a <= 0 {
 		return b
@@ -831,16 +1011,44 @@ func fieldListSchema() map[string]any {
 	}
 }
 
-func (c *Client) statusError(statusCode int, body []byte) error {
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (c *Client) endpointURL() string {
+	baseURL := defaultBaseURL
+	if c != nil && strings.TrimSpace(c.baseURL) != "" {
+		baseURL = strings.TrimRight(strings.TrimSpace(c.baseURL), "/")
+	}
+	return baseURL + responsesEndpoint
+}
+
+func (c *Client) apiError(operation string, model string, maxOutputTokens int, statusCode int, err error) error {
+	return &APIError{
+		Operation:       operation,
+		Model:           strings.TrimSpace(model),
+		Endpoint:        c.endpointURL(),
+		StatusCode:      statusCode,
+		MaxOutputTokens: maxOutputTokens,
+		Err:             err,
+	}
+}
+
+func (c *Client) statusError(operation string, model string, maxOutputTokens int, statusCode int, body []byte) error {
 	bodyText := strings.TrimSpace(string(body))
 	bodyText = strings.ReplaceAll(bodyText, c.apiKey, "[redacted]")
 	if len(bodyText) > maxErrorBodySize {
 		bodyText = bodyText[:maxErrorBodySize]
 	}
 	if bodyText == "" {
-		return fmt.Errorf("openai responses api returned status %d", statusCode)
+		return c.apiError(operation, model, maxOutputTokens, statusCode, fmt.Errorf("openai responses api returned status %d", statusCode))
 	}
-	return fmt.Errorf("openai responses api returned status %d: %s", statusCode, bodyText)
+	return c.apiError(operation, model, maxOutputTokens, statusCode, fmt.Errorf("openai responses api returned status %d: %s", statusCode, bodyText))
 }
 
 func closeBody(body io.Closer) {

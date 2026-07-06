@@ -155,6 +155,39 @@ func TestOpenAIFailureFallsBackToDeterministicUnderstanding(t *testing.T) {
 	}
 }
 
+func TestOpenAIFallbackDoesNotCorruptExistingLeadState(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	ai := &scriptedUnderstandingAI{err: errors.New("parse customer understanding json response: unexpected end of JSON input")}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
+	chatID := "chat-ai-fallback-preserve-state"
+	store.Update(chatID, func(conversation *Conversation) {
+		conversation.Language = "ru"
+		conversation.Stage = ClientStatePackagesPresented
+		conversation.InitialMessageSent = true
+		conversation.PackagesSent = true
+		conversation.SentPortfolio = true
+		conversation.Lead.Niche = "туризм"
+		conversation.Lead.Goal = "привлечь клиентов"
+		conversation.Lead.Deadline = "на следующей неделе"
+		conversation.Lead.SelectedPackage = "basic"
+		conversation.CompletedFields[fieldNiche] = true
+		conversation.CompletedFields[fieldGoal] = true
+		conversation.CompletedFields[fieldDeadline] = true
+		conversation.CompletedFields[fieldPackageInterest] = true
+	})
+
+	sendText(t, service, chatID, "никакой")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "туризм" ||
+		conversation.Lead.Goal != "привлечь клиентов" ||
+		conversation.Lead.Deadline != "на следующей неделе" ||
+		conversation.Lead.SelectedPackage != "basic" {
+		t.Fatalf("fallback corrupted lead state: %#v", conversation.Lead)
+	}
+}
+
 func TestExplicitManagerRequestHandsOffAndStopsAutomation(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -521,14 +554,8 @@ func TestVoiceAndCopyrightQuestionsGetSafeAnswers(t *testing.T) {
 func TestEnabledLLMReplySendsStructuredReplyAndContext(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
-	ai := &scriptedUnderstandingAI{salesResponse: openai.SalesResponse{
-		Intent:     "qualification_answer",
-		ReplyText:  "Понял, продвигаем чай. Какая цель ролика?",
-		NextAction: "ask_question",
-		MissingFields: []string{
-			fieldGoal,
-		},
-		Confidence: 1,
+	ai := &scriptedUnderstandingAI{replyResponse: openai.ReplyTextResponse{
+		ReplyText: "Понял, продвигаем чай. Какая цель ролика?",
 	}}
 	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
 	service.llmReply.Enabled = true
@@ -542,15 +569,18 @@ func TestEnabledLLMReplySendsStructuredReplyAndContext(t *testing.T) {
 	if last != "Понял, продвигаем чай. Какая цель ролика?" {
 		t.Fatalf("last reply = %q, want LLM reply", last)
 	}
-	if len(ai.salesMessages) != 1 || !strings.Contains(ai.salesMessages[0].Content, "question_answer_pairs") {
-		t.Fatalf("LLM payload did not include paired-context schema: %#v", ai.salesMessages)
+	if len(ai.replyMessages) != 1 || !strings.Contains(ai.replyMessages[0].Content, "backend_reply_text") {
+		t.Fatalf("LLM payload did not include backend-selected reply: %#v", ai.replyMessages)
+	}
+	if len(ai.salesMessages) != 0 {
+		t.Fatalf("final reply path used sales schema instead of reply_text schema: %#v", ai.salesMessages)
 	}
 }
 
 func TestLLMReplyErrorFallsBackWithoutSilence(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
-	ai := &scriptedUnderstandingAI{salesErr: errors.New("reply timeout")}
+	ai := &scriptedUnderstandingAI{replyErr: errors.New("reply timeout")}
 	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
 	service.llmReply.Enabled = true
 
@@ -564,6 +594,29 @@ func TestLLMReplyErrorFallsBackWithoutSilence(t *testing.T) {
 	}
 	if strings.Contains(sender.messages[len(sender.messages)-1], "Спасибо, уточню детали") {
 		t.Fatalf("fallback used fake LLM reply despite error: %#v", sender.messages)
+	}
+}
+
+func TestInvalidLLMFinalReplyFallsBackToBackendText(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	ai := &scriptedUnderstandingAI{replyResponse: openai.ReplyTextResponse{
+		ReplyText: "Супер, ща уточним цель ролика!",
+	}}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
+	service.llmReply.Enabled = true
+
+	sendText(t, service, "chat-llm-validation-fallback", "Продаем чай")
+
+	if !ai.called {
+		t.Fatal("LLM final reply generator was not called")
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if strings.Contains(strings.ToLower(last), "супер") || strings.Contains(strings.ToLower(last), "ща") {
+		t.Fatalf("invalid LLM reply was sent: %q", last)
+	}
+	if !strings.Contains(strings.ToLower(last), "цель") {
+		t.Fatalf("backend fallback should still ask the missing goal: %q", last)
 	}
 }
 
@@ -642,6 +695,9 @@ type scriptedUnderstandingAI struct {
 	salesResponse openai.SalesResponse
 	salesErr      error
 	salesMessages []openai.Message
+	replyResponse openai.ReplyTextResponse
+	replyErr      error
+	replyMessages []openai.Message
 }
 
 func (ai *scriptedUnderstandingAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error) {
@@ -662,6 +718,18 @@ func (ai *scriptedUnderstandingAI) GenerateSalesReply(ctx context.Context, syste
 		return ai.fakeAI.GenerateSalesReply(ctx, systemPrompt, messages)
 	}
 	return ai.salesResponse, nil
+}
+
+func (ai *scriptedUnderstandingAI) GenerateReplyText(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.ReplyTextResponse, error) {
+	ai.called = true
+	ai.replyMessages = append([]openai.Message(nil), messages...)
+	if ai.replyErr != nil {
+		return openai.ReplyTextResponse{}, ai.replyErr
+	}
+	if strings.TrimSpace(ai.replyResponse.ReplyText) == "" {
+		return ai.fakeAI.GenerateReplyText(ctx, systemPrompt, messages)
+	}
+	return ai.replyResponse, nil
 }
 
 func testString(value string) *string {

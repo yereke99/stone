@@ -15,6 +15,27 @@ func validateOutgoingReply(message string, stage string, conversation Conversati
 	if message == "" {
 		return outgoingReplyValidation{Status: "empty"}
 	}
+	if replyTooLong(message) {
+		return outgoingReplyValidation{
+			Message:   safeContextualFallbackText(conversation.Language, conversation),
+			Status:    "failed_too_long",
+			Prevented: true,
+		}
+	}
+	if containsTooCasualTone(message) {
+		return outgoingReplyValidation{
+			Message:   safeContextualFallbackText(conversation.Language, conversation),
+			Status:    "failed_too_casual",
+			Prevented: true,
+		}
+	}
+	if containsUnsupportedPrice(message) {
+		return outgoingReplyValidation{
+			Message:   safeContextualFallbackText(conversation.Language, conversation),
+			Status:    "failed_unsupported_price",
+			Prevented: true,
+		}
+	}
 	if containsForbiddenDiscountPromise(message) {
 		return outgoingReplyValidation{
 			Message:   safeContextualFallbackText(conversation.Language, conversation),
@@ -26,6 +47,27 @@ func validateOutgoingReply(message string, stage string, conversation Conversati
 		return outgoingReplyValidation{
 			Message:   copyrightSafeReplyText(conversation.Language, conversation),
 			Status:    "failed_celebrity_rights",
+			Prevented: true,
+		}
+	}
+	if containsUnsafeDronePromise(message) {
+		return outgoingReplyValidation{
+			Message:   safeDroneReplyText(conversation.Language, conversation),
+			Status:    "failed_real_drone_promise",
+			Prevented: true,
+		}
+	}
+	if claimsMediaAlreadySent(message) {
+		return outgoingReplyValidation{
+			Message:   safeContextualFallbackText(conversation.Language, conversation),
+			Status:    "failed_false_media_claim",
+			Prevented: true,
+		}
+	}
+	if asksDeadlineTooEarly(message, stage, conversation) {
+		return outgoingReplyValidation{
+			Message:   nonRepeatedNextQuestionText(conversation.Language, conversation),
+			Status:    "failed_deadline_too_early",
 			Prevented: true,
 		}
 	}
@@ -84,6 +126,69 @@ func safeContextualFallbackText(language string, conversation Conversation) stri
 	}
 }
 
+func replyTooLong(message string) bool {
+	return len([]rune(strings.TrimSpace(message))) > 900
+}
+
+func containsTooCasualTone(message string) bool {
+	for _, phrase := range []string{
+		"супер",
+		"класс",
+		"круто",
+		"ого",
+		"без проблемчик",
+		"ща",
+		"щас",
+		"кайф",
+		"топчик",
+	} {
+		if containsWordOrPhrase(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsUnsupportedPrice(message string) bool {
+	normalized := normalizeForAnalysis(message)
+	if !containsAny(normalized, []string{"тг", "тенге", "kzt"}) {
+		return false
+	}
+	compact := strings.NewReplacer(" ", "", "\u00a0", "", ".", "", ",", "").Replace(normalized)
+	for _, price := range []string{"35000", "50000", "75000"} {
+		compact = strings.ReplaceAll(compact, price, "")
+	}
+	var sequence strings.Builder
+	flush := func() bool {
+		value := sequence.String()
+		sequence.Reset()
+		if len(value) < 2 || value == "48" {
+			return false
+		}
+		return true
+	}
+	for _, r := range compact {
+		if r >= '0' && r <= '9' {
+			sequence.WriteRune(r)
+			continue
+		}
+		if flush() {
+			return true
+		}
+	}
+	return flush()
+}
+
+func askedFieldsContain(fields []string, target string) bool {
+	target = normalizeFieldName(target)
+	for _, field := range fields {
+		if normalizeFieldName(field) == target {
+			return true
+		}
+	}
+	return false
+}
+
 func containsForbiddenDiscountPromise(message string) bool {
 	normalized := normalizeForAnalysis(message)
 	return containsAny(normalized, []string{
@@ -108,6 +213,57 @@ func containsUnsafeCelebrityPromise(message string) bool {
 	return containsAny(normalized, []string{"можем", "сделаем", "поставим", "используем", "скопируем", "клонируем"})
 }
 
+func containsUnsafeDronePromise(message string) bool {
+	normalized := normalizeForAnalysis(message)
+	if !containsAny(normalized, []string{"дрон", "drone"}) {
+		return false
+	}
+	if containsAny(normalized, []string{"ai", "ии", "ai-визуал", "ии-визуал", "уточнить с менеджером", "уточнит менеджер", "реальная съемка отдельно", "реальная съёмка отдельно"}) {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"снимем",
+		"снимать",
+		"проведем съемку",
+		"проведём съёмку",
+		"съемка с дрона",
+		"съёмка с дрона",
+		"реальную съемку",
+		"реальную съёмку",
+		"дрон съемку",
+		"дрон съёмку",
+	})
+}
+
+func claimsMediaAlreadySent(message string) bool {
+	normalized := normalizeForAnalysis(message)
+	if !containsAny(normalized, []string{"пример", "видео", "ролик", "кейс", "материал"}) {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"уже отправил",
+		"уже отправила",
+		"отправил вам",
+		"отправила вам",
+		"выслал",
+		"выслала",
+		"прикрепил",
+		"прикрепила",
+		"скинул",
+		"скинула",
+	})
+}
+
+func asksDeadlineTooEarly(message string, stage string, conversation Conversation) bool {
+	if stage != ClientStateAwaitingQualification && stage != StageQualification && stage != StageDiagnosis {
+		return false
+	}
+	if isValidNiche(conversation.Lead.Niche) && isValidGoal(conversation.Lead.Goal) {
+		return false
+	}
+	return askedFieldsContain(fieldsAskedByMessage(message, stage), fieldDeadline)
+}
+
 func copyrightSafeReplyText(language string, conversation Conversation) string {
 	followup := ""
 	if strings.TrimSpace(conversation.Lead.VoicePreference) == "" {
@@ -127,5 +283,20 @@ func copyrightSafeReplyText(language string, conversation Conversation) string {
 		return "We cannot use or clone a specific actor/public person's voice or likeness without rights. We can create a similar mood or tone as an original style without copying that person." + followup
 	default:
 		return "Точный голос или образ конкретного актёра/публичного человека без прав использовать нельзя. Но можем сделать похожее настроение и подачу без копирования конкретного человека." + followup
+	}
+}
+
+func safeDroneReplyText(language string, conversation Conversation) string {
+	followup := ""
+	if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 {
+		followup = " " + qualificationFollowupText(language, conversation)
+	}
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Біз сату үшін AI-визуализация/ролик дайындай аламыз. Егер нақты дронмен real съёмка керек болса, оны менеджермен бөлек нақтылаған дұрыс." + followup
+	case "en":
+		return "We can prepare an AI visualization/video for sales. If you need real drone filming specifically, it is better to confirm that separately with a manager." + followup
+	default:
+		return "Мы можем подготовить AI-визуализацию/ролик под продажу. Если нужна именно реальная съёмка с дрона, это лучше отдельно уточнить с менеджером." + followup
 	}
 }

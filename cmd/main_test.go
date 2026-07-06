@@ -107,6 +107,10 @@ func (ai *testAI) GenerateSalesReply(ctx context.Context, systemPrompt string, m
 	return openai.SalesResponse{Reply: "Ок.", Language: "ru", Stage: "diagnosis"}, nil
 }
 
+func (ai *testAI) GenerateReplyText(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.ReplyTextResponse, error) {
+	return openai.ReplyTextResponse{ReplyText: "Ок."}, nil
+}
+
 func (ai *testAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error) {
 	return openai.CustomerUnderstanding{
 		Language:   "ru",

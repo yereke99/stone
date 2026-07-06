@@ -67,6 +67,7 @@ func main() {
 		cfg.OpenAI.APIKey,
 		cfg.OpenAI.Model,
 		cfg.MaxOpenAIOutputTokens,
+		cfg.AnalyzerMaxOutputTokens,
 		cfg.OpenAI.Temperature,
 		httpClient,
 	)

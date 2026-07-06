@@ -77,21 +77,28 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 		{Role: "user", Content: payload},
 	})
 	if err != nil {
-		s.warn("openai customer understanding failed; using deterministic fallback",
+		fields := []zap.Field{
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("state", conversation.Stage),
-			zap.Error(err),
-		)
+			zap.String("fallback_reason", "error"),
+			zap.Bool("fallback", true),
+		}
+		fields = append(fields, openAICustomerUnderstandingLogFields(s.ai, err)...)
+		s.warn("openai customer understanding fallback used", fields...)
 		return fallback, false
 	}
 
 	aiAnalysis, ok := customerUnderstandingToAnalysis(understanding, conversation.Lead, language)
 	if !ok {
-		s.warn("openai customer understanding invalid; using deterministic fallback",
+		fields := []zap.Field{
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("state", conversation.Stage),
+			zap.String("fallback_reason", "invalid_response"),
+			zap.Bool("fallback", true),
 			zap.Float64("confidence", understanding.Confidence),
-		)
+		}
+		fields = append(fields, openAICustomerUnderstandingLogFields(s.ai, nil)...)
+		s.warn("openai customer understanding fallback used", fields...)
 		return fallback, false
 	}
 
@@ -111,6 +118,7 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 		zap.String("chat_hash", chatFingerprint(chatID)),
 		zap.String("state", conversation.Stage),
 		zap.String("intent", analysis.Intent),
+		zap.Int("max_output_tokens", openAIAnalyzerMaxOutputTokens(s.ai)),
 		zap.Float64("confidence", understanding.Confidence),
 		zap.Bool("handoff_recommended", analysis.ShouldHandoff),
 		zap.Bool("stop_recommended", analysis.ShouldStop),
@@ -118,6 +126,51 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 		zap.Strings("extracted_fields", extractedAnalysisFields(analysis)),
 	)
 	return analysis, true
+}
+
+type openAIAnalyzerRuntimeInfo interface {
+	AnalyzerMaxOutputTokens() int
+	Model() string
+	ResponsesEndpoint() string
+}
+
+func openAIAnalyzerMaxOutputTokens(ai SalesAI) int {
+	if info, ok := ai.(openAIAnalyzerRuntimeInfo); ok {
+		return info.AnalyzerMaxOutputTokens()
+	}
+	return 0
+}
+
+func openAICustomerUnderstandingLogFields(ai SalesAI, err error) []zap.Field {
+	details, hasDetails := openai.ErrorDetails(err)
+	model := details.Model
+	endpoint := details.Endpoint
+	statusCode := details.StatusCode
+	maxOutputTokens := details.MaxOutputTokens
+	if info, ok := ai.(openAIAnalyzerRuntimeInfo); ok {
+		if model == "" {
+			model = info.Model()
+		}
+		if endpoint == "" {
+			endpoint = info.ResponsesEndpoint()
+		}
+		if maxOutputTokens == 0 {
+			maxOutputTokens = info.AnalyzerMaxOutputTokens()
+		}
+	}
+	fields := []zap.Field{
+		zap.String("model", strings.TrimSpace(model)),
+		zap.String("endpoint", strings.TrimSpace(endpoint)),
+		zap.Int("status_code", statusCode),
+		zap.Int("max_output_tokens", maxOutputTokens),
+	}
+	if hasDetails {
+		fields = append(fields, zap.String("openai_operation", details.Operation))
+	}
+	if err != nil {
+		fields = append(fields, zap.String("openai_error", openai.SafeErrorMessage(err)))
+	}
+	return fields
 }
 
 type understandingMessage struct {

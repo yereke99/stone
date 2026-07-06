@@ -10,22 +10,35 @@ import (
 	"go.uber.org/zap"
 )
 
-type llmConversationReplyResult struct {
-	Response openai.SalesResponse
-	Called   bool
-	Usable   bool
-	Status   string
-}
+const finalReplySystemPrompt = `Ты — редактор финального WhatsApp-ответа Stone Production.
+Бэкенд уже выбрал безопасное действие, stage, поля, медиа и бизнес-логику. Нельзя менять смысл, обещания, цены, stage, пакет, отправку видео, STOP, handoff или порядок процесса.
 
-func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID string, msg IncomingMessage, text string, language string, conversation Conversation, analysis CustomerAnalysis) llmConversationReplyResult {
-	if !s.llmReply.Enabled || s.ai == nil || strings.TrimSpace(text) == "" {
-		return llmConversationReplyResult{}
-	}
-	if isOptOutText(text) || isClientDeferText(text) {
-		return llmConversationReplyResult{}
-	}
+Сгенерируй только customer-facing reply_text на основе backend_reply_text.
+Тон: формальный, деловой, вежливый, профессиональный, без сленга, без чрезмерных эмоций и без давления.
+Отвечай на языке клиента, если он понятен; если неясно — на русском.
 
-	payload := conversationReplyPayload(msg, text, language, conversation, analysis)
+Правила:
+- ответь на прямой вопрос клиента, если backend_reply_text уже содержит этот ответ;
+- не спрашивай niche/goal/package/deadline, если backend указал, что поле уже известно;
+- не спрашивай deadline в первичной квалификации;
+- не выдумывай скидки, сроки, гарантии, ссылки, файлы, кейсы или цены;
+- официальные цены: Test 35 000 тг, Basic 50 000 тг, Standard от 75 000 тг;
+- если речь о drone/дроне, формулируй как AI-визуализацию/ролик; реальную съёмку с дрона отдельно уточняет менеджер;
+- не обещай точный голос/образ знаменитостей или публичных людей без прав;
+- не говори, что примеры/видео уже отправлены, если backend_reply_text говорит только о будущей отправке;
+- одно входящее сообщение = один короткий текстовый ответ.
+
+Верни строго JSON по схеме: только поле reply_text. Никаких других полей, markdown или пояснений.`
+
+func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID string, backendReply string, stage string, selectedLevel int, askedFields []string, conversation Conversation) (string, bool) {
+	backendReply = strings.TrimSpace(backendReply)
+	if !s.llmReply.Enabled || s.ai == nil || backendReply == "" {
+		return "", false
+	}
+	if shouldKeepBackendReplyVerbatim(backendReply, stage) {
+		return "", false
+	}
+	payload := finalReplyPayload(backendReply, stage, selectedLevel, askedFields, conversation)
 	timeout := s.llmReply.Timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -33,103 +46,94 @@ func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID str
 	replyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	response, err := s.ai.GenerateSalesReply(replyCtx, SystemPrompt, []openai.Message{
+	response, err := s.ai.GenerateReplyText(replyCtx, finalReplySystemPrompt, []openai.Message{
 		{Role: "user", Content: payload},
 	})
-	result := llmConversationReplyResult{Called: true, Response: response, Status: "ok"}
 	if err != nil {
-		result.Status = "error"
+		status := "error"
 		if replyCtx.Err() != nil {
-			result.Status = "timeout"
+			status = "timeout"
 		}
-		s.warn("openai conversation reply failed; using safe state-machine fallback",
+		s.warn("openai final customer reply failed; using backend fallback",
 			zap.String("chat_hash", chatFingerprint(chatID)),
-			zap.String("incoming_message_id", strings.TrimSpace(msg.IDMessage)),
-			zap.String("current_stage", conversation.Stage),
-			zap.String("openai_reply_status", result.Status),
-			zap.Error(err),
+			zap.String("stage", stage),
+			zap.String("openai_reply_status", status),
+			zap.Int("max_output_tokens", s.llmReply.MaxOutputTokens),
+			zap.String("openai_error", openai.SafeErrorMessage(err)),
 		)
-		return result
+		return "", true
 	}
-
-	reply := salesResponseReplyText(response)
-	result.Usable = reply != "" && response.NextAction != "no_reply"
-	s.info("openai conversation reply generated",
+	reply := strings.TrimSpace(response.ReplyText)
+	if reply == "" {
+		s.warn("openai final customer reply empty; using backend fallback",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+			zap.String("openai_reply_status", "empty"),
+		)
+		return "", true
+	}
+	s.info("openai final customer reply generated",
 		zap.String("chat_hash", chatFingerprint(chatID)),
-		zap.String("incoming_message_id", strings.TrimSpace(msg.IDMessage)),
-		zap.String("current_stage", conversation.Stage),
-		zap.Bool("openai_reply_called", true),
-		zap.String("openai_reply_status", result.Status),
-		zap.String("intent", strings.TrimSpace(response.Intent)),
-		zap.String("next_action", strings.TrimSpace(response.NextAction)),
+		zap.String("stage", stage),
 		zap.Bool("dry_run", s.llmReply.DryRun),
+		zap.Int("max_output_tokens", s.llmReply.MaxOutputTokens),
+		zap.String("backend_reply_preview", previewText(backendReply, 180)),
 		zap.String("final_reply_preview", previewText(reply, 180)),
 	)
-	return result
+	if s.llmReply.DryRun {
+		return "", true
+	}
+	return reply, true
 }
 
-func conversationReplyPayload(msg IncomingMessage, text string, language string, conversation Conversation, analysis CustomerAnalysis) string {
-	understanding := json.RawMessage(customerUnderstandingPayload(msg, text, language, conversation))
-	if !json.Valid(understanding) {
-		understanding = json.RawMessage(`{}`)
-	}
+func finalReplyPayload(backendReply string, stage string, selectedLevel int, askedFields []string, conversation Conversation) string {
 	payload := struct {
-		Context          json.RawMessage  `json:"context"`
-		CurrentAnalysis  CustomerAnalysis `json:"current_analysis"`
-		KnownState       json.RawMessage  `json:"known_state"`
-		MissingFields    []string         `json:"missing_fields_after_analysis"`
-		ReplyConstraints []string         `json:"reply_constraints"`
+		BackendReplyText string          `json:"backend_reply_text"`
+		BackendDecision  map[string]any  `json:"backend_decision"`
+		KnownState       json.RawMessage `json:"known_state"`
+		RecentMessages   []ChatMessage   `json:"recent_messages"`
+		ReplyConstraints []string        `json:"reply_constraints"`
 	}{
-		Context:         understanding,
-		CurrentAnalysis: analysis,
-		KnownState:      json.RawMessage(conversationPromptJSON(conversation)),
-		MissingFields:   qualificationMissingFields(conversation.Lead),
+		BackendReplyText: strings.TrimSpace(backendReply),
+		BackendDecision: map[string]any{
+			"stage":          strings.TrimSpace(stage),
+			"selected_level": selectedLevel,
+			"asked_fields":   normalizeFieldList(askedFields),
+			"package_examples_required_before_question":  needsPortfolioExamplesBeforeFormatQuestion(backendReply),
+			"backend_controls_media_and_state":           true,
+			"llm_may_only_rewrite_customer_visible_text": true,
+		},
+		KnownState:     json.RawMessage(conversationPromptJSON(conversation)),
+		RecentMessages: conversation.Messages,
 		ReplyConstraints: []string{
-			"answer_latest_direct_question_first",
-			"ask_at_most_one_next_question",
-			"do_not_repeat_known_fields",
+			"formal_business_tone",
+			"concise_but_complete",
+			"preserve_backend_reply_meaning",
+			"do_not_add_new_questions_beyond_backend_fields",
+			"do_not_claim_media_already_sent",
 			"use_only_official_prices",
-			"do_not_invent_discounts",
-			"do_not_promise_exact_celebrity_voice_or_actor_likeness_without_rights",
-			"do_not_claim_media_was_sent",
+			"safe_drone_and_copyright_language",
 		},
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return customerUnderstandingPayload(msg, text, language, conversation)
+		return strings.TrimSpace(backendReply)
 	}
 	return string(data)
 }
 
-func salesResponseReplyText(response openai.SalesResponse) string {
-	if text := strings.TrimSpace(response.ReplyText); text != "" {
-		return text
+func shouldKeepBackendReplyVerbatim(message string, stage string) bool {
+	normalized := normalizeForAnalysis(message)
+	if stage == StageBriefRequested || stage == StageBriefCollected || stage == ClientStateHandedOff || stage == StageHandoffRequired {
+		return true
 	}
-	return strings.TrimSpace(response.Reply)
-}
-
-func (s *Service) applyLLMExtractedFields(ctx context.Context, chatID string, response openai.SalesResponse, language string, conversation Conversation) error {
-	analysis := analysisFromOpenAIExtracted(response.ExtractedFields, language)
-	if !analysis.HasBusinessSignal() {
-		return nil
-	}
-	lead := conversation.Lead
-	lead.ApplyAnalysis(analysis)
-	return s.store.UpdateLead(ctx, chatID, lead)
-}
-
-func analysisFromOpenAIExtracted(fields openai.CustomerUnderstandingExtracted, language string) CustomerAnalysis {
-	understanding := openai.CustomerUnderstanding{
-		Language:        language,
-		Intent:          "qualification_answer",
-		ExtractedFields: fields,
-		Confidence:      1,
-	}
-	analysis, ok := customerUnderstandingToAnalysis(understanding, LeadState{}, language)
-	if !ok {
-		return CustomerAnalysis{Intent: IntentOther}
-	}
-	return analysis
+	return containsAny(normalized, []string{
+		"короткий бриф",
+		"1)",
+		"2)",
+		"3)",
+		"4)",
+	})
 }
 
 func previewText(value string, max int) string {

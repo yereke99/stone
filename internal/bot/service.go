@@ -60,7 +60,7 @@ type purposeGreenSender interface {
 }
 
 type SalesAI interface {
-	GenerateSalesReply(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.SalesResponse, error)
+	GenerateReplyText(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.ReplyTextResponse, error)
 	AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error)
 }
 
@@ -107,7 +107,7 @@ func loadLLMReplyOptionsFromEnv() llmReplyOptions {
 		DryRun:          parseBoolEnv("BOT_LLM_REPLY_DRY_RUN", false),
 		Timeout:         parseDurationEnv("BOT_LLM_REPLY_TIMEOUT", 15*time.Second),
 		Model:           strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MODEL")),
-		MaxOutputTokens: parsePositiveIntEnv("BOT_LLM_REPLY_MAX_TOKENS", 500),
+		MaxOutputTokens: parsePositiveIntEnvAny([]string{"LLM_REPLY_MAX_OUTPUT_TOKENS", "BOT_LLM_REPLY_MAX_TOKENS"}, 1000),
 	}
 }
 
@@ -136,16 +136,19 @@ func parseDurationEnv(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-func parsePositiveIntEnv(key string, fallback int) int {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return fallback
+func parsePositiveIntEnvAny(keys []string, fallback int) int {
+	for _, key := range keys {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return fallback
+		}
+		return value
 	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value <= 0 {
-		return fallback
-	}
-	return value
+	return fallback
 }
 
 func (s *Service) HandleIncomingMessage(ctx context.Context, msg IncomingMessage) error {
@@ -418,44 +421,6 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 
 	_ = hadLanguage
 	_ = lead
-	llmReply := s.maybeGenerateConversationReply(ctx, chatID, msg, text, language, conversation, analysis)
-	if llmReply.Called {
-		if err := s.applyLLMExtractedFields(ctx, chatID, llmReply.Response, language, conversation); err != nil {
-			return err
-		}
-		if s.llmReply.DryRun {
-			s.info("openai conversation reply dry-run kept state-machine reply",
-				zap.String("chat_hash", chatFingerprint(chatID)),
-				zap.String("incoming_message_id", strings.TrimSpace(msg.IDMessage)),
-				zap.String("final_reply_source", "state_machine"),
-				zap.String("llm_reply_preview", previewText(salesResponseReplyText(llmReply.Response), 180)),
-			)
-			conversation, err = s.store.Snapshot(ctx, chatID)
-			if err != nil {
-				return err
-			}
-			return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
-		}
-		if llmReply.Usable && llmReply.Response.NextAction != "send_cases" && llmReply.Response.NextAction != "send_video" && llmReply.Response.NextAction != "send_relevant_examples" && llmReply.Response.NextAction != "handoff" && llmReply.Response.RecommendedAction != "send_relevant_examples" && llmReply.Response.RecommendedAction != "stop_bot" {
-			conversation, err = s.store.Snapshot(ctx, chatID)
-			if err != nil {
-				return err
-			}
-			reply := salesResponseReplyText(llmReply.Response)
-			stage := conversation.Stage
-			if stage == "" || stage == ClientStateNeutralNew {
-				stage = ClientStateAwaitingQualification
-			}
-			askedFields := normalizeFieldList(append(llmReply.Response.AskedFields, llmReply.Response.MissingFields...))
-			s.info("selected next action",
-				zap.String("chat_hash", chatFingerprint(chatID)),
-				zap.String("action", "send_llm_reply"),
-				zap.String("final_reply_source", "llm"),
-				zap.String("final_reply_preview", previewText(reply, 180)),
-			)
-			return s.sendAndRemember(ctx, chatID, reply, stage, selectedLevelFromConversation(conversation), askedFields...)
-		}
-	}
 	return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
 }
 
@@ -1502,6 +1467,31 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		)
 		return nil
 	}
+	requiresPortfolioExamples := needsPortfolioExamplesBeforeFormatQuestion(message)
+	backendMessage := message
+	if llmMessage, called := s.maybeGenerateConversationReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest); called {
+		if strings.TrimSpace(llmMessage) != "" {
+			llmValidation := validateOutgoingReply(llmMessage, stage, latest)
+			if !llmValidation.Prevented && llmValidation.Status == "passed" && strings.TrimSpace(llmValidation.Message) != "" {
+				message = strings.TrimSpace(llmValidation.Message)
+				s.info("selected final customer reply",
+					zap.String("chat_hash", chatFingerprint(chatID)),
+					zap.String("stage", stage),
+					zap.String("final_reply_source", "llm"),
+					zap.String("final_reply_preview", previewText(message, 180)),
+				)
+			} else {
+				s.warn("openai final customer reply rejected by validation; using backend fallback",
+					zap.String("chat_hash", chatFingerprint(chatID)),
+					zap.String("stage", stage),
+					zap.String("final_reply_validation", llmValidation.Status),
+					zap.String("llm_reply_preview", previewText(llmMessage, 180)),
+					zap.String("backend_reply_preview", previewText(backendMessage, 180)),
+				)
+				message = backendMessage
+			}
+		}
+	}
 	validation := validateOutgoingReply(message, stage, latest)
 	if validation.Prevented {
 		s.warn("outgoing whatsapp reply adjusted by validation gate",
@@ -1520,7 +1510,7 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 		)
 		return nil
 	}
-	if needsPortfolioExamplesBeforeFormatQuestion(message) {
+	if requiresPortfolioExamples || needsPortfolioExamplesBeforeFormatQuestion(message) {
 		ready, err := s.ensurePortfolioExamplesSentBeforeFormatQuestion(ctx, chatID)
 		if err != nil {
 			return err

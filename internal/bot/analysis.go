@@ -140,6 +140,7 @@ type CustomerAnalysis struct {
 
 	NumberedQualificationAnswer bool               `json:"-"`
 	AnsweredQuestions           []AnsweredQuestion `json:"answered_questions,omitempty"`
+	NicheCorrection             bool               `json:"-"`
 }
 
 type AnsweredQuestion struct {
@@ -168,6 +169,7 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	copyrightQuestion := isCopyrightQuestion(normalized)
 	formatPreference := detectLikedFormats(normalized)
 	negativeSelection := isNegativeFormatSelection(normalized)
+	analysis.NicheCorrection = isNicheCorrectionText(normalized)
 
 	if niche := extractNiche(text, current); niche != "" {
 		analysis.Niche = stringPointer(niche)
@@ -401,8 +403,8 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	updateQualificationFields := analysis.Intent != IntentBriefAnswer
 	// A valid stored niche/goal is only replaced by another valid value, so a
 	// greeting, question or unclear fragment can never destroy good data.
-	if (updateQualificationFields || !isValidNiche(s.Niche)) && analysis.Niche != nil && isValidNiche(*analysis.Niche) && !isNonNicheCandidateText(normalizeForAnalysis(*analysis.Niche)) {
-		s.Niche = strings.TrimSpace(*analysis.Niche)
+	if shouldApplyNicheAnalysis(s.Niche, analysis, updateQualificationFields) {
+		s.Niche = nicheValueForLead(*analysis.Niche)
 	}
 	if (updateQualificationFields || strings.TrimSpace(s.City) == "") && analysis.City != nil && strings.TrimSpace(*analysis.City) != "" {
 		s.City = strings.TrimSpace(*analysis.City)
@@ -455,7 +457,7 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	if analysis.ProductOrService != nil && strings.TrimSpace(*analysis.ProductOrService) != "" {
 		s.ProductOrService = strings.TrimSpace(*analysis.ProductOrService)
 		if !isValidNiche(s.Niche) && isValidNiche(s.ProductOrService) && !isNonNicheCandidateText(normalizeForAnalysis(s.ProductOrService)) {
-			s.Niche = s.ProductOrService
+			s.Niche = nicheValueForLead(s.ProductOrService)
 		}
 	}
 	if analysis.StrongSide != nil && strings.TrimSpace(*analysis.StrongSide) != "" {
@@ -509,6 +511,64 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	}
 	if analysis.Intent == IntentMute {
 		s.LeadStatus = LeadStatusMuted
+	}
+}
+
+func shouldApplyNicheAnalysis(current string, analysis CustomerAnalysis, updateQualificationFields bool) bool {
+	if analysis.Niche == nil {
+		return false
+	}
+	incoming := normalizeNiche(*analysis.Niche)
+	if incoming == "" || !isValidNiche(incoming) || isNonNicheCandidateText(normalizeForAnalysis(incoming)) {
+		return false
+	}
+	if !updateQualificationFields && isValidNiche(current) {
+		return false
+	}
+	currentCanonical := normalizeNiche(current)
+	if !isValidNiche(currentCanonical) {
+		return true
+	}
+	if currentCanonical == incoming {
+		return true
+	}
+	if canonicalNicheFromText(currentCanonical) == incoming {
+		return true
+	}
+	if !analysis.NicheCorrection {
+		return false
+	}
+	return !isWeakNicheOverwriteIntent(analysis.Intent)
+}
+
+func nicheValueForLead(value string) string {
+	value = strings.TrimSpace(value)
+	if canonical := canonicalNicheFromText(value); canonical != "" {
+		return canonical
+	}
+	if normalized := normalizeNiche(value); normalized != "" {
+		return value
+	}
+	return ""
+}
+
+func isWeakNicheOverwriteIntent(intent string) bool {
+	switch strings.TrimSpace(intent) {
+	case IntentNegativeSelection,
+		IntentFormatPreference,
+		IntentConfusion,
+		IntentDefer,
+		IntentPriceQuestion,
+		IntentPackageQuestion,
+		IntentPackageSelection,
+		IntentQuantityDiscountQuestion,
+		IntentFAQ,
+		IntentAgreement,
+		IntentGreeting,
+		IntentRefusal:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1497,7 +1557,9 @@ func isNonNicheShortReply(normalized string) bool {
 	case "вот этот", "вот эта", "этот", "эта", "это", "тот", "та", "да", "ок", "окей",
 		"хорошо", "супер", "анкета", "анкету", "бриф", "заявка", "заявку", "давайте",
 		"отправьте", "пришлите", "жду", "ага", "угу", "принято", "никакой", "никакая",
-		"никакие", "ничего", "нет", "не знаю", "посмотрю":
+		"никакие", "никакой формат", "никакие форматы", "ни один", "ни один формат",
+		"не выбрал", "не выбрали", "не понравилось", "ничего", "нет", "не знаю",
+		"посмотрю", "потом", "сейчас", "завтра":
 		return true
 	default:
 		return false
@@ -1785,8 +1847,8 @@ func isNegativeReaction(normalized string) bool {
 	return containsAny(normalized, []string{
 		"надоел", "достал", "отстан", "отвали", "иди ты", "пошел", "пошёл", "тупой",
 		"желание пропало", "пропало желание", "уже не интересно", "вообще не понимаете",
-		"не понимаете", "бот тупит", "бот тупой", "оставьте", "не надо", "стоп",
-		"шаршатты", "мазалама", "жоғал", "annoying", "stop asking", "not interested",
+		"не понимаете", "бот тупит", "бот тупой", "оставьте",
+		"шаршатты", "мазалама", "жоғал", "annoying", "stop asking",
 	})
 }
 
@@ -1890,6 +1952,18 @@ func isNonNicheCandidateText(normalized string) bool {
 		return true
 	}
 	return wordsAreOnlyNonNicheNoise(clean)
+}
+
+func isNicheCorrectionText(normalized string) bool {
+	normalized = normalizeForAnalysis(normalized)
+	if normalized == "" {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"нет не ", "нет, не ", "не ", " емес ", " емес, ",
+	}) && containsAny(normalized, []string{
+		" а ", " а у нас ", " а у меня ", "а не", "емес", "not ", " but ",
+	})
 }
 
 // isDurationQuestion detects direct questions about the video duration
@@ -2211,6 +2285,9 @@ func wordNumberDeadlinePhrase(value string) string {
 }
 
 func knownNicheFromText(normalized string) string {
+	if canonical := canonicalNicheFromText(normalized); canonical != "" {
+		return canonical
+	}
 	if containsAny(normalized, []string{"земельный участок", "земельного участка", "землю", "продать участок", "участок в пригороде"}) {
 		return "недвижимость / земельный участок"
 	}
@@ -2238,16 +2315,50 @@ func knownNicheFromText(normalized string) string {
 	}
 	for _, candidate := range candidates {
 		if containsWordOrPhrase(normalized, candidate) {
+			if canonical := canonicalNicheFromText(candidate); canonical != "" {
+				return canonical
+			}
 			if strings.Contains(candidate, " ") {
-				return candidate
+				return normalizeNiche(candidate)
 			}
 			if len(strings.Fields(normalized)) <= 4 {
 				return normalizeNiche(normalized)
 			}
-			return candidate
+			return normalizeNiche(candidate)
 		}
 	}
 	return ""
+}
+
+func canonicalNicheFromText(value string) string {
+	normalized := normalizeForAnalysis(value)
+	if normalized == "" {
+		return ""
+	}
+	switch {
+	case containsAny(normalized, []string{"погрузчик", "погрузчик техника", "спецтехника", "спец техника", "loader", "forklift", "construction equipment", "industrial equipment", "техникасы"}):
+		return "погрузчик / спецтехника"
+	case containsAny(normalized, []string{"барбершоп", "барбер шоп", "barbershop", "barber shop", "barber", "шаштараз"}):
+		return "барбершоп / услуги барбершопа"
+	case containsAny(normalized, []string{"земельный участок", "земельного участка", "продать участок", "участок в пригороде", "land plot"}):
+		return "недвижимость / земельный участок"
+	case containsAny(normalized, []string{"недвиж", "real estate", "property", "риелтор", "риэлтор", "застройщик"}):
+		return "недвижимость"
+	case containsAny(normalized, []string{"travel", "tourism", "hotel", "отель", "гостиниц", "resort"}):
+		return "туризм / travel"
+	case containsAny(normalized, []string{"автосалон", "авто", "машины", "машина", "car dealership", "dealership"}):
+		return "авто / автосалон"
+	case containsAny(normalized, []string{"одеж", "fashion", "clothing", "clothes", "бренд одежды"}):
+		return "одежда / fashion"
+	case containsAny(normalized, []string{"ресторан", "кафе", "кофейня", "еда", "food", "restaurant", "cafe", "horeca"}):
+		return "ресторан / кафе / food"
+	case containsAny(normalized, []string{"медицина", "медицин", "клиник", "стоматолог", "medicine", "medical", "clinic"}):
+		return "медицина / clinic"
+	case containsAny(normalized, []string{"логист", "доставка", "курьер", "грузоперевоз", "delivery", "logistics"}):
+		return "логистика / доставка"
+	default:
+		return ""
+	}
 }
 
 func cleanNicheSource(value string) string {
@@ -2395,6 +2506,9 @@ func extractPrefixedValue(normalized string, prefixes []string, stopWords []stri
 func normalizeNiche(value string) string {
 	value = normalizeForAnalysis(value)
 	value = strings.Trim(value, " -—:;,.!?")
+	if canonical := canonicalNicheFromText(value); canonical != "" {
+		return canonical
+	}
 	if strings.HasPrefix(value, "производства ") {
 		value = "производство " + strings.TrimSpace(strings.TrimPrefix(value, "производства "))
 	}

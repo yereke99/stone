@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -16,6 +18,7 @@ import (
 const (
 	defaultBaseURL                 = "https://api.openai.com/v1"
 	responsesEndpoint              = "/responses"
+	audioTranscriptionsEndpoint    = "/audio/transcriptions"
 	defaultAnalyzerMaxOutputTokens = 1500
 	maxErrorBodySize               = 4096
 )
@@ -138,6 +141,10 @@ type SalesResponse struct {
 
 type ReplyTextResponse struct {
 	ReplyText string `json:"reply_text"`
+}
+
+type TranscriptionResponse struct {
+	Text string `json:"text"`
 }
 
 type CustomerUnderstanding struct {
@@ -443,6 +450,65 @@ func (c *Client) GenerateReplyText(ctx context.Context, systemPrompt string, mes
 	}
 
 	return result, nil
+}
+
+func (c *Client) TranscribeAudio(ctx context.Context, filePath string, model string) (string, error) {
+	filePath = filepath.Clean(strings.TrimSpace(filePath))
+	if filePath == "" {
+		return "", fmt.Errorf("audio file path is required")
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "gpt-4o-mini-transcribe"
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("open audio file for transcription: %w", err)
+	}
+	defer closeBody(file)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("model", model); err != nil {
+		return "", fmt.Errorf("write transcription model field: %w", err)
+	}
+	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return "", fmt.Errorf("create transcription file field: %w", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return "", fmt.Errorf("copy transcription file: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close transcription multipart body: %w", err)
+	}
+
+	endpoint := c.audioTranscriptionsURL()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
+	if err != nil {
+		return "", fmt.Errorf("create openai audio transcription request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", c.apiErrorAt("audio_transcription", model, endpoint, 0, 0, fmt.Errorf("call openai audio transcription api: %w", err))
+	}
+	defer closeBody(resp.Body)
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", c.apiErrorAt("audio_transcription", model, endpoint, 0, resp.StatusCode, fmt.Errorf("read openai audio transcription response: %w", err))
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", c.statusErrorAt("audio_transcription", model, endpoint, 0, resp.StatusCode, data)
+	}
+	var result TranscriptionResponse
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", c.apiErrorAt("audio_transcription", model, endpoint, 0, resp.StatusCode, fmt.Errorf("parse audio transcription json response: %w", err))
+	}
+	return strings.TrimSpace(result.Text), nil
 }
 
 func (c *Client) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []Message) (CustomerUnderstanding, error) {
@@ -1028,11 +1094,23 @@ func (c *Client) endpointURL() string {
 	return baseURL + responsesEndpoint
 }
 
+func (c *Client) audioTranscriptionsURL() string {
+	baseURL := defaultBaseURL
+	if c != nil && strings.TrimSpace(c.baseURL) != "" {
+		baseURL = strings.TrimRight(strings.TrimSpace(c.baseURL), "/")
+	}
+	return baseURL + audioTranscriptionsEndpoint
+}
+
 func (c *Client) apiError(operation string, model string, maxOutputTokens int, statusCode int, err error) error {
+	return c.apiErrorAt(operation, model, c.endpointURL(), maxOutputTokens, statusCode, err)
+}
+
+func (c *Client) apiErrorAt(operation string, model string, endpoint string, maxOutputTokens int, statusCode int, err error) error {
 	return &APIError{
 		Operation:       operation,
 		Model:           strings.TrimSpace(model),
-		Endpoint:        c.endpointURL(),
+		Endpoint:        strings.TrimSpace(endpoint),
 		StatusCode:      statusCode,
 		MaxOutputTokens: maxOutputTokens,
 		Err:             err,
@@ -1040,15 +1118,19 @@ func (c *Client) apiError(operation string, model string, maxOutputTokens int, s
 }
 
 func (c *Client) statusError(operation string, model string, maxOutputTokens int, statusCode int, body []byte) error {
+	return c.statusErrorAt(operation, model, c.endpointURL(), maxOutputTokens, statusCode, body)
+}
+
+func (c *Client) statusErrorAt(operation string, model string, endpoint string, maxOutputTokens int, statusCode int, body []byte) error {
 	bodyText := strings.TrimSpace(string(body))
 	bodyText = strings.ReplaceAll(bodyText, c.apiKey, "[redacted]")
 	if len(bodyText) > maxErrorBodySize {
 		bodyText = bodyText[:maxErrorBodySize]
 	}
 	if bodyText == "" {
-		return c.apiError(operation, model, maxOutputTokens, statusCode, fmt.Errorf("openai responses api returned status %d", statusCode))
+		return c.apiErrorAt(operation, model, endpoint, maxOutputTokens, statusCode, fmt.Errorf("openai api returned status %d", statusCode))
 	}
-	return c.apiError(operation, model, maxOutputTokens, statusCode, fmt.Errorf("openai responses api returned status %d: %s", statusCode, bodyText))
+	return c.apiErrorAt(operation, model, endpoint, maxOutputTokens, statusCode, fmt.Errorf("openai api returned status %d: %s", statusCode, bodyText))
 }
 
 func closeBody(body io.Closer) {

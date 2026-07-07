@@ -916,7 +916,7 @@ func (s *ConversationStore) UpdateLanguage(ctx context.Context, chatID string, l
 
 	s.cleanupLocked(now)
 	conversation := s.getOrCreateLocked(chatID, now)
-	if conversation.Language != "" {
+	if conversation.Language == language {
 		return nil
 	}
 	conversation.Language = language

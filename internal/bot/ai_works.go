@@ -1,14 +1,16 @@
 package bot
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 const (
 	AIWorksDir        = "ai-works"
-	maxAIWorkExamples = 2
+	maxAIWorkExamples = 3
 )
 
 type AIWorkVideo struct {
@@ -123,7 +125,7 @@ var aiWorkCategoryTags = map[string][]string{
 	"b2b":         {"b2b", "business", "service", "repair", "supermarket"},
 	"event":       {"event", "concert", "show", "performance"},
 	"fashion":     {"fashion", "clothing", "clothes", "apparel", "brand"},
-	"factories":   {"factory", "factories", "production", "industrial", "plant"},
+	"factories":   {"factory", "factories", "production", "industrial", "plant", "equipment", "machinery", "construction"},
 	"horeca":      {"food", "restaurant", "horeca", "cafe", "burger", "tea"},
 	"interior":    {"interior", "renovation", "home", "construction", "repair"},
 	"led_ekran":   {"led", "screen", "digital", "outdoor_ads"},
@@ -136,7 +138,7 @@ var aiWorkCategoryTags = map[string][]string{
 }
 
 func selectAIWorkExamples(lead LeadState, analysis CustomerAnalysis, limit int) AIWorkSelection {
-	if limit <= 0 {
+	if limit < 0 {
 		limit = maxAIWorkExamples
 	}
 	tags := aiWorkTagsForLead(lead, analysis)
@@ -173,10 +175,14 @@ func selectAIWorkExamples(lead LeadState, analysis CustomerAnalysis, limit int) 
 		return scored[i].order < scored[j].order
 	})
 
-	videos := make([]AIWorkVideo, 0, limit)
+	capacity := limit
+	if capacity <= 0 || capacity > len(scored) {
+		capacity = len(scored)
+	}
+	videos := make([]AIWorkVideo, 0, capacity)
 	for _, item := range scored {
 		videos = append(videos, item.video)
-		if len(videos) >= limit {
+		if limit > 0 && len(videos) >= limit {
 			break
 		}
 	}
@@ -185,6 +191,18 @@ func selectAIWorkExamples(lead LeadState, analysis CustomerAnalysis, limit int) 
 		Tags:   tags,
 		Exact:  scored[0].score >= 2 || categoryTagMatched(tags, videos[0].Category),
 	}
+}
+
+func aiWorkExamplesLimit() int {
+	raw := strings.TrimSpace(os.Getenv("AI_WORK_EXAMPLES_LIMIT"))
+	if raw == "" {
+		return maxAIWorkExamples
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return maxAIWorkExamples
+	}
+	return value
 }
 
 func aiWorkTagsForLead(lead LeadState, analysis CustomerAnalysis) []string {
@@ -257,6 +275,12 @@ func portfolioTagsFromText(text string) []string {
 	if containsAny(normalized, []string{"логист", "доставка", "груз", "transport", "logistics"}) {
 		add("logistics")
 	}
+	if containsAny(normalized, []string{"погрузчик", "спецтехника", "спец техника", "loader", "forklift", "construction equipment", "industrial equipment"}) {
+		add("construction", "industrial", "equipment", "machinery")
+	}
+	if containsAny(normalized, []string{"барбершоп", "барбер шоп", "barbershop", "barber shop", "barber", "шаштараз", "салон красоты", "beauty", "salon"}) {
+		add("barbershop", "beauty", "salon")
+	}
 	return normalizePortfolioTags(tags)
 }
 
@@ -282,6 +306,8 @@ func normalizePortfolioTags(tags []string) []string {
 			tag = "fashion"
 		case "medical", "healthcare", "clinic":
 			tag = "medicine"
+		case "machinery":
+			tag = "equipment"
 		}
 		if tag == "" {
 			continue
@@ -321,6 +347,8 @@ func aiWorkVideo(category string, fileName string) AIWorkVideo {
 		tags = append(tags, "auto", "car", "sales")
 	case "burger.mp4", "oreo.mp4", "tea.mp4":
 		tags = append(tags, "food", "restaurant", "horeca")
+	case "presentation.mp4", "safety_briefing.mp4", "thermal_power_plant.mp4":
+		tags = append(tags, "industrial", "equipment", "machinery", "construction")
 	}
 	return AIWorkVideo{
 		Category: category,

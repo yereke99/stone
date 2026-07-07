@@ -29,6 +29,20 @@ func validateOutgoingReply(message string, stage string, conversation Conversati
 			Prevented: true,
 		}
 	}
+	if containsExcessiveEmoji(message) {
+		return outgoingReplyValidation{
+			Message:   safeContextualFallbackText(conversation.Language, conversation),
+			Status:    "failed_excessive_emoji",
+			Prevented: true,
+		}
+	}
+	if echoesNegativeSelectionAsNiche(message) {
+		return outgoingReplyValidation{
+			Message:   nonRepeatedNextQuestionText(conversation.Language, conversation),
+			Status:    "failed_raw_negative_selection_echo",
+			Prevented: true,
+		}
+	}
 	if containsUnsupportedPrice(message) {
 		return outgoingReplyValidation{
 			Message:   safeContextualFallbackText(conversation.Language, conversation),
@@ -147,6 +161,33 @@ func containsTooCasualTone(message string) bool {
 		}
 	}
 	return false
+}
+
+func containsExcessiveEmoji(message string) bool {
+	count := 0
+	for _, r := range message {
+		switch {
+		case r >= 0x1F300 && r <= 0x1FAFF:
+			count++
+		case r >= 0x2600 && r <= 0x27BF:
+			count++
+		}
+		if count > 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func echoesNegativeSelectionAsNiche(message string) bool {
+	normalized := normalizeForAnalysis(message)
+	return containsAny(normalized, []string{
+		"понял никакой",
+		"понял, никакой",
+		"понял никакой формат",
+		"түсіндім ешқайсысы",
+		"тусиндим ешкайсысы",
+	})
 }
 
 func containsUnsupportedPrice(message string) bool {

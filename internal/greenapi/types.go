@@ -87,7 +87,10 @@ type ExtendedTextMessageData struct {
 }
 
 type FileMessageData struct {
-	Caption string `json:"caption"`
+	Caption     string `json:"caption"`
+	DownloadURL string `json:"downloadUrl"`
+	FileName    string `json:"fileName"`
+	MimeType    string `json:"mimeType"`
 }
 
 type QuotedMessageData struct {
@@ -430,6 +433,42 @@ func (n *Notification) Text() string {
 	return textFromRawMessageData(n.RawJSON)
 }
 
+func (n *Notification) DownloadURL() string {
+	if n == nil {
+		return ""
+	}
+	data := n.Body.MessageData
+	if value := strings.TrimSpace(data.FileMessageData.DownloadURL); value != "" {
+		return value
+	}
+	return rawMessageString(n.RawJSON, "downloadUrl")
+}
+
+func (n *Notification) FileName() string {
+	if n == nil {
+		return ""
+	}
+	data := n.Body.MessageData
+	if value := strings.TrimSpace(data.FileMessageData.FileName); value != "" {
+		return value
+	}
+	if value := rawMessageString(n.RawJSON, "fileName"); value != "" {
+		return value
+	}
+	return ""
+}
+
+func (n *Notification) MimeType() string {
+	if n == nil {
+		return ""
+	}
+	data := n.Body.MessageData
+	if value := strings.TrimSpace(data.FileMessageData.MimeType); value != "" {
+		return value
+	}
+	return rawMessageString(n.RawJSON, "mimeType")
+}
+
 func firstTrimmedText(candidates ...string) string {
 	for _, candidate := range candidates {
 		if text := strings.TrimSpace(candidate); text != "" {
@@ -464,6 +503,29 @@ func textFromRawMessageData(data json.RawMessage) string {
 		stringValue(messageData, "textMessage"),
 		stringValue(messageData, "message"),
 		stringValue(messageData, "caption"),
+	)
+}
+
+func rawMessageString(data json.RawMessage, key string) string {
+	if len(data) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	body := mapValue(payload, "body")
+	if body == nil {
+		body = payload
+	}
+	messageData := mapValue(body, "messageData")
+	if messageData == nil {
+		return ""
+	}
+	fileMessageData := mapValue(messageData, "fileMessageData")
+	return firstTrimmedText(
+		stringValue(fileMessageData, key),
+		stringValue(messageData, key),
 	)
 }
 

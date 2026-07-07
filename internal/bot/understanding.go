@@ -46,6 +46,8 @@ Context rules:
 - If the customer already described a project, preserve that as the main business context. Short replies like "никакой", "нет", "не знаю", "ок", "да", "потом", "сейчас", "завтра", "посмотрю" must not overwrite niche or goal.
 - Real estate, land, apartment, construction, realtor -> portfolio_tags should include real_estate/property; land plots -> land; drone shooting -> drone; perspective visualization/renders -> visualization.
 - Tourism/travel/hotel/resort -> tourism/travel. Cars/dealership -> auto. Clothes/fashion -> fashion. Restaurant/food/cafe -> food/restaurant.
+- Barbershop/barber/шаштараз -> niche "барбершоп / услуги барбершопа" and portfolio_tags barbershop/beauty/salon.
+- Forklift/loader/погрузчик/спецтехника/industrial equipment -> niche "погрузчик / спецтехника" and portfolio_tags construction/industrial/equipment.
 - "Делаете примерно такое видео?", "можете как тут?", "такой формат делаете?" are feasibility_question, not case_request.
 - "пример" should only mean examples/cases as a real word; "примерно" is not an examples request.
 - "Чет суть не уловил" and similar messages are confusion, not other.
@@ -54,6 +56,7 @@ Context rules:
 - Do not invent prices, discounts, deadlines, guarantees, rights, package details, links, files, or case availability. Prices are Test 35 000 тг, Basic 50 000 тг, Standard from 75 000 тг.
 - Answer the customer's latest direct question first, then confirm extracted facts if useful, then ask at most one next useful question.
 - Never ask for a field already known in known_state, extracted_fields, answered_questions, recent history, or quoted context.
+- Match the latest customer message language. Kazakh latest message -> Kazakh reply_text; Russian latest message -> Russian reply_text. Do not mix languages unless the customer did.
 - Soft deferrals like "подумаю", "позже напишу", "на днях отпишусь", "понял спасибо" are defer with next_action no_reply and empty reply_text.
 
 Examples:
@@ -748,6 +751,7 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	if len(ai.AnsweredQuestions) > 0 {
 		result.AnsweredQuestions = append(result.AnsweredQuestions, ai.AnsweredQuestions...)
 	}
+	result.NicheCorrection = result.NicheCorrection || ai.NicheCorrection
 	return result
 }
 

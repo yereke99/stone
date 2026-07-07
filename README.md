@@ -50,6 +50,18 @@ HISTORY_GUARD_AI_MAX_TOTAL_CHARS=1200
 NEW_LEAD_AUTO_PACKAGES_AFTER_MINUTES=15
 NEW_LEAD_AUTO_PACKAGES_ENABLED=true
 MAX_OPENAI_OUTPUT_TOKENS=350
+ANALYZER_MAX_OUTPUT_TOKENS=1500
+BOT_LLM_REPLY_ENABLED=true
+BOT_LLM_REPLY_DRY_RUN=false
+LLM_REPLY_MAX_OUTPUT_TOKENS=1000
+AUDIO_TRANSCRIPTION_ENABLED=true
+FFMPEG_PATH=/usr/bin/ffmpeg
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
+AUDIO_MAX_DOWNLOAD_MB=25
+AUDIO_DOWNLOAD_TIMEOUT_SECONDS=20
+AUDIO_CONVERT_TIMEOUT_SECONDS=30
+AUDIO_TRANSCRIPTION_TIMEOUT_SECONDS=60
+AI_WORK_EXAMPLES_LIMIT=3
 OWNER_WA_CHAT_ID=
 ADMIN_CHAT_IDS=77000000000@c.us
 APP_ENV=local
@@ -60,6 +72,19 @@ APP_ENV=local
 `DATABASE_PATH` задаёт SQLite-файл для состояния клиентов и журналов сообщений. На старте приложение только открывает хранилище, применяет миграции и начинает принимать новые GreenAPI notifications; оно не обходит контакты WhatsApp и не отправляет скрипт старым чатам.
 
 `OWNER_WA_CHAT_ID` и `ADMIN_CHAT_IDS` опциональны. Укажите один или несколько WhatsApp chatID через запятую, например `77000000000@c.us`. Когда клиент соглашается на анкету или просит менеджера, бот один раз отправит менеджеру резюме лида.
+
+`BOT_LLM_REPLY_ENABLED=false` мгновенно возвращает финальные ответы к backend-шаблонам без отката кода. `BOT_LLM_REPLY_DRY_RUN=true` вызывает OpenAI и пишет кандидат в логи, но клиенту отправляется backend-шаблон.
+
+Для голосовых WhatsApp сообщений нужен FFmpeg на сервере, не Docker:
+
+```bash
+sudo apt update
+sudo apt install -y ffmpeg
+which ffmpeg
+ffmpeg -version
+```
+
+Ожидаемый путь для production env: `/usr/bin/ffmpeg`. Если нужно отключить распознавание аудио без отката кода, поставьте `AUDIO_TRANSCRIPTION_ENABLED=false` и перезапустите сервис.
 
 ## Видео
 
@@ -87,6 +112,21 @@ go run ./cmd
 
 ```bash
 go build ./...
+```
+
+## Production deploy
+
+Проект запускается как systemd binary, не Docker:
+
+```bash
+cd /home/stone && git pull --ff-only && go build -o /home/stone/bin/stone-bot ./cmd && sudo systemctl restart stone && sudo systemctl status stone --no-pager -l
+```
+
+Логи:
+
+```bash
+journalctl -u stone -n 200 --no-pager
+journalctl -u stone -f
 ```
 
 ## Проверка GreenAPI

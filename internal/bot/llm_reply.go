@@ -30,7 +30,7 @@ const finalReplySystemPrompt = `Ты — редактор финального W
 
 Верни строго JSON по схеме: только поле reply_text. Никаких других полей, markdown или пояснений.`
 
-func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID string, backendReply string, stage string, selectedLevel int, askedFields []string, conversation Conversation) (string, bool) {
+func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID string, backendReply string, stage string, selectedLevel int, askedFields []string, conversation Conversation, backendAction string) (string, bool) {
 	backendReply = strings.TrimSpace(backendReply)
 	if !s.llmReply.Enabled || s.ai == nil || backendReply == "" {
 		return "", false
@@ -38,7 +38,7 @@ func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID str
 	if shouldKeepBackendReplyVerbatim(backendReply, stage) {
 		return "", false
 	}
-	payload := finalReplyPayload(backendReply, stage, selectedLevel, askedFields, conversation)
+	payload := finalReplyPayload(backendReply, stage, selectedLevel, askedFields, conversation, backendAction)
 	timeout := s.llmReply.Timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -75,6 +75,8 @@ func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID str
 	s.info("openai final customer reply generated",
 		zap.String("chat_hash", chatFingerprint(chatID)),
 		zap.String("stage", stage),
+		zap.String("selected_backend_action", backendAction),
+		zap.Bool("llm_reply_generated", true),
 		zap.Bool("dry_run", s.llmReply.DryRun),
 		zap.Int("max_output_tokens", s.llmReply.MaxOutputTokens),
 		zap.String("backend_reply_preview", previewText(backendReply, 180)),
@@ -86,7 +88,7 @@ func (s *Service) maybeGenerateConversationReply(ctx context.Context, chatID str
 	return reply, true
 }
 
-func finalReplyPayload(backendReply string, stage string, selectedLevel int, askedFields []string, conversation Conversation) string {
+func finalReplyPayload(backendReply string, stage string, selectedLevel int, askedFields []string, conversation Conversation, backendAction string) string {
 	payload := struct {
 		BackendReplyText string          `json:"backend_reply_text"`
 		BackendDecision  map[string]any  `json:"backend_decision"`
@@ -96,9 +98,10 @@ func finalReplyPayload(backendReply string, stage string, selectedLevel int, ask
 	}{
 		BackendReplyText: strings.TrimSpace(backendReply),
 		BackendDecision: map[string]any{
-			"stage":          strings.TrimSpace(stage),
-			"selected_level": selectedLevel,
-			"asked_fields":   normalizeFieldList(askedFields),
+			"stage":                   strings.TrimSpace(stage),
+			"selected_backend_action": strings.TrimSpace(backendAction),
+			"selected_level":          selectedLevel,
+			"asked_fields":            normalizeFieldList(askedFields),
 			"package_examples_required_before_question":  needsPortfolioExamplesBeforeFormatQuestion(backendReply),
 			"backend_controls_media_and_state":           true,
 			"llm_may_only_rewrite_customer_visible_text": true,
@@ -122,6 +125,42 @@ func finalReplyPayload(backendReply string, stage string, selectedLevel int, ask
 	return string(data)
 }
 
+func selectedBackendAction(stage string, backendReply string, askedFields []string, conversation Conversation) string {
+	normalizedStage := strings.TrimSpace(stage)
+	normalizedReply := normalizeForAnalysis(backendReply)
+	switch {
+	case normalizedStage == ClientStateHandedOff || normalizedStage == StageHandoffRequired || normalizedStage == StageBriefCollected:
+		return "human_handoff"
+	case normalizedStage == StageBriefRequested:
+		return "brief_requested"
+	case normalizedStage == StagePortfolioSent:
+		return "send_relevant_examples"
+	case normalizedStage == ClientStateAwaitingQuestionnaireConfirm:
+		return "await_questionnaire_confirmation"
+	case needsPortfolioExamplesBeforeFormatQuestion(backendReply):
+		return "ask_format_selection"
+	case containsAny(normalizedReply, []string{"35 000", "50 000", "75 000", "стоимость", "баға", "price"}):
+		return "answer_price_question"
+	case askedFieldsContain(askedFields, fieldGoal) && fieldKnownInConversation(conversation, fieldNiche):
+		return "acknowledge_known_niche_ask_missing_goal"
+	case askedFieldsContain(askedFields, fieldNiche) || askedFieldsContain(askedFields, fieldGoal):
+		return "ask_next_question"
+	case strings.TrimSpace(backendReply) == "":
+		return "no_reply"
+	default:
+		return "send_text"
+	}
+}
+
+func knownFieldsSnapshot(conversation Conversation) map[string]string {
+	return map[string]string{
+		"niche":            strings.TrimSpace(conversation.Lead.Niche),
+		"goal":             strings.TrimSpace(conversation.Lead.Goal),
+		"deadline":         strings.TrimSpace(conversation.Lead.Deadline),
+		"selected_package": strings.TrimSpace(conversation.Lead.SelectedPackage),
+	}
+}
+
 func shouldKeepBackendReplyVerbatim(message string, stage string) bool {
 	normalized := normalizeForAnalysis(message)
 	if stage == StageBriefRequested || stage == StageBriefCollected || stage == ClientStateHandedOff || stage == StageHandoffRequired {
@@ -129,6 +168,8 @@ func shouldKeepBackendReplyVerbatim(message string, stage string) bool {
 	}
 	return containsAny(normalized, []string{
 		"короткий бриф",
+		"голосовое сообщение",
+		"дауыстық хабарламаны",
 		"1)",
 		"2)",
 		"3)",

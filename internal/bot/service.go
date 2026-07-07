@@ -40,6 +40,9 @@ type IncomingMessage struct {
 	SenderName      string
 	TypeMessage     string
 	Text            string
+	DownloadURL     string
+	FileName        string
+	MimeType        string
 	Timestamp       time.Time
 	QuotedMessageID string
 	QuotedText      string
@@ -77,6 +80,7 @@ type Service struct {
 	historyGuard historyGuardRuntime
 	autoPackages delayedPackageRuntime
 	llmReply     llmReplyOptions
+	audio        audioTranscriptionOptions
 }
 
 type llmReplyOptions struct {
@@ -98,6 +102,7 @@ func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoD
 		adminChatIDs: normalizeAdminChatIDs(adminChatIDs),
 		logger:       logger,
 		llmReply:     loadLLMReplyOptionsFromEnv(),
+		audio:        loadAudioTranscriptionOptionsFromEnv(),
 	}
 }
 
@@ -248,7 +253,6 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		}
 		s.info("incoming message processing completed", fields...)
 	}()
-	hadLanguage := conversation.Language != ""
 	language := conversation.Language
 
 	if language == "" {
@@ -259,6 +263,28 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 
 		if err := s.store.UpdateLanguage(ctx, chatID, language); err != nil {
 			return err
+		}
+	}
+
+	if isIncomingAudioMessage(msg) && text == "" {
+		transcript, handled, err := s.maybeTranscribeIncomingAudio(ctx, chatID, msg, language)
+		if err != nil {
+			return err
+		}
+		if handled && transcript == "" {
+			return nil
+		}
+		if transcript != "" {
+			text = transcript
+			msg.Text = transcript
+		}
+	}
+
+	if text != "" {
+		var refreshErr error
+		language, refreshErr = s.refreshLanguageForCurrentText(ctx, chatID, language, text)
+		if refreshErr != nil {
+			return refreshErr
 		}
 	}
 
@@ -419,7 +445,6 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		zap.Strings("extracted_fields", extractedAnalysisFields(analysis)),
 	)
 
-	_ = hadLanguage
 	_ = lead
 	return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
 }
@@ -560,6 +585,9 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	if shouldAskPackageBeforeQuestionnaire(conversation, analysis, text) {
 		return s.askPackageBeforeQuestionnaire(ctx, chatID, language)
 	}
+	if state == ClientStateAwaitingQuestionnaireConfirm || conversation.QuestionnaireOfferSent {
+		return s.handleQuestionnaireConfirmation(ctx, chatID, text, language, conversation, analysis)
+	}
 	if shouldTransferToManagerNow(conversation, analysis) {
 		level := analysis.SelectedLevel
 		if level == 0 {
@@ -598,6 +626,10 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 		}
 		if len(conversation.Lead.MissingCoreFields()) == 0 && hasQualificationSignal(conversation, analysis) {
 			return s.presentPortfolioAndPackages(ctx, chatID, language, conversation, analysis)
+		}
+		if missing := qualificationMissingFields(conversation.Lead); len(missing) > 0 && hasPartialQualificationSignal(conversation, analysis) {
+			reply := qualificationFollowupText(language, conversation)
+			return s.sendAndRemember(ctx, chatID, reply, ClientStateAwaitingQualification, selectedLevelFromConversation(conversation), qualificationFollowupAskedFields(reply, missing)...)
 		}
 		return s.sendGreetingAndSchedule(ctx, chatID, language)
 	case ClientStateAwaitingQualification:
@@ -1469,7 +1501,16 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	}
 	requiresPortfolioExamples := needsPortfolioExamplesBeforeFormatQuestion(message)
 	backendMessage := message
-	if llmMessage, called := s.maybeGenerateConversationReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest); called {
+	backendAction := selectedBackendAction(stage, backendMessage, askedFields, latest)
+	s.info("llm final reply path evaluated",
+		zap.String("chat_hash", chatFingerprint(chatID)),
+		zap.Bool("llm_reply_enabled", s.llmReply.Enabled),
+		zap.Bool("llm_reply_dry_run", s.llmReply.DryRun),
+		zap.String("selected_backend_action", backendAction),
+		zap.Any("known_fields_snapshot", knownFieldsSnapshot(latest)),
+		zap.Strings("missing_fields_snapshot", qualificationMissingFields(latest.Lead)),
+	)
+	if llmMessage, called := s.maybeGenerateConversationReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest, backendAction); called {
 		if strings.TrimSpace(llmMessage) != "" {
 			llmValidation := validateOutgoingReply(llmMessage, stage, latest)
 			if !llmValidation.Prevented && llmValidation.Status == "passed" && strings.TrimSpace(llmValidation.Message) != "" {
@@ -1478,18 +1519,31 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 					zap.String("chat_hash", chatFingerprint(chatID)),
 					zap.String("stage", stage),
 					zap.String("final_reply_source", "llm"),
+					zap.String("selected_backend_action", backendAction),
+					zap.Bool("llm_reply_validation_passed", true),
 					zap.String("final_reply_preview", previewText(message, 180)),
 				)
 			} else {
 				s.warn("openai final customer reply rejected by validation; using backend fallback",
 					zap.String("chat_hash", chatFingerprint(chatID)),
 					zap.String("stage", stage),
+					zap.String("selected_backend_action", backendAction),
 					zap.String("final_reply_validation", llmValidation.Status),
+					zap.Bool("fallback_used", true),
+					zap.String("fallback_reason", llmValidation.Status),
 					zap.String("llm_reply_preview", previewText(llmMessage, 180)),
 					zap.String("backend_reply_preview", previewText(backendMessage, 180)),
 				)
 				message = backendMessage
 			}
+		} else {
+			s.info("openai final customer reply fallback used",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("stage", stage),
+				zap.String("selected_backend_action", backendAction),
+				zap.Bool("fallback_used", true),
+				zap.String("fallback_reason", "dry_run_or_generation_failed"),
+			)
 		}
 	}
 	validation := validateOutgoingReply(message, stage, latest)
@@ -2065,6 +2119,7 @@ func (s *Service) detectLanguage(text string) string {
 	kazakhMarkers := []string{
 		"ә", "ғ", "қ", "ң", "ө", "ұ", "ү", "һ", "і",
 		"сәлем", "баға", "қанша", "қымбат", "кейін", "жасайық", "бастайық", "мысал", "иә", "керек",
+		"менде", "сизде", "сізде", "жарнама", "техникасы", "ролик керек", "максат", "мақсат",
 	}
 	if hasAny(normalized, kazakhMarkers) {
 		return "kk"
@@ -2084,6 +2139,23 @@ func (s *Service) detectLanguage(text string) string {
 		return "en"
 	}
 	return "ru"
+}
+
+func (s *Service) refreshLanguageForCurrentText(ctx context.Context, chatID string, current string, text string) (string, error) {
+	detected := strings.TrimSpace(s.detectLanguage(text))
+	if detected == "" {
+		detected = strings.TrimSpace(current)
+	}
+	if detected == "" {
+		detected = "ru"
+	}
+	if strings.TrimSpace(current) == detected {
+		return detected, nil
+	}
+	if err := s.store.UpdateLanguage(ctx, chatID, detected); err != nil {
+		return "", err
+	}
+	return detected, nil
 }
 
 func toOpenAIMessages(messages []ChatMessage, analysis CustomerAnalysis) []openai.Message {
@@ -2548,6 +2620,15 @@ func isIncomingMediaContext(msg IncomingMessage) bool {
 	}
 }
 
+func isIncomingAudioMessage(msg IncomingMessage) bool {
+	switch strings.TrimSpace(msg.TypeMessage) {
+	case "audioMessage", "voiceMessage":
+		return true
+	default:
+		return false
+	}
+}
+
 func mediaIncomingText(messageType string, text string) string {
 	text = strings.TrimSpace(text)
 	if text != "" {
@@ -2904,6 +2985,26 @@ func shouldClarifyWeakQualificationAnswer(analysis CustomerAnalysis) bool {
 	}
 }
 
+func hasPartialQualificationSignal(conversation Conversation, analysis CustomerAnalysis) bool {
+	if analysis.Niche != nil && isValidNiche(*analysis.Niche) {
+		return true
+	}
+	if analysis.Goal != nil && isValidGoal(*analysis.Goal) {
+		return true
+	}
+	if analysis.ProductOrService != nil && strings.TrimSpace(*analysis.ProductOrService) != "" {
+		return true
+	}
+	if analysis.CampaignContext != nil && strings.TrimSpace(*analysis.CampaignContext) != "" {
+		return true
+	}
+	lead := conversation.Lead
+	return isValidNiche(lead.Niche) ||
+		isValidGoal(lead.Goal) ||
+		strings.TrimSpace(lead.ProductOrService) != "" ||
+		strings.TrimSpace(lead.CampaignContext) != ""
+}
+
 func (s *Service) shouldSendRelevantAIWorkExamples(conversation Conversation, analysis CustomerAnalysis) bool {
 	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested || conversation.QuestionnaireOfferSent {
 		return false
@@ -2925,7 +3026,7 @@ func (s *Service) shouldSendRelevantAIWorkExamples(conversation Conversation, an
 	if len(qualificationMissingFields(conversation.Lead)) > 0 {
 		return false
 	}
-	selection := selectAIWorkExamples(conversation.Lead, analysis, maxAIWorkExamples)
+	selection := selectAIWorkExamples(conversation.Lead, analysis, aiWorkExamplesLimit())
 	if len(selection.Videos) == 0 {
 		return false
 	}
@@ -2950,7 +3051,7 @@ func (s *Service) handleNegativeSelection(ctx context.Context, chatID string, la
 }
 
 func (s *Service) sendRelevantAIWorkExamples(ctx context.Context, chatID string, language string, conversation Conversation, analysis CustomerAnalysis, introOverride string) error {
-	selection := selectAIWorkExamples(conversation.Lead, analysis, maxAIWorkExamples)
+	selection := selectAIWorkExamples(conversation.Lead, analysis, aiWorkExamplesLimit())
 	if len(selection.Videos) == 0 {
 		return nil
 	}
@@ -3397,12 +3498,18 @@ func isExplicitOptOutText(text string) bool {
 	if clean == "стоп" || clean == "stop" || clean == "unsubscribe" || clean == "отмена" || clean == "cancel" {
 		return true
 	}
-	return containsAny(normalized, []string{
-		"не пишите", "больше не пишите", "не надо", "не интересно", "не актуально", "передумал",
-		"передумали", "не хочу", "отстан", "отписаться", "отписка", "отпишите меня",
-		"отписать меня", "отпишите от", "unsubscribe", "stop messaging",
-		"жазбаңыз", "мазаламаңыз", "керек емес", "not interested", "do not message",
-	})
+	if clean == "не интересно" || clean == "not interested" || clean == "no thanks" {
+		return true
+	}
+	if containsAny(normalized, []string{
+		"не пишите", "больше не пишите", "не надо писать", "не надо пишите",
+		"не отправляйте сообщения", "не присылайте сообщения", "отписаться", "отписка",
+		"отпишите меня", "отписать меня", "отпишите от", "unsubscribe", "stop messaging",
+		"do not message", "don't message", "жазбаңыз", "мазаламаңыз",
+	}) {
+		return true
+	}
+	return false
 }
 
 func isNoOfferBriefAnswer(normalized string) bool {

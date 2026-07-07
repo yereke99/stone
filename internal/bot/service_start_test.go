@@ -105,7 +105,7 @@ func TestUnknownFirstMessageDefaultsToRussianWithoutLanguageQuestion(t *testing.
 	}
 }
 
-func TestLanguageIsLockedAfterFirstDetection(t *testing.T) {
+func TestLanguageFollowsLatestCustomerMessageInAutoMode(t *testing.T) {
 	sender := &fakeSender{}
 	service := NewService(sender, &fakeAI{}, NewConversationStore(), testVideoDir(t), PortfolioLinks{}, "auto", nil)
 
@@ -122,8 +122,8 @@ func TestLanguageIsLockedAfterFirstDetection(t *testing.T) {
 	if len(sender.captions) == 0 {
 		t.Fatalf("package videos were not sent: messages=%#v", sender.messages)
 	}
-	if got := sender.captions[0]; !strings.Contains(got, "Тестілік") || !strings.Contains(got, "35 000") {
-		t.Fatalf("language was not locked to Kazakh package caption, got:\n%s", got)
+	if got := sender.captions[0]; !strings.Contains(got, "Тестовый") || !strings.Contains(got, "35 000") {
+		t.Fatalf("language did not follow latest Russian message, got:\n%s", got)
 	}
 }
 

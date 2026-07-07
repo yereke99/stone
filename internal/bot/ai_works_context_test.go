@@ -169,3 +169,20 @@ func TestTourismRequestSendsTourismExamples(t *testing.T) {
 		t.Fatalf("tourism examples were not sent: %#v", sender.files)
 	}
 }
+
+func TestAIWorkExamplesLimitFromEnv(t *testing.T) {
+	lead := LeadState{Niche: "туризм / travel", Goal: "привлечь клиентов"}
+	analysis := CustomerAnalysis{PortfolioTags: []string{"tourism"}}
+
+	t.Setenv("AI_WORK_EXAMPLES_LIMIT", "")
+	defaultSelection := selectAIWorkExamples(lead, analysis, aiWorkExamplesLimit())
+	if len(defaultSelection.Videos) != 3 {
+		t.Fatalf("default AI work examples = %d, want 3", len(defaultSelection.Videos))
+	}
+
+	t.Setenv("AI_WORK_EXAMPLES_LIMIT", "0")
+	allSelection := selectAIWorkExamples(lead, analysis, aiWorkExamplesLimit())
+	if len(allSelection.Videos) < 4 {
+		t.Fatalf("AI_WORK_EXAMPLES_LIMIT=0 videos = %d, want all tourism matches", len(allSelection.Videos))
+	}
+}

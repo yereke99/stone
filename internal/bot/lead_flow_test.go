@@ -1376,6 +1376,30 @@ func TestSoftDeferPhrasesAreNotOptOutOrReadyToOrder(t *testing.T) {
 	}
 }
 
+func TestAmbiguousBusinessPhrasesAreNotPermanentOptOut(t *testing.T) {
+	phrases := []string{
+		"не надо анкету, скажите цену",
+		"не надо стандарт, хочу тест",
+		"передумали насчёт пакета",
+		"не актуально до понедельника",
+	}
+	for _, phrase := range phrases {
+		if isExplicitOptOutText(phrase) {
+			t.Fatalf("%q was classified as explicit opt-out", phrase)
+		}
+		analysis := AnalyzeCustomerMessage(phrase, LeadState{}, "ru")
+		if analysis.Intent == IntentMute || analysis.ShouldStop {
+			t.Fatalf("%q intent=%q should_stop=%v, want no hard stop", phrase, analysis.Intent, analysis.ShouldStop)
+		}
+	}
+
+	for _, phrase := range []string{"стоп бот", "stop bot", "не пишите", "отпишите меня"} {
+		if !isExplicitOptOutText(phrase) {
+			t.Fatalf("%q was not classified as hard opt-out", phrase)
+		}
+	}
+}
+
 func TestMultipleQuickMessagesDoNotDuplicateBotResponses(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()

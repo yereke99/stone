@@ -252,6 +252,57 @@ func TestGoalAnswerAfterKnownNicheDoesNotRepeatNicheQuestion(t *testing.T) {
 	}
 }
 
+func TestKazakhForkliftRequestDoesNotAskNicheAgain(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-forklift-kz"
+
+	sendText(t, service, chatID, "Менде погрузчик техникасы бар. Сол техникаға жарнама керек болды")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Language != "kk" {
+		t.Fatalf("language = %q, want kk", conversation.Language)
+	}
+	if conversation.Lead.Niche != "погрузчик / спецтехника" {
+		t.Fatalf("niche = %q, want погрузчик / спецтехника", conversation.Lead.Niche)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one missing-goal follow-up", sender.messages)
+	}
+	reply := strings.ToLower(sender.messages[0])
+	if strings.Contains(reply, "не сатасыз") || strings.Contains(reply, "қай ниша") || strings.Contains(reply, "что прода") {
+		t.Fatalf("bot asked known niche again: %q", sender.messages[0])
+	}
+	if !strings.Contains(reply, "мақсат") {
+		t.Fatalf("bot should ask only missing goal in Kazakh: %q", sender.messages[0])
+	}
+}
+
+func TestBarbershopPhraseNormalizesNicheAndDoesNotEchoRawSentence(t *testing.T) {
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "chat-barbershop-kz"
+
+	sendText(t, service, chatID, "барбершопта жұмыс істейміз")
+
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != "барбершоп / услуги барбершопа" {
+		t.Fatalf("niche = %q, want canonical barbershop", conversation.Lead.Niche)
+	}
+	if strings.Contains(strings.ToLower(conversation.Lead.Niche), "жұмыс") {
+		t.Fatalf("raw customer phrase was saved as niche: %q", conversation.Lead.Niche)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one follow-up", sender.messages)
+	}
+	reply := strings.ToLower(sender.messages[0])
+	if strings.Contains(reply, "барбершопта жұмыс істейміз") || strings.Contains(reply, "что прода") || strings.Contains(reply, "не сатасыз") {
+		t.Fatalf("bot echoed raw phrase or repeated niche question: %q", sender.messages[0])
+	}
+}
+
 func TestQuotedConstructionReplyUsesTypedTextAndPreservesGoal(t *testing.T) {
 	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
 	store := NewConversationStore()

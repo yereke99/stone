@@ -9,6 +9,9 @@ openai:
   model: "gpt-5.5"
   temperature: 0.3
   max_output_tokens: 350
+  analyzer_max_output_tokens: 1500
+  llm_reply_max_output_tokens: 1000
+  transcription_model: "gpt-4o-mini-transcribe"
 
 database:
   path: "./data/stone.sqlite3"
@@ -24,8 +27,19 @@ bot:
   reply_language_mode: "auto"
   auto_reply_enabled: false
   max_message_age_seconds: 120
+  llm_reply_enabled: true
+  llm_reply_dry_run: false
+  ai_work_examples_limit: 3
   owner_wa_chat_id: ""
   admin_chat_ids: ["77000000000@c.us"]
+
+audio:
+  transcription_enabled: true
+  ffmpeg_path: "/usr/bin/ffmpeg"
+  max_download_mb: 25
+  download_timeout_seconds: 20
+  convert_timeout_seconds: 30
+  transcription_timeout_seconds: 60
 
 app:
   env: "local"

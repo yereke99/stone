@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -104,6 +106,50 @@ func TestGenerateReplyTextUsesReplyTextOnlySchema(t *testing.T) {
 	properties := schema["properties"].(map[string]any)
 	if len(properties) != 1 {
 		t.Fatalf("properties = %#v, want only reply_text", properties)
+	}
+}
+
+func TestTranscribeAudioUsesAudioEndpointAndModel(t *testing.T) {
+	var path string
+	var model string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm() error = %v", err)
+		}
+		model = r.FormValue("model")
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile() error = %v", err)
+		}
+		_ = file.Close()
+		if header.Filename != "voice.mp3" {
+			t.Fatalf("filename = %q, want voice.mp3", header.Filename)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"text": "стоп бот"})
+	}))
+	defer server.Close()
+
+	filePath := filepath.Join(t.TempDir(), "voice.mp3")
+	if err := os.WriteFile(filePath, []byte("audio"), 0o600); err != nil {
+		t.Fatalf("write temp audio: %v", err)
+	}
+	client := NewClient("test-key", "gpt-5.5", 350, 1500, 0.3, server.Client())
+	client.baseURL = server.URL
+
+	text, err := client.TranscribeAudio(context.Background(), filePath, "gpt-4o-mini-transcribe")
+	if err != nil {
+		t.Fatalf("TranscribeAudio() error = %v", err)
+	}
+	if text != "стоп бот" {
+		t.Fatalf("text = %q, want стоп бот", text)
+	}
+	if path != audioTranscriptionsEndpoint {
+		t.Fatalf("path = %q, want %q", path, audioTranscriptionsEndpoint)
+	}
+	if model != "gpt-4o-mini-transcribe" {
+		t.Fatalf("model = %q, want gpt-4o-mini-transcribe", model)
 	}
 }
 

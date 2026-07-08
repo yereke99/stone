@@ -172,6 +172,10 @@ func (s *ConversationStore) migrate(ctx context.Context) error {
 			('+7 778 788 8325', '77787888325', '77787888325@c.us', 'protected_no_autoreply_seed'),
 			('+7 705 410 3913', '77054103913', '77054103913@c.us', 'protected_no_autoreply_seed'),
 			('+7 777 660 2066', '77776602066', '77776602066@c.us', 'protected_no_autoreply_seed');`,
+		`INSERT OR IGNORE INTO whatsapp_automation_suppression
+			(raw_phone, normalized_phone, chat_id, reason)
+		VALUES
+			('+7 705 715 6267', '77057156267', '77057156267@c.us', 'manually_processed');`,
 		`UPDATE whatsapp_clients
 		SET automation_closed = 1,
 			stopped = 1,

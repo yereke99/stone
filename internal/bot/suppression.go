@@ -25,6 +25,9 @@ func NormalizePhone(input string) string {
 	}
 
 	phone := digits.String()
+	if len(phone) == 10 && strings.HasPrefix(phone, "7") {
+		phone = "7" + phone
+	}
 	if (len(phone) == 10 || len(phone) == 11) && strings.HasPrefix(phone, "8") {
 		phone = "7" + phone[1:]
 	}

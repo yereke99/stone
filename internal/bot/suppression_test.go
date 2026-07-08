@@ -20,6 +20,9 @@ func TestNormalizePhone(t *testing.T) {
 		{name: "protected formatted", raw: "+7 776 600 1170", want: "77766001170"},
 		{name: "protected local eight", raw: "8 776 600 1170", want: "77766001170"},
 		{name: "protected normalized", raw: "77766001170", want: "77766001170"},
+		{name: "manually processed formatted", raw: "+7 705 715 6267", want: "77057156267"},
+		{name: "manually processed local", raw: "7057156267", want: "77057156267"},
+		{name: "manually processed chat id", raw: "77057156267@c.us", want: "77057156267"},
 	}
 
 	for _, tt := range tests {
@@ -47,6 +50,9 @@ func TestSuppressionMigrationSeedsManualWhatsAppContacts(t *testing.T) {
 		{name: "protected third", chatID: "77787888325@c.us"},
 		{name: "protected fourth", chatID: "77054103913@c.us"},
 		{name: "protected fifth", chatID: "77776602066@c.us"},
+		{name: "manually processed chat id", chatID: "77057156267@c.us"},
+		{name: "manually processed formatted", phone: "+7 705 715 6267"},
+		{name: "manually processed local", phone: "7057156267"},
 		{name: "first raw eight", phone: "87012357383"},
 		{name: "second raw eight", phone: "8708988877"},
 		{name: "third raw eight", phone: "87773000200"},
@@ -83,8 +89,8 @@ func TestSuppressionMigrationIsIdempotent(t *testing.T) {
 	if err := store2.db.QueryRow(`SELECT COUNT(*) FROM whatsapp_automation_suppression`).Scan(&count); err != nil {
 		t.Fatalf("count suppression rows: %v", err)
 	}
-	if count != 8 {
-		t.Fatalf("suppression row count = %d, want 8", count)
+	if count != 9 {
+		t.Fatalf("suppression row count = %d, want 9", count)
 	}
 }
 
@@ -101,6 +107,8 @@ func TestSuppressedIncomingMessagesDoNotSendBotMessages(t *testing.T) {
 		{name: "first raw eight", chatID: "87012357383"},
 		{name: "second raw eight", chatID: "8708988877"},
 		{name: "third raw eight", chatID: "87773000200"},
+		{name: "manually processed chat id", chatID: "77057156267@c.us"},
+		{name: "manually processed local", chatID: "7057156267"},
 	}
 
 	for _, tt := range tests {
@@ -160,6 +168,23 @@ func TestSuppressedFollowupDoesNotSendBotMessages(t *testing.T) {
 	conversation := snapshotConversation(t, store, chatID)
 	if conversation.FollowupStage != "" || !conversation.NextFollowupAt.IsZero() {
 		t.Fatalf("suppressed follow-up was not cleared: stage=%q next=%v", conversation.FollowupStage, conversation.NextFollowupAt)
+	}
+}
+
+func TestSuppressedOutboundHelpersDoNotSendBotMessages(t *testing.T) {
+	store := newSQLiteStoreForSuppressionTest(t)
+	sender := &fakeSender{fileMessageIDs: []string{"suppressed-file-id"}}
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
+	chatID := "77057156267@c.us"
+
+	if err := service.sendCustomerWhatsAppMessage(context.Background(), chatID, "Автоматический ответ"); err != nil {
+		t.Fatalf("sendCustomerWhatsAppMessage() error = %v", err)
+	}
+	if _, err := service.sendCustomerWhatsAppFile(context.Background(), chatID, filepath.Join(testVideoDir(t), VideoLevel1), "caption"); err != nil {
+		t.Fatalf("sendCustomerWhatsAppFile() error = %v", err)
+	}
+	if len(sender.messages) != 0 || len(sender.files) != 0 {
+		t.Fatalf("suppressed outbound helper sent automation: messages=%#v files=%#v", sender.messages, sender.files)
 	}
 }
 

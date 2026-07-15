@@ -138,7 +138,7 @@ func QualificationGreetingText(language string) string {
 	case "en":
 		return "Hello! Thanks for reaching out 🙌\n\nWe create AI ad videos in 48 hours without filming, ready to launch ads.\n\nPricing starts from 35,000 KZT.\n\nTo make the video fit your task, please share briefly:\n\n— What do you sell / what is your niche?\n— What is the video goal: leads, sales, or awareness?\n\nYou can also send your Instagram or website 🎯\nAfter that we will suggest the idea and format 🤝"
 	default:
-		return "Здравствуйте! Спасибо за обращение 🙌\n\nДелаем ИИ рекламные ролики за 48 часов без съёмки, под запуск рекламы.\n\nСтоимость от 35 000 тг.\n\nЧтобы сделать ролик точно под вашу задачу, напишите, пожалуйста, кратко:\n\n— Что продаёте / какая ниша?\n— Какая цель ролика: заявки, продажи или узнаваемость?\n\nТакже можете отправить Instagram или сайт 🎯\nПосле этого предложим идею и формат ролика 🤝"
+		return "Здравствуйте! Спасибо за обращение 🙌\n\nСтоимость от 35 000 тг.\n\nЧтобы сделать ролик точно под вашу задачу, напишите, пожалуйста, кратко:\n\n— Что продаёте / какая ниша?\n— Какая цель ролика: заявки, продажи или узнаваемость?\n\nТакже можете отправить Instagram или сайт 🎯\nПосле этого предложим идею и формат ролика 🤝"
 	}
 }
 

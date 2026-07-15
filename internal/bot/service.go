@@ -85,6 +85,7 @@ type Service struct {
 
 type llmReplyOptions struct {
 	Enabled         bool
+	PrimaryEnabled  bool
 	DryRun          bool
 	Timeout         time.Duration
 	Model           string
@@ -109,6 +110,7 @@ func NewService(sender GreenSender, ai SalesAI, store *ConversationStore, videoD
 func loadLLMReplyOptionsFromEnv() llmReplyOptions {
 	return llmReplyOptions{
 		Enabled:         parseBoolEnv("BOT_LLM_REPLY_ENABLED", false),
+		PrimaryEnabled:  parseBoolEnv("BOT_LLM_PRIMARY_REPLY_ENABLED", true),
 		DryRun:          parseBoolEnv("BOT_LLM_REPLY_DRY_RUN", false),
 		Timeout:         parseDurationEnv("BOT_LLM_REPLY_TIMEOUT", 15*time.Second),
 		Model:           strings.TrimSpace(os.Getenv("BOT_LLM_REPLY_MODEL")),
@@ -503,6 +505,11 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	}
 	if analysis.Intent == IntentQuantityDiscountQuestion {
 		return s.handleQuantityDiscount(ctx, chatID, text, language, conversation, analysis)
+	}
+	if handled, err := s.handleLLMPrimaryConversation(ctx, chatID, text, language, conversation, analysis); err != nil {
+		return err
+	} else if handled {
+		return nil
 	}
 	if analysis.Intent == IntentConfusion {
 		return s.handleConfusionReply(ctx, chatID, language, conversation)
@@ -1502,15 +1509,17 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	requiresPortfolioExamples := needsPortfolioExamplesBeforeFormatQuestion(message)
 	backendMessage := message
 	backendAction := selectedBackendAction(stage, backendMessage, askedFields, latest)
+	replyAlreadyLLMGenerated := replySourceFromContext(ctx) == replySourceLLMPrimary
 	s.info("llm final reply path evaluated",
 		zap.String("chat_hash", chatFingerprint(chatID)),
 		zap.Bool("llm_reply_enabled", s.llmReply.Enabled),
 		zap.Bool("llm_reply_dry_run", s.llmReply.DryRun),
+		zap.Bool("llm_primary_reply", replyAlreadyLLMGenerated),
 		zap.String("selected_backend_action", backendAction),
 		zap.Any("known_fields_snapshot", knownFieldsSnapshot(latest)),
 		zap.Strings("missing_fields_snapshot", qualificationMissingFields(latest.Lead)),
 	)
-	if llmMessage, called := s.maybeGenerateConversationReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest, backendAction); called {
+	if llmMessage, called := s.maybeRewriteBackendReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest, backendAction, replyAlreadyLLMGenerated); called {
 		if strings.TrimSpace(llmMessage) != "" {
 			llmValidation := validateOutgoingReply(llmMessage, stage, latest)
 			if !llmValidation.Prevented && llmValidation.Status == "passed" && strings.TrimSpace(llmValidation.Message) != "" {

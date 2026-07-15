@@ -122,11 +122,11 @@ var aiWorksByCategory = map[string][]string{
 var aiWorkCategoryTags = map[string][]string{
 	"app":         {"app", "mobile_app", "taxi", "service"},
 	"auto":        {"auto", "car", "cars", "dealership"},
-	"b2b":         {"b2b", "business", "service", "repair", "supermarket"},
+	"b2b":         {"b2b", "business", "service", "repair", "supermarket", "wholesale"},
 	"event":       {"event", "concert", "show", "performance"},
 	"fashion":     {"fashion", "clothing", "clothes", "apparel", "brand"},
 	"factories":   {"factory", "factories", "production", "industrial", "plant", "equipment", "machinery", "construction"},
-	"horeca":      {"food", "restaurant", "horeca", "cafe", "burger", "tea"},
+	"horeca":      {"food", "restaurant", "horeca", "cafe", "burger", "tea", "product", "fmcg", "grocery", "dairy"},
 	"interior":    {"interior", "renovation", "home", "construction", "repair"},
 	"led_ekran":   {"led", "screen", "digital", "outdoor_ads"},
 	"logistics":   {"logistics", "delivery", "transport"},
@@ -269,6 +269,15 @@ func portfolioTagsFromText(text string) []string {
 	if containsAny(normalized, []string{"ресторан", "кафе", "еда", "доставка еды", "бургер", "чай", "food", "restaurant", "horeca"}) {
 		add("food", "restaurant", "horeca")
 	}
+	if containsAny(normalized, []string{"сливочн", "молочн", "молоко", "масло", "сыры", "сыров", "творог", "кефир", "йогурт", "dairy", "butter", "cheese", "milk"}) {
+		add("food", "dairy", "product", "fmcg")
+	}
+	if containsAny(normalized, []string{"продукты питания", "продуктов питания", "продукт питания", "бакале", "grocery", "fmcg", "напитк", "снек", "кондитер"}) {
+		add("food", "product", "fmcg", "grocery")
+	}
+	if containsAny(normalized, []string{"оптом", "оптов", "опт ", "wholesale", "дистрибь", "дистриб"}) || normalized == "опт" {
+		add("wholesale", "b2b", "business")
+	}
 	if containsAny(normalized, []string{"медицин", "клиник", "стоматолог", "medicine", "medical", "clinic"}) {
 		add("medicine", "medical")
 	}
@@ -308,6 +317,18 @@ func normalizePortfolioTags(tags []string) []string {
 			tag = "medicine"
 		case "machinery":
 			tag = "equipment"
+		case "сливочное_масло", "масло", "молочная_продукция", "молочные_продукты", "молочка", "dairy_products", "butter", "cheese", "milk":
+			tag = "dairy"
+		case "продукты_питания", "продукты", "еда", "питание", "food_products":
+			tag = "food"
+		case "опт", "оптом", "оптовые_продажи", "оптовая_торговля", "опт_продажи":
+			tag = "wholesale"
+		case "товар", "товары", "продукция", "товарная_реклама", "product_advertising", "product_ads", "goods":
+			tag = "product"
+		case "фмсж", "фмсг":
+			tag = "fmcg"
+		case "бакалея", "grocery_store", "супермаркет":
+			tag = "grocery"
 		}
 		if tag == "" {
 			continue
@@ -346,7 +367,9 @@ func aiWorkVideo(category string, fileName string) AIWorkVideo {
 	case "car_sale.mp4", "car_sale_2.mp4":
 		tags = append(tags, "auto", "car", "sales")
 	case "burger.mp4", "oreo.mp4", "tea.mp4":
-		tags = append(tags, "food", "restaurant", "horeca")
+		tags = append(tags, "food", "restaurant", "horeca", "product", "fmcg")
+	case "supermarket.mp4":
+		tags = append(tags, "food", "grocery", "fmcg", "retail", "product", "wholesale")
 	case "presentation.mp4", "safety_briefing.mp4", "thermal_power_plant.mp4":
 		tags = append(tags, "industrial", "equipment", "machinery", "construction")
 	}

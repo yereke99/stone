@@ -106,14 +106,57 @@ func validateOutgoingReply(message string, stage string, conversation Conversati
 }
 
 func knownFieldsAskedByReply(message string, stage string, conversation Conversation) []string {
-	fields := fieldsAskedByMessage(message, stage)
+	// Only the question sentences count as asking. A natural reply echoes
+	// known facts ("зафиксировал: цель — узнаваемость") or mentions Instagram
+	// while acknowledging a link; that must not register as a repeated
+	// question about the echoed field.
+	questions := replyQuestionSentences(message)
+	if strings.TrimSpace(questions) == "" {
+		return nil
+	}
+	fields := fieldsAskedByMessage(questions, stage)
+	normalizedQuestions := normalizeForAnalysis(questions)
 	known := make([]string, 0, len(fields))
 	for _, field := range fields {
+		if field == fieldPlatform && !containsAny(normalizedQuestions, []string{
+			"площадк", "платформ", "где будете", "где планируете", "куда планируете", "қай жерде", "where will you",
+		}) {
+			// A platform name inside another question is not a platform question.
+			continue
+		}
 		if fieldKnownInConversation(conversation, field) {
 			known = append(known, field)
 		}
 	}
 	return normalizeFieldList(known)
+}
+
+// replyQuestionSentences returns only the sentences of a reply that actually
+// ask something: they contain a question mark or an explicit request phrase.
+func replyQuestionSentences(message string) string {
+	var questions []string
+	var current strings.Builder
+	flush := func() {
+		sentence := strings.TrimSpace(current.String())
+		current.Reset()
+		if sentence == "" {
+			return
+		}
+		if strings.Contains(sentence, "?") || containsAny(normalizeForAnalysis(sentence), []string{
+			"подскажите", "уточните", "напишите", "ответьте", "расскажите", "жазыңыз", "нақтылаңыз", "please share", "please tell",
+		}) {
+			questions = append(questions, sentence)
+		}
+	}
+	for _, r := range message {
+		current.WriteRune(r)
+		switch r {
+		case '.', '!', '?', '\n', ';':
+			flush()
+		}
+	}
+	flush()
+	return strings.Join(questions, " ")
 }
 
 func nonRepeatedNextQuestionText(language string, conversation Conversation) string {

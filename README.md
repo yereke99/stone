@@ -51,6 +51,7 @@ NEW_LEAD_AUTO_PACKAGES_AFTER_MINUTES=15
 NEW_LEAD_AUTO_PACKAGES_ENABLED=true
 MAX_OPENAI_OUTPUT_TOKENS=350
 ANALYZER_MAX_OUTPUT_TOKENS=1500
+BOT_LLM_PRIMARY_REPLY_ENABLED=true
 BOT_LLM_REPLY_ENABLED=true
 BOT_LLM_REPLY_DRY_RUN=false
 LLM_REPLY_MAX_OUTPUT_TOKENS=1000
@@ -72,6 +73,8 @@ APP_ENV=local
 `DATABASE_PATH` задаёт SQLite-файл для состояния клиентов и журналов сообщений. На старте приложение только открывает хранилище, применяет миграции и начинает принимать новые GreenAPI notifications; оно не обходит контакты WhatsApp и не отправляет скрипт старым чатам.
 
 `OWNER_WA_CHAT_ID` и `ADMIN_CHAT_IDS` опциональны. Укажите один или несколько WhatsApp chatID через запятую, например `77000000000@c.us`. Когда клиент соглашается на анкету или просит менеджера, бот один раз отправит менеджеру резюме лида.
+
+`BOT_LLM_PRIMARY_REPLY_ENABLED=true` (значение по умолчанию) делает ответ OpenAI-анализатора основным ответом клиенту в обычном диалоге: модель получает последние 10 сообщений, сохранённые факты лида и официальные цены, а backend проверяет ответ, выполняет действия (подбор и отправку локальных примеров, цены, handoff) и хранит журнал. `BOT_LLM_PRIMARY_REPLY_ENABLED=false` мгновенно возвращает диалог на детерминированные шаблоны без отката кода; они же остаются рабочим fallback при недоступности OpenAI. Брифы, выбор пакета, STOP, suppression и handoff всегда остаются детерминированными.
 
 `BOT_LLM_REPLY_ENABLED=false` мгновенно возвращает финальные ответы к backend-шаблонам без отката кода. `BOT_LLM_REPLY_DRY_RUN=true` вызывает OpenAI и пишет кандидат в логи, но клиенту отправляется backend-шаблон.
 

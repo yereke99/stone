@@ -135,6 +135,9 @@ type CustomerAnalysis struct {
 	AsksForMoreOptions  bool     `json:"asks_for_more_options,omitempty"`
 	PortfolioTags       []string `json:"portfolio_tags,omitempty"`
 	RecommendedAction   string   `json:"recommended_action,omitempty"`
+	NextAction          string   `json:"next_action,omitempty"`
+	ReplyText           string   `json:"reply_text,omitempty"`
+	Confidence          float64  `json:"confidence,omitempty"`
 	FAQKey              string   `json:"faq_key,omitempty"`
 	MissingFields       []string `json:"missing_fields"`
 
@@ -2123,29 +2126,56 @@ func normalizeGoal(value string) string {
 		return "объяснить преимущество"
 	case containsAny(value, []string{"удво", "2x", "x2"}) && containsAny(value, []string{"продаж", "сат", "sales"}):
 		return "удвоить продажи"
-	case containsAny(value, []string{
-		"привлеч", "больше клиент", "новых клиент", "получать клиент", "получить клиент",
+	}
+	// Compound goals must keep every aspect the customer named. "Привлечение
+	// подписчиков и узнаваемость" is follower growth plus brand awareness and
+	// must never collapse into "привлечь клиентов" (lead generation).
+	aspects := make([]string, 0, 3)
+	wantsClients := containsAny(value, []string{
+		"больше клиент", "новых клиент", "получать клиент", "получить клиент",
 		"client acquisition", "more clients", "new clients", "кобейт", "көбейт", "көбейту",
-	}):
-		return "привлечь клиентов"
+	}) || (strings.Contains(value, "привлеч") && containsAny(value, []string{"клиент", "покупател", "customer"}))
+	if wantsClients {
+		aspects = append(aspects, "привлечь клиентов")
+	}
+	if containsAny(value, []string{"продаж", "продав", "продать", "выруч", "сбыт", "сатылым", "сату", "sales", "revenue"}) {
+		aspects = append(aspects, "рост продаж")
+	}
+	if containsAny(value, []string{"заяв", "лид", "лиды", "өтінім", "lead", "leads"}) {
+		aspects = append(aspects, "получать заявки")
+	}
+	if containsAny(value, []string{"подпис", "жазыл", "followers", "subscribers"}) {
+		aspects = append(aspects, "увеличить подписчиков")
+	}
+	if containsAny(value, []string{"узнаваем", "охват", "бренд", "танымал", "awareness", "reach"}) {
+		aspects = append(aspects, "повысить узнаваемость")
+	}
+	if containsAny(value, []string{"трафик", "посещ", "traffic"}) {
+		aspects = append(aspects, "увеличить трафик")
+	}
+	if len(aspects) > 0 {
+		return joinGoalAspects(aspects)
+	}
+	switch {
 	case containsAny(value, []string{"reels", "рилс", "контент", "content", "tiktok", "тик ток", "instagram", "инстаграм"}):
 		return "контент для продвижения"
-	case containsAny(value, []string{"продаж", "продав", "продать", "выруч", "сбыт", "сатылым", "сату", "sales", "revenue"}):
-		return "рост продаж"
-	case containsAny(value, []string{"заяв", "лид", "лиды", "өтінім", "lead", "leads"}):
-		return "получать заявки"
-	case containsAny(value, []string{"узнаваем", "охват", "бренд", "танымал", "awareness", "reach"}):
-		return "повысить узнаваемость"
-	case containsAny(value, []string{"трафик", "посещ", "traffic"}):
-		return "увеличить трафик"
-	case containsAny(value, []string{"подпис", "жазыл", "followers", "subscribers"}):
-		return "увеличить подписчиков"
 	case containsAny(value, []string{"презентац", "таныстыр", "presentation"}):
 		return "презентация продукта"
 	case containsAny(value, []string{"запуск реклам", "старт реклам", "запустить реклам", "ads launch"}):
 		return "запуск рекламы"
 	default:
 		return ""
+	}
+}
+
+func joinGoalAspects(aspects []string) string {
+	switch len(aspects) {
+	case 0:
+		return ""
+	case 1:
+		return aspects[0]
+	default:
+		return strings.Join(aspects[:len(aspects)-1], ", ") + " и " + aspects[len(aspects)-1]
 	}
 }
 

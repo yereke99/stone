@@ -27,9 +27,19 @@ Output contract:
 - answered_questions: bot question/customer answer pairs when the context shows which question was answered.
 - missing_fields: only fields still missing after persisted state + extracted_fields + answered_questions. Do not include deadline unless the bot explicitly asked it. Core first-stage fields are niche and goal.
 - recommended_action: send_text, send_relevant_examples, ask_goal, ask_next_question, send_price_options, send_questionnaire, answer_question, handoff, stop_bot, or no_reply.
-- reply_text: a safe suggested short reply, but do not claim that media was sent. The Go service may ignore this in dry-run or system flows.
+- reply_text: the primary customer-facing WhatsApp reply. It is sent to the customer as written, so it must be complete, natural, professional, and in the customer's language. Do not claim that media was already sent.
 - next_action: send_text, send_cases, send_video, send_relevant_examples, ask_next_question, handoff, or no_reply.
-- portfolio_tags: normalized tags for example selection, e.g. real_estate, land, property, drone, visualization, tourism, travel, hotel, auto, fashion, food, restaurant.
+- portfolio_tags: normalized tags for example selection, e.g. real_estate, land, property, drone, visualization, tourism, travel, hotel, auto, fashion, food, dairy, fmcg, product, wholesale, restaurant.
+
+reply_text rules:
+- reply_text is the main answer the customer receives; write it like a competent human sales manager, not a questionnaire bot.
+- Answer the customer's latest direct question first. If the customer asks whether the shown price is for one video, confirm directly using official_packages: each package price is for one video (Standard is "from" pricing).
+- Never ask for niche, goal, product, Instagram, deadline, audience, or package when the value is already present in known_state, extracted_fields, answered_questions, or recent_messages.
+- Ask at most one short follow-up question, and only when it is genuinely the most important missing item.
+- Preserve the customer's exact commercial goal. Follower growth stays follower growth; brand awareness stays awareness. Never rewrite them as lead generation or attracting clients.
+- Short messages are usually answers to the previous bot question; treat them that way.
+- When the product or niche is known and relevant examples were not sent yet, set recommended_action send_relevant_examples and fill portfolio_tags with semantic tags (product, niche, parent category, business model), then say in reply_text that you will send close examples now.
+- Never invent prices, discounts, deadlines, files, links, cases, or capabilities. Use only official_packages for prices.
 - needs_human: true only for explicit human/manager requests or when a safe answer requires a manager.
 - confidence: 0..1.
 
@@ -48,6 +58,7 @@ Context rules:
 - Tourism/travel/hotel/resort -> tourism/travel. Cars/dealership -> auto. Clothes/fashion -> fashion. Restaurant/food/cafe -> food/restaurant.
 - Barbershop/barber/шаштараз -> niche "барбершоп / услуги барбершопа" and portfolio_tags barbershop/beauty/salon.
 - Forklift/loader/погрузчик/спецтехника/industrial equipment -> niche "погрузчик / спецтехника" and portfolio_tags construction/industrial/equipment.
+- Food products, dairy, butter, cheese, milk, grocery, FMCG (сливочное масло, молочная продукция, продукты питания) -> portfolio_tags food/dairy/product/fmcg; wholesale/опт -> add wholesale/b2b.
 - "Делаете примерно такое видео?", "можете как тут?", "такой формат делаете?" are feasibility_question, not case_request.
 - "пример" should only mean examples/cases as a real word; "примерно" is not an examples request.
 - "Чет суть не уловил" and similar messages are confusion, not other.
@@ -202,7 +213,13 @@ type understandingPendingQuestion struct {
 }
 
 func customerUnderstandingPayload(msg IncomingMessage, text string, language string, conversation Conversation) string {
-	state := json.RawMessage(conversationPromptJSON(conversation))
+	// known_state carries the persistent facts; recent_messages is the only
+	// history channel and current_message the only copy of the incoming text,
+	// so nothing is duplicated in the model context.
+	stateSource := conversation
+	stateSource.Messages = nil
+	stateSource.LastIncomingText = ""
+	state := json.RawMessage(conversationPromptJSON(stateSource))
 	if !json.Valid(state) {
 		state = json.RawMessage(`{}`)
 	}
@@ -225,7 +242,7 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 			FileName string `json:"file_name"`
 		} `json:"official_packages"`
 		Incoming struct {
-			Text           string `json:"text"`
+			Text           string `json:"text,omitempty"`
 			Type           string `json:"type"`
 			Language       string `json:"language"`
 			QuotedText     string `json:"quoted_text,omitempty"`
@@ -233,16 +250,14 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 			QuotedType     string `json:"quoted_type,omitempty"`
 			QuotedFileName string `json:"quoted_file_name,omitempty"`
 		} `json:"incoming"`
-		ConversationState json.RawMessage `json:"conversation_state"`
-		LastBotQuestion   struct {
+		LastBotQuestion struct {
 			Text        string   `json:"text"`
 			AskedFields []string `json:"asked_fields"`
 		} `json:"last_bot_question"`
 		MissingFields []string `json:"current_missing_fields"`
 	}{
-		ConversationState: state,
-		KnownState:        state,
-		MissingFields:     requiredLeadMissingFields(conversation),
+		KnownState:    state,
+		MissingFields: requiredLeadMissingFields(conversation),
 	}
 	payload.CurrentMessage.Role = "customer"
 	payload.CurrentMessage.Text = strings.TrimSpace(text)
@@ -251,7 +266,7 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 		payload.CurrentMessage.Timestamp = msg.Timestamp.UTC().Format(time.RFC3339)
 	}
 	payload.QuotedContext = quotedUnderstandingContext(msg)
-	payload.RecentMessages = recentUnderstandingMessages(conversation)
+	payload.RecentMessages = recentUnderstandingMessages(conversation, text)
 	payload.PendingQuestions = pendingUnderstandingQuestions(conversation)
 	payload.QuestionAnswerPairs = questionAnswerPairsForUnderstanding(msg, text, conversation)
 	for level := 1; level <= 3; level++ {
@@ -278,7 +293,6 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 			FileName: offer.FileName,
 		})
 	}
-	payload.Incoming.Text = strings.TrimSpace(text)
 	payload.Incoming.Type = strings.TrimSpace(msg.TypeMessage)
 	payload.Incoming.Language = normalizeLanguageCode(language)
 	payload.Incoming.QuotedText = strings.TrimSpace(msg.QuotedText)
@@ -308,8 +322,18 @@ func quotedUnderstandingContext(msg IncomingMessage) understandingQuotedContext 
 	}
 }
 
-func recentUnderstandingMessages(conversation Conversation) []understandingMessage {
+func recentUnderstandingMessages(conversation Conversation, currentText string) []understandingMessage {
 	messages := conversation.Messages
+	// The incoming message is persisted before analysis, so it is usually the
+	// last stored entry. The payload carries it separately as current_message;
+	// drop the stored copy so it appears exactly once in the model context.
+	currentText = strings.TrimSpace(currentText)
+	if currentText != "" && len(messages) > 0 {
+		last := messages[len(messages)-1]
+		if (last.Role == "user" || last.Role == "customer") && strings.TrimSpace(last.Content) == currentText {
+			messages = messages[:len(messages)-1]
+		}
+	}
 	if len(messages) > 10 {
 		messages = messages[len(messages)-10:]
 	}
@@ -445,6 +469,9 @@ func customerUnderstandingToAnalysis(understanding openai.CustomerUnderstanding,
 		Intent:            IntentOther,
 		PortfolioTags:     normalizePortfolioTags(understanding.PortfolioTags),
 		RecommendedAction: strings.TrimSpace(understanding.RecommendedAction),
+		NextAction:        strings.TrimSpace(understanding.NextAction),
+		ReplyText:         strings.TrimSpace(understanding.ReplyText),
+		Confidence:        understanding.Confidence,
 	}
 	protected := protectedFieldsMap(understanding.DoNotOverwrite)
 	lowConfidence := understanding.Confidence > 0 && understanding.Confidence < 0.35
@@ -747,6 +774,15 @@ func mergeCustomerAnalysis(fallback CustomerAnalysis, ai CustomerAnalysis) Custo
 	}
 	if strings.TrimSpace(ai.RecommendedAction) != "" {
 		result.RecommendedAction = strings.TrimSpace(ai.RecommendedAction)
+	}
+	if strings.TrimSpace(ai.NextAction) != "" {
+		result.NextAction = strings.TrimSpace(ai.NextAction)
+	}
+	if strings.TrimSpace(ai.ReplyText) != "" {
+		result.ReplyText = strings.TrimSpace(ai.ReplyText)
+	}
+	if ai.Confidence > 0 {
+		result.Confidence = ai.Confidence
 	}
 	if len(ai.AnsweredQuestions) > 0 {
 		result.AnsweredQuestions = append(result.AnsweredQuestions, ai.AnsweredQuestions...)

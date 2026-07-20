@@ -268,18 +268,8 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		}
 	}
 
-	if isIncomingAudioMessage(msg) && text == "" {
-		transcript, handled, err := s.maybeTranscribeIncomingAudio(ctx, chatID, msg, language)
-		if err != nil {
-			return err
-		}
-		if handled && transcript == "" {
-			return nil
-		}
-		if transcript != "" {
-			text = transcript
-			msg.Text = transcript
-		}
+	if isIncomingAudioMessage(msg) {
+		return s.handleIncomingAudioFallback(ctx, chatID, msg, language)
 	}
 
 	if text != "" {
@@ -343,7 +333,7 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
 			zap.String("normalized_text", NormalizeAdminStopCommand(text)),
 		)
-		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut, true)
+		return s.stopAutomationWithConfirmation(ctx, chatID, language, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut)
 	}
 	if isConversationClosedForAutomation(conversation) {
 		s.info("incoming message saved without automation reply",
@@ -462,6 +452,9 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	}
 	if isOptOutText(text) || analysis.Intent == IntentMute {
 		s.info("state machine opt out stopped silently", zap.String("chat_hash", chatFingerprint(chatID)))
+		if isExplicitOptOutText(text) {
+			return s.stopAutomationWithConfirmation(ctx, chatID, language, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut)
+		}
 		return s.stopAutomationSilently(ctx, chatID, selectedLevelFromConversation(conversation), StopReasonCustomerOptOut, true)
 	}
 	if analysis.Intent == IntentFrustration {
@@ -1038,6 +1031,38 @@ func (s *Service) deferClientReply(ctx context.Context, chatID string, level int
 		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, note)
 	})
 	return s.cancelFollowups(ctx, chatID)
+}
+
+func (s *Service) stopAutomationWithConfirmation(ctx context.Context, chatID string, language string, level int, reason string) error {
+	message := strings.TrimSpace(StopConfirmationText(language))
+	if message != "" {
+		duplicate, err := s.store.RecentlySentReply(ctx, chatID, message, outgoingRepeatWindow)
+		if err != nil {
+			return err
+		}
+		if !duplicate {
+			sendCtx := context.WithValue(ctx, outgoingAutomationStageKey{}, ClientStateOptOut)
+			if err := s.sendCustomerWhatsAppMessage(sendCtx, chatID, message); err != nil {
+				s.warn("stop confirmation send failed; automation will still be stopped",
+					zap.String("chat_hash", chatFingerprint(chatID)),
+					zap.Error(err),
+				)
+			} else {
+				incrementOutgoingCount(ctx)
+				persistCtx := context.WithoutCancel(ctx)
+				if err := s.store.LogOutgoingMessage(persistCtx, chatID, "text", message); err != nil {
+					return err
+				}
+				if err := s.store.MarkReplySent(persistCtx, chatID, message); err != nil {
+					return err
+				}
+				if err := s.store.AppendMessage(persistCtx, chatID, "assistant", message); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return s.stopAutomationSilently(ctx, chatID, level, reason, true)
 }
 
 func (s *Service) stopAutomationSilently(ctx context.Context, chatID string, level int, reason string, optOut bool) error {
@@ -1760,8 +1785,8 @@ func (s *Service) sendVideosWithCaptions(ctx context.Context, chatID string, fil
 			continue
 		}
 
-		filePath := s.videoFilePath(fileName)
-		if _, err := os.Stat(filePath); err != nil {
+		filePath, fileInfo, err := s.resolveVideoFilePath(fileName)
+		if err != nil {
 			s.warn("portfolio video file is unavailable; video not sent",
 				zap.String("chat_hash", chatFingerprint(chatID)),
 				zap.String("file_name", fileName),
@@ -1786,6 +1811,8 @@ func (s *Service) sendVideosWithCaptions(ctx context.Context, chatID string, fil
 		s.info("portfolio video sent",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("file_name", fileName),
+			zap.String("file_path", filePath),
+			zap.Int64("file_size_bytes", fileInfo.Size()),
 			zap.String("message_id", strings.TrimSpace(messageID)),
 		)
 		incrementOutgoingCount(ctx)
@@ -1933,6 +1960,13 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
+	memory := conversation.Memory
+	casesSent := strings.Join(memory.CasesSent, ", ")
+	if casesSent == "" {
+		casesSent = strings.Join(memory.CaseVideosSent, ", ")
+	}
+	objections := strings.Join(memory.CustomerObjections, "; ")
+	questionnaireStatus := questionnaireStatusForMemory(conversation)
 	lines := []string{
 		"Новый квалифицированный лид WhatsApp",
 		"",
@@ -1943,18 +1977,32 @@ func adminLeadNotificationText(conversation Conversation) string {
 	lines = append(lines,
 		"Телефон: "+formatPhoneForAdmin(conversation.ChatID),
 		"ChatID: "+strings.TrimSpace(conversation.ChatID),
+		"Язык: "+valueOrDash(normalizeLanguageCode(conversation.Language)),
 		"",
+		"Компания / бренд: "+valueOrDash(lead.ClientName),
 		"Ниша: "+valueOrDash(lead.Niche),
+		"Детали бизнеса: "+valueOrDash(lead.StrongSide),
+		"Продукт / услуга: "+valueOrDash(lead.ProductOrService),
 		"Цель: "+valueOrDash(lead.Goal),
+		"Аудитория: "+valueOrDash(lead.TargetAudience),
 		"Срок: "+valueOrDash(lead.Deadline),
+		"Бюджет: "+valueOrDash(lead.Budget),
 		"Объём роликов: "+valueOrDash(lead.VideoQuantity),
 		"Пакет: "+adminPackageLabel(lead.SelectedPackage),
+		"Кейсы отправлены: "+valueOrDash(casesSent),
+		"Возражения / вопросы: "+valueOrDash(objections),
+		"Анкета: "+valueOrDash(questionnaireStatus),
 		"",
 		"Намерение клиента: "+adminClientIntent(conversation),
+		"Нерешённые вопросы: "+valueOrDash(unresolvedQuestionForMemory(conversation)),
+		"Рекомендуемый следующий шаг: связаться с клиентом в WhatsApp, подтвердить пакет/формат и следующий производственный шаг.",
 		"Последнее сообщение клиента: "+strings.TrimSpace(conversation.LastIncomingText),
 		"",
 		"Резюме диалога:",
 		strings.TrimSpace(conversation.ConversationSummary),
+		"",
+		"Последние сообщения:",
+		adminRecentConversationLines(conversation, 8),
 		"",
 		"Статус: квалифицирован, передан менеджеру",
 	)
@@ -1962,6 +2010,47 @@ func adminLeadNotificationText(conversation Conversation) string {
 		lines = append(lines, "WhatsApp: "+link)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func adminRecentConversationLines(conversation Conversation, limit int) string {
+	if limit <= 0 {
+		limit = 8
+	}
+	messages := conversation.Messages
+	if len(messages) > limit {
+		messages = messages[len(messages)-limit:]
+	}
+	lines := make([]string, 0, len(messages))
+	for _, message := range messages {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		role := "Клиент"
+		if message.Role == "assistant" || message.Role == "bot" {
+			role = "Бот"
+		}
+		if isHandoffAcknowledgementText(content) {
+			content = "Подтверждение клиенту: бриф получен, менеджер продолжит в чате."
+		}
+		lines = append(lines, role+": "+previewText(content, 180))
+	}
+	if len(lines) == 0 {
+		return valueOrDash("")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isHandoffAcknowledgementText(content string) bool {
+	content = strings.TrimSpace(content)
+	for _, language := range []string{"ru", "kk", "en"} {
+		if content == BriefCollectedText(language) ||
+			content == HumanHandoffText(language) ||
+			content == QualifiedLeadHandoffText(language, LeadState{}) {
+			return true
+		}
+	}
+	return false
 }
 
 func adminClientName(conversation Conversation) string {
@@ -2308,6 +2397,7 @@ func conversationPromptJSON(conversation Conversation) string {
 		TransferredToManager bool                `json:"transferred_to_manager"`
 		MissingFields        []string            `json:"missing_fields"`
 		ConversationSummary  string              `json:"conversation_summary"`
+		Memory               CustomerMemory      `json:"persistent_customer_memory"`
 		BriefAsked           bool                `json:"brief_asked"`
 		BriefCollected       bool                `json:"brief_collected"`
 		LastIncomingText     string              `json:"last_incoming_text"`
@@ -2329,6 +2419,7 @@ func conversationPromptJSON(conversation Conversation) string {
 		TransferredToManager: conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero(),
 		MissingFields:        append([]string(nil), conversation.MissingFields...),
 		ConversationSummary:  strings.TrimSpace(conversation.ConversationSummary),
+		Memory:               cloneCustomerMemory(conversation.Memory),
 		BriefAsked:           conversation.BriefAsked || conversation.Lead.BriefRequested,
 		BriefCollected:       conversation.BriefCollected || conversation.Lead.BriefCompleted,
 		LastIncomingText:     strings.TrimSpace(conversation.LastIncomingText),
@@ -2388,10 +2479,80 @@ func normalizeVideoFileForSend(fileName string, allowedPackageVideos map[string]
 }
 
 func (s *Service) videoFilePath(fileName string) string {
+	path, _, err := s.resolveVideoFilePath(fileName)
+	if err == nil {
+		return path
+	}
 	if aiWorkPath := normalizeAIWorkVideoPath(fileName); aiWorkPath != "" {
 		return aiWorkPath
 	}
 	return filepath.Join(s.videoDir, strings.TrimSpace(filepath.Base(fileName)))
+}
+
+func (s *Service) resolveVideoFilePath(fileName string) (string, os.FileInfo, error) {
+	fileName = strings.TrimSpace(fileName)
+	normalized := normalizeVideoFileForSend(fileName, map[string]struct{}{
+		VideoLevel1: {}, VideoLevel2: {}, VideoLevel3: {}, VideoLevel4: {},
+	})
+	if normalized == "" {
+		return "", nil, fmt.Errorf("video file is not in the allowed catalogue: %s", fileName)
+	}
+	candidates := make([]string, 0, 3)
+	if aiWorkPath := normalizeAIWorkVideoPath(normalized); aiWorkPath != "" {
+		candidates = append(candidates, filepath.FromSlash(aiWorkPath))
+		if strings.TrimSpace(s.videoDir) != "" {
+			candidates = append(candidates, filepath.Join(filepath.Dir(filepath.Clean(s.videoDir)), filepath.FromSlash(aiWorkPath)))
+		}
+	} else {
+		candidates = append(candidates, filepath.Join(s.videoDir, filepath.Base(normalized)))
+	}
+	var lastErr error
+	for _, candidate := range dedupePathCandidates(candidates) {
+		if strings.ToLower(filepath.Ext(candidate)) != ".mp4" {
+			lastErr = fmt.Errorf("unsupported video extension: %s", filepath.Ext(candidate))
+			continue
+		}
+		info, err := os.Stat(candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if info.IsDir() {
+			lastErr = fmt.Errorf("video path is a directory")
+			continue
+		}
+		file, err := os.Open(candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_ = file.Close()
+		return candidate, info, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("video path could not be resolved")
+	}
+	if len(candidates) > 0 {
+		return candidates[0], nil, lastErr
+	}
+	return "", nil, lastErr
+}
+
+func dedupePathCandidates(candidates []string) []string {
+	seen := make(map[string]struct{}, len(candidates))
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(strings.TrimSpace(candidate))
+		if candidate == "" || candidate == "." {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		result = append(result, candidate)
+	}
+	return result
 }
 
 func needsPortfolioExamplesBeforeFormatQuestion(message string) bool {
@@ -3092,8 +3253,29 @@ func (s *Service) sendRelevantAIWorkExamples(ctx context.Context, chatID string,
 	if err := s.sendAndRemember(ctx, chatID, intro, StagePortfolioSent, selectedLevelFromConversation(conversation)); err != nil {
 		return err
 	}
-	_, err := s.sendVideosWithCaptions(ctx, chatID, files, language, false, captions)
-	return err
+	sent, err := s.sendVideosWithCaptions(ctx, chatID, files, language, false, captions)
+	if err != nil {
+		return err
+	}
+	if sent == 0 {
+		latest, snapshotErr := s.store.Snapshot(ctx, chatID)
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		s.warn("relevant portfolio examples were selected but no videos were sent; falling back to package examples",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Strings("video_files", files),
+		)
+		return s.presentPortfolioAndPackages(ctx, chatID, language, latest, analysis)
+	}
+	latest, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if latest.QuestionnaireOfferSent || latest.QuestionnaireSent || latest.Lead.BriefRequested {
+		return nil
+	}
+	return s.sendQuestionnaireOffer(ctx, chatID, language, selectedLevelFromConversation(latest))
 }
 
 func relevantAIWorkIntroText(language string, lead LeadState, selection AIWorkSelection) string {

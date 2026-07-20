@@ -391,8 +391,8 @@ func TestBriefRequestedRealOptOutStopsSilently(t *testing.T) {
 	if conversation.StopReason != StopReasonCustomerOptOut || conversation.StoppedBy != StoppedByCustomer {
 		t.Fatalf("stop metadata = reason=%q by=%q", conversation.StopReason, conversation.StoppedBy)
 	}
-	if len(sender.messages) != 0 {
-		t.Fatalf("opt-out should not send client/admin handoff messages: %#v", sender.messages)
+	if len(sender.messages) != 1 || sender.messages[0] != StopConfirmationText("ru") {
+		t.Fatalf("opt-out confirmation mismatch: %#v", sender.messages)
 	}
 	if !conversation.NextFollowupAt.IsZero() || conversation.FollowupStage != "" {
 		t.Fatalf("follow-up was not cancelled after opt-out: next=%v stage=%q", conversation.NextFollowupAt, conversation.FollowupStage)

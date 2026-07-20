@@ -10,7 +10,7 @@ import (
 
 const (
 	AIWorksDir        = "ai-works"
-	maxAIWorkExamples = 3
+	maxAIWorkExamples = 2
 )
 
 type AIWorkVideo struct {
@@ -121,18 +121,18 @@ var aiWorksByCategory = map[string][]string{
 
 var aiWorkCategoryTags = map[string][]string{
 	"app":         {"app", "mobile_app", "taxi", "service"},
-	"auto":        {"auto", "car", "cars", "dealership"},
+	"auto":        {"auto", "car", "cars", "dealership", "detailing"},
 	"b2b":         {"b2b", "business", "service", "repair", "supermarket", "wholesale"},
 	"event":       {"event", "concert", "show", "performance"},
 	"fashion":     {"fashion", "clothing", "clothes", "apparel", "brand"},
 	"factories":   {"factory", "factories", "production", "industrial", "plant", "equipment", "machinery", "construction"},
 	"horeca":      {"food", "restaurant", "horeca", "cafe", "burger", "tea", "product", "fmcg", "grocery", "dairy"},
-	"interior":    {"interior", "renovation", "home", "construction", "repair"},
+	"interior":    {"interior", "renovation", "home", "construction", "repair", "furniture", "kitchen"},
 	"led_ekran":   {"led", "screen", "digital", "outdoor_ads"},
 	"logistics":   {"logistics", "delivery", "transport"},
 	"medicine":    {"medicine", "medical", "clinic", "healthcare"},
 	"real_estate": {"real_estate", "property", "land", "realtor", "apartment", "construction", "drone", "visualization"},
-	"retail":      {"retail", "shop", "store", "product", "perfume", "generator"},
+	"retail":      {"retail", "shop", "store", "product", "perfume", "generator", "chemicals"},
 	"sport":       {"sport", "football", "fitness"},
 	"tourism":     {"tourism", "travel", "hotel", "resort", "tour", "umrah"},
 }
@@ -153,17 +153,22 @@ func selectAIWorkExamples(lead LeadState, analysis CustomerAnalysis, limit int) 
 	}
 	scored := make([]scoredVideo, 0, 32)
 	order := 0
-	for _, category := range sortedAIWorkCategories() {
-		for _, fileName := range aiWorksByCategory[category] {
-			video := aiWorkVideo(category, fileName)
-			score := aiWorkMatchScore(tags, video.Tags)
-			if score == 0 {
-				order++
-				continue
-			}
-			scored = append(scored, scoredVideo{video: video, score: score, order: order})
+	for _, portfolioCase := range portfolioCaseCatalogue() {
+		if !portfolioCase.IsActive {
 			order++
+			continue
 		}
+		video := aiWorkVideoFromCase(portfolioCase)
+		score := aiWorkMatchScore(tags, portfolioCase.Tags)
+		if semanticCloseCase(tags, portfolioCase.Tags) {
+			score++
+		}
+		if score == 0 {
+			order++
+			continue
+		}
+		scored = append(scored, scoredVideo{video: video, score: score, order: order})
+		order++
 	}
 	if len(scored) == 0 {
 		return AIWorkSelection{}
@@ -263,8 +268,17 @@ func portfolioTagsFromText(text string) []string {
 	if containsAny(normalized, []string{"авто", "машин", "автосалон", "car", "cars", "dealership"}) {
 		add("auto", "car")
 	}
+	if containsAny(normalized, []string{"автохим", "авто хим", "автокосмет", "детейлинг", "detailing", "auto chemicals", "car care"}) {
+		add("auto", "detailing", "chemicals", "product")
+	}
+	if containsAny(normalized, []string{"мебел", "кухн", "шкаф", "диван", "furniture", "kitchen"}) {
+		add("interior", "furniture", "home", "product")
+	}
 	if containsAny(normalized, []string{"одеж", "бренд одежды", "fashion", "clothing", "clothes", "apparel"}) {
 		add("fashion", "clothing")
+	}
+	if containsAny(normalized, []string{"детская одеж", "балалар киім", "балалар киімі", "children clothing", "kids clothes"}) {
+		add("fashion", "clothing", "children")
 	}
 	if containsAny(normalized, []string{"ресторан", "кафе", "еда", "доставка еды", "бургер", "чай", "food", "restaurant", "horeca"}) {
 		add("food", "restaurant", "horeca")
@@ -278,8 +292,8 @@ func portfolioTagsFromText(text string) []string {
 	if containsAny(normalized, []string{"оптом", "оптов", "опт ", "wholesale", "дистрибь", "дистриб"}) || normalized == "опт" {
 		add("wholesale", "b2b", "business")
 	}
-	if containsAny(normalized, []string{"медицин", "клиник", "стоматолог", "medicine", "medical", "clinic"}) {
-		add("medicine", "medical")
+	if containsAny(normalized, []string{"медицин", "клиник", "стоматолог", "стоматология", "имплантац", "medicine", "medical", "clinic", "dentistry", "dental"}) {
+		add("medicine", "medical", "dentistry")
 	}
 	if containsAny(normalized, []string{"логист", "доставка", "груз", "transport", "logistics"}) {
 		add("logistics")
@@ -315,8 +329,16 @@ func normalizePortfolioTags(tags []string) []string {
 			tag = "fashion"
 		case "medical", "healthcare", "clinic":
 			tag = "medicine"
+		case "dentistry", "dental", "стоматология", "имплантация":
+			tag = "medicine"
 		case "machinery":
 			tag = "equipment"
+		case "kitchens", "kitchen_furniture", "custom_furniture", "мебель", "кухни", "кухня":
+			tag = "furniture"
+		case "детская_одежда", "kids_clothes", "children_clothing":
+			tag = "fashion"
+		case "auto_chemicals", "автохимия", "автохим", "car_care":
+			tag = "chemicals"
 		case "сливочное_масло", "масло", "молочная_продукция", "молочные_продукты", "молочка", "dairy_products", "butter", "cheese", "milk":
 			tag = "dairy"
 		case "продукты_питания", "продукты", "еда", "питание", "food_products":
@@ -370,6 +392,12 @@ func aiWorkVideo(category string, fileName string) AIWorkVideo {
 		tags = append(tags, "food", "restaurant", "horeca", "product", "fmcg")
 	case "supermarket.mp4":
 		tags = append(tags, "food", "grocery", "fmcg", "retail", "product", "wholesale")
+	case "chemicals.mp4":
+		tags = append(tags, "chemicals", "product", "retail", "auto", "detailing")
+	case "curtains.mp4", "curtains_2.mp4", "interior.mp4", "interior_2.mp4", "renovation.mp4", "smart_home.mp4":
+		tags = append(tags, "interior", "home", "furniture", "renovation")
+	case "window.mp4", "gates.mp4", "fence.mp4", "stretch_ceiling.mp4", "stretch_ceiling_2.mp4", "stretch_ceiling_3.mp4":
+		tags = append(tags, "interior", "home", "construction", "repair")
 	case "presentation.mp4", "safety_briefing.mp4", "thermal_power_plant.mp4":
 		tags = append(tags, "industrial", "equipment", "machinery", "construction")
 	}
@@ -379,6 +407,46 @@ func aiWorkVideo(category string, fileName string) AIWorkVideo {
 		Path:     aiWorkPath(category, fileName),
 		Tags:     normalizePortfolioTags(tags),
 	}
+}
+
+func aiWorkVideoFromCase(item PortfolioCase) AIWorkVideo {
+	videoPath := normalizeAIWorkVideoPath(item.VideoPath)
+	if videoPath == "" {
+		return AIWorkVideo{}
+	}
+	parts := strings.Split(videoPath, "/")
+	if len(parts) != 3 {
+		return AIWorkVideo{}
+	}
+	return AIWorkVideo{
+		Category: parts[1],
+		FileName: parts[2],
+		Path:     videoPath,
+		Tags:     normalizePortfolioTags(item.Tags),
+	}
+}
+
+func semanticCloseCase(requested []string, candidate []string) bool {
+	requested = normalizePortfolioTags(requested)
+	candidate = normalizePortfolioTags(candidate)
+	pairs := [][2]string{
+		{"chemicals", "auto"},
+		{"detailing", "auto"},
+		{"furniture", "interior"},
+		{"kitchen", "interior"},
+		{"children", "fashion"},
+		{"dentistry", "medicine"},
+		{"clinic", "medicine"},
+	}
+	for _, pair := range pairs {
+		if stringInSlice(pair[0], requested) && stringInSlice(pair[1], candidate) {
+			return true
+		}
+		if stringInSlice(pair[1], requested) && stringInSlice(pair[0], candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func aiWorkPath(category string, fileName string) string {

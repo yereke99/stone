@@ -64,6 +64,8 @@ func (s *Service) handleLLMPrimaryConversation(ctx context.Context, chatID strin
 	wantsExamples := llmWantsPortfolioExamples(conversation, analysis)
 	sendPricing := strings.TrimSpace(analysis.RecommendedAction) == "send_price_options" &&
 		!conversation.PackagesSent && !conversation.Lead.OfferSent
+	sendQuestionnaire := strings.TrimSpace(analysis.RecommendedAction) == "send_questionnaire" &&
+		!conversation.QuestionnaireOfferSent && !conversation.QuestionnaireSent && !conversation.Lead.BriefRequested
 
 	s.info("llm primary conversation reply selected",
 		zap.String("chat_hash", chatFingerprint(chatID)),
@@ -73,6 +75,7 @@ func (s *Service) handleLLMPrimaryConversation(ctx context.Context, chatID strin
 		zap.String("next_action", analysis.NextAction),
 		zap.Bool("wants_portfolio_examples", wantsExamples),
 		zap.Bool("send_pricing", sendPricing),
+		zap.Bool("send_questionnaire", sendQuestionnaire),
 		zap.Float64("confidence", analysis.Confidence),
 		zap.Strings("portfolio_tags", normalizePortfolioTags(analysis.PortfolioTags)),
 	)
@@ -100,6 +103,15 @@ func (s *Service) handleLLMPrimaryConversation(ctx context.Context, chatID strin
 			return true, err
 		}
 	}
+	if sendQuestionnaire {
+		latest, err := s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return true, err
+		}
+		if err := s.sendQuestionnaireOffer(ctx, chatID, language, selectedLevelFromConversation(latest)); err != nil {
+			return true, err
+		}
+	}
 	return true, nil
 }
 
@@ -110,6 +122,9 @@ func llmPrimaryConversationBlocked(conversation Conversation, analysis CustomerA
 		conversation.QuestionnaireOfferSent ||
 		conversation.Lead.BriefRequested ||
 		conversationIsWaitingForBrief(conversation) {
+		if llmCanAnswerInsideStructuredFlow(analysis) {
+			return false
+		}
 		return true
 	}
 	switch analysis.Intent {
@@ -139,6 +154,29 @@ func llmPrimaryConversationBlocked(conversation Conversation, analysis CustomerA
 		}
 	}
 	return false
+}
+
+func llmCanAnswerInsideStructuredFlow(analysis CustomerAnalysis) bool {
+	if strings.TrimSpace(analysis.ReplyText) == "" {
+		return false
+	}
+	if analysis.WantsQuestionnaire || analysis.ShouldHandoff || analysis.ShouldStop || analysis.SelectedLevel > 0 {
+		return false
+	}
+	switch analysis.Intent {
+	case IntentFAQ,
+		IntentObjection,
+		IntentFeasibilityQuestion,
+		IntentVoiceQuestion,
+		IntentCopyrightQuestion,
+		IntentConfusion,
+		IntentFormatAdvice,
+		IntentPortfolioRequest,
+		IntentNicheSpecificCaseRequest:
+		return true
+	default:
+		return false
+	}
 }
 
 func llmWantsPortfolioExamples(conversation Conversation, analysis CustomerAnalysis) bool {

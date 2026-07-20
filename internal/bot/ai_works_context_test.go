@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yereke99/stone/internal/openai"
 )
 
 func withAIWorksTestRoot(t *testing.T, categories ...string) string {
@@ -142,9 +144,12 @@ func TestCustomerStopBotSuppressesChatAndSkipsFurtherAutomation(t *testing.T) {
 	if !store.IsSuppressedPhoneOrChatID(chatID, NormalizePhone(chatID)) {
 		t.Fatal("chat was not persisted in automation suppression")
 	}
+	if len(sender.messages) != 1 || sender.messages[0] != StopConfirmationText("ru") {
+		t.Fatalf("stop confirmation = %#v", sender.messages)
+	}
 
 	sendText(t, service, chatID, "Здравствуйте, нужен ролик")
-	if len(sender.messages) != 0 || len(sender.files) != 0 {
+	if len(sender.messages) != 1 || len(sender.files) != 0 {
 		t.Fatalf("suppressed chat got automation: messages=%#v files=%#v", sender.messages, sender.files)
 	}
 }
@@ -170,14 +175,69 @@ func TestTourismRequestSendsTourismExamples(t *testing.T) {
 	}
 }
 
+func TestAISalesManagerDecisionSendsTwoRelevantCasesAndQuestionnaire(t *testing.T) {
+	videoDir := withAIWorksTestRoot(t, "interior")
+	sender := &fakeSender{}
+	store := NewConversationStore()
+	niche := "производство кухонь на заказ"
+	product := "кухни на заказ"
+	goal := "получать заявки через таргет"
+	city := "Алматы"
+	ai := &scriptedUnderstandingAI{response: openai.CustomerUnderstanding{
+		Language:          "ru",
+		Intent:            "qualification_answer",
+		MessageMeaning:    "Клиент производит кухни на заказ в Алматы и хочет ролик для таргета, чтобы получать заявки.",
+		ShouldUpdateState: true,
+		Niche:             &niche,
+		ProductOrService:  &product,
+		Goal:              &goal,
+		City:              &city,
+		RecommendedAction: "send_relevant_examples",
+		ReplyText:         "Понял: кухни на заказ в Алматы, цель — заявки через таргет. Сейчас отправлю близкие примеры по интерьерной подаче.",
+		NextAction:        "send_cases",
+		PortfolioTags:     []string{"furniture", "interior", "home", "product"},
+		Confidence:        0.95,
+	}}
+	service := NewService(sender, ai, store, videoDir, PortfolioLinks{}, "auto", nil)
+	chatID := "chat-ai-sales-manager"
+
+	sendText(t, service, chatID, "Здравствуйте, мы производим кухни на заказ в Алматы. Хотим ролик для таргета, чтобы получать заявки.")
+
+	if !ai.analysisCalled {
+		t.Fatal("AI understanding was not called")
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if conversation.Lead.Niche != niche || conversation.Lead.ProductOrService != product || conversation.Lead.Goal != goal || conversation.Lead.City != city {
+		t.Fatalf("lead facts not saved: %#v", conversation.Lead)
+	}
+	if len(sender.files) != 2 {
+		t.Fatalf("sent files = %#v, want exactly two relevant cases", sender.files)
+	}
+	for _, file := range sender.files {
+		if !strings.Contains(file, "ai-works/interior/") {
+			t.Fatalf("non-interior case sent: %#v", sender.files)
+		}
+	}
+	if !conversation.QuestionnaireOfferSent {
+		t.Fatalf("questionnaire offer was not recorded after cases: %#v", conversation)
+	}
+	joined := strings.Join(sender.messages, "\n")
+	if strings.Contains(strings.ToLower(joined), "какая у вас ниша") || strings.Contains(strings.ToLower(joined), "что прода") {
+		t.Fatalf("bot repeated answered qualification question: %#v", sender.messages)
+	}
+	if conversation.Memory.Niche.Value != niche || conversation.Memory.Niche.Status != FactStatusConfirmed {
+		t.Fatalf("memory niche = %#v", conversation.Memory.Niche)
+	}
+}
+
 func TestAIWorkExamplesLimitFromEnv(t *testing.T) {
 	lead := LeadState{Niche: "туризм / travel", Goal: "привлечь клиентов"}
 	analysis := CustomerAnalysis{PortfolioTags: []string{"tourism"}}
 
 	t.Setenv("AI_WORK_EXAMPLES_LIMIT", "")
 	defaultSelection := selectAIWorkExamples(lead, analysis, aiWorkExamplesLimit())
-	if len(defaultSelection.Videos) != 3 {
-		t.Fatalf("default AI work examples = %d, want 3", len(defaultSelection.Videos))
+	if len(defaultSelection.Videos) != 2 {
+		t.Fatalf("default AI work examples = %d, want 2", len(defaultSelection.Videos))
 	}
 
 	t.Setenv("AI_WORK_EXAMPLES_LIMIT", "0")

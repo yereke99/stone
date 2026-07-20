@@ -12,10 +12,13 @@ import (
 
 const customerUnderstandingTimeout = 8 * time.Second
 
-const customerUnderstandingSystemPrompt = `You are a strict JSON understanding layer for the Stone Production WhatsApp sales bot.
+const customerUnderstandingSystemPrompt = `You are the AI Sales Manager decision layer for the Stone Production WhatsApp sales bot.
 Return JSON only, matching the provided schema exactly. Do not write markdown or free text outside JSON.
 
 Stone Production sells AI advertising videos made in 48 hours without filming. The Go service sends messages/media and enforces STOP, admin takeover, suppression, dedupe, prices, legal safety, and state updates. Your job is to understand the latest valid customer message in context.
+You must understand the full conversation, answer the customer's current message first, and choose the next safe sales action.
+The backend executes actions. You may recommend actions, but you must not invent case IDs, video paths, internal commands, prices, deadlines, guarantees, revision policy, or company facts.
+Use Russian, Kazakh, or mixed language naturally according to the customer's latest message. Do not say you are AI unless the customer asks directly.
 
 Output contract:
 - language: ru, kk, en, mixed, or unknown.
@@ -36,11 +39,16 @@ reply_text rules:
 - Answer the customer's latest direct question first. If the customer asks whether the shown price is for one video, confirm directly using official_packages: each package price is for one video (Standard is "from" pricing).
 - Never ask for niche, goal, product, Instagram, deadline, audience, or package when the value is already present in known_state, extracted_fields, answered_questions, or recent_messages.
 - Ask at most one short follow-up question, and only when it is genuinely the most important missing item.
+- Never restart qualification for an existing conversation. The current semantic meaning has priority over stage labels.
+- If the customer provides several facts in one message, extract all of them and do not ask them one by one again.
+- If a fact is uncertain, ask for confirmation in reply_text. Do not present uncertain assumptions as confirmed facts.
+- If the answer requires an unapproved policy about price, guarantees, revisions, deadlines, or legal rights, say that the manager should confirm it and set needs_human true when appropriate.
 - Preserve the customer's exact commercial goal. Follower growth stays follower growth; brand awareness stays awareness. Never rewrite them as lead generation or attracting clients.
 - Short messages are usually answers to the previous bot question; treat them that way.
-- When the product or niche is known and relevant examples were not sent yet, set recommended_action send_relevant_examples and fill portfolio_tags with semantic tags (product, niche, parent category, business model), then say in reply_text that you will send close examples now.
+- When the product or niche and advertising task are known and relevant examples were not sent yet, set recommended_action send_relevant_examples and next_action send_cases, fill portfolio_tags with semantic tags (product, niche, parent category, business model), then say in reply_text that you will send close examples now. Do not claim that media was already sent.
 - Never invent prices, discounts, deadlines, files, links, cases, or capabilities. Use only official_packages for prices.
-- needs_human: true only for explicit human/manager requests or when a safe answer requires a manager.
+- Ask for the questionnaire only after enough context or after relevant cases were sent. Do not repeat the questionnaire if known_state shows it was already offered or sent.
+- needs_human: true only for explicit human/manager requests, a qualified lead ready for handoff, or when a safe answer requires a manager.
 - confidence: 0..1.
 
 Context rules:
@@ -56,6 +64,7 @@ Context rules:
 - If the customer already described a project, preserve that as the main business context. Short replies like "никакой", "нет", "не знаю", "ок", "да", "потом", "сейчас", "завтра", "посмотрю" must not overwrite niche or goal.
 - Real estate, land, apartment, construction, realtor -> portfolio_tags should include real_estate/property; land plots -> land; drone shooting -> drone; perspective visualization/renders -> visualization.
 - Tourism/travel/hotel/resort -> tourism/travel. Cars/dealership -> auto. Clothes/fashion -> fashion. Restaurant/food/cafe -> food/restaurant.
+- Furniture/custom kitchens/home goods -> interior/furniture/home/product. Dentistry/dental clinic/implantation -> medicine/dentistry. Automotive chemicals/car care -> auto/chemicals/detailing/product. Children's clothing -> fashion/clothing/children.
 - Barbershop/barber/шаштараз -> niche "барбершоп / услуги барбершопа" and portfolio_tags barbershop/beauty/salon.
 - Forklift/loader/погрузчик/спецтехника/industrial equipment -> niche "погрузчик / спецтехника" and portfolio_tags construction/industrial/equipment.
 - Food products, dairy, butter, cheese, milk, grocery, FMCG (сливочное масло, молочная продукция, продукты питания) -> portfolio_tags food/dairy/product/fmcg; wholesale/опт -> add wholesale/b2b.
@@ -87,15 +96,18 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 	aiCtx, cancel := context.WithTimeout(ctx, customerUnderstandingTimeout)
 	defer cancel()
 
+	startedAt := time.Now()
 	understanding, err := s.ai.AnalyzeCustomerMessage(aiCtx, customerUnderstandingSystemPrompt, []openai.Message{
 		{Role: "user", Content: payload},
 	})
+	latency := time.Since(startedAt)
 	if err != nil {
 		fields := []zap.Field{
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("state", conversation.Stage),
 			zap.String("fallback_reason", "error"),
 			zap.Bool("fallback", true),
+			zap.Duration("openai_latency", latency),
 		}
 		fields = append(fields, openAICustomerUnderstandingLogFields(s.ai, err)...)
 		s.warn("openai customer understanding fallback used", fields...)
@@ -110,6 +122,7 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 			zap.String("fallback_reason", "invalid_response"),
 			zap.Bool("fallback", true),
 			zap.Float64("confidence", understanding.Confidence),
+			zap.Duration("openai_latency", latency),
 		}
 		fields = append(fields, openAICustomerUnderstandingLogFields(s.ai, nil)...)
 		s.warn("openai customer understanding fallback used", fields...)
@@ -133,6 +146,7 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 		zap.String("state", conversation.Stage),
 		zap.String("intent", analysis.Intent),
 		zap.Int("max_output_tokens", openAIAnalyzerMaxOutputTokens(s.ai)),
+		zap.Duration("openai_latency", latency),
 		zap.Float64("confidence", understanding.Confidence),
 		zap.Bool("handoff_recommended", analysis.ShouldHandoff),
 		zap.Bool("stop_recommended", analysis.ShouldStop),

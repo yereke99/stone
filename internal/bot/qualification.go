@@ -262,6 +262,7 @@ func refreshConversationDerivedState(conversation *Conversation) {
 	conversation.BriefCollected = conversation.Lead.BriefCompleted
 	conversation.MissingFields = requiredLeadMissingFields(*conversation)
 	conversation.ConversationSummary = buildConversationSummary(*conversation)
+	refreshCustomerMemory(conversation)
 	if conversation.HandedOffToOwner && conversation.TransferredAt.IsZero() && !conversation.AdminNotifiedAt.IsZero() {
 		conversation.TransferredAt = conversation.AdminNotifiedAt
 	}

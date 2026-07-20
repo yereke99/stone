@@ -127,6 +127,17 @@ func NonTextFallbackText(language string) string {
 	}
 }
 
+func StopConfirmationText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Түсіндім, автоматты хабарламалар тоқтатылды. Енді бот сізге жазбайды."
+	case "en":
+		return "Understood, automated messages have been stopped. The bot will not write to you anymore."
+	default:
+		return "Понял, автоматические сообщения остановлены. Бот больше не будет вам писать."
+	}
+}
+
 func LanguageChoiceText() string {
 	return "Тілді таңдаңыз / Выберите язык / Choose language:\n1) Қазақша\n2) Русский\n3) English"
 }

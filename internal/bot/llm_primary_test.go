@@ -170,9 +170,12 @@ func TestScreenshotConversationRegression(t *testing.T) {
 			t.Fatalf("bot repeated the full qualification question at index %d: %q\nall messages: %#v", i, message, sender.messages)
 		}
 	}
-	last := sender.messages[len(sender.messages)-1]
-	if !strings.Contains(last, "сливочное масло") {
-		t.Fatalf("final reply is not the LLM reply: %q", last)
+	joinedMessages := strings.Join(sender.messages, "\n")
+	if !strings.Contains(joinedMessages, "сливочное масло") {
+		t.Fatalf("LLM reply was not sent before follow-up: %#v", sender.messages)
+	}
+	if !conversation.QuestionnaireOfferSent {
+		t.Fatalf("questionnaire was not offered after relevant cases: %#v", conversation)
 	}
 }
 

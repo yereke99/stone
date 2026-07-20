@@ -454,7 +454,8 @@ func TestCasesRequestWithQualifiedLeadSendsExamples(t *testing.T) {
 		t.Fatalf("examples were not sent for a qualified lead: %#v", sender.files)
 	}
 	first := sender.messages[0]
-	if !strings.Contains(first, "отправим примеры") || !strings.Contains(first, "мебель") {
+	firstLower := strings.ToLower(first)
+	if !(strings.Contains(firstLower, "отправим примеры") || strings.Contains(firstLower, "отправлю") && strings.Contains(firstLower, "примеры")) || !strings.Contains(first, "мебель") {
 		t.Fatalf("cases acknowledgement is wrong: %q", first)
 	}
 	for _, message := range sender.messages {

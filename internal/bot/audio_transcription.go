@@ -222,12 +222,38 @@ func (s *Service) sendAudioTranscriptionFallback(ctx context.Context, chatID str
 	return s.sendAndRemember(ctx, chatID, AudioTranscriptionFallbackText(language), StageDiagnosis, 0)
 }
 
+func (s *Service) handleIncomingAudioFallback(ctx context.Context, chatID string, msg IncomingMessage, language string) error {
+	placeholder := mediaIncomingText(msg.TypeMessage, "")
+	if err := s.store.AppendMessage(ctx, chatID, "user", placeholder); err != nil {
+		return err
+	}
+	if err := s.store.MarkIncoming(ctx, chatID, placeholder); err != nil {
+		return err
+	}
+	conversation, err := s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if isConversationClosedForAutomation(conversation) {
+		s.info("incoming audio saved without automation reply",
+			automationSilenceFields(chatID, conversation, "protected_conversation_state_audio")...,
+		)
+		return nil
+	}
+	stage := mediaFallbackStage(conversation)
+	reply := AudioTranscriptionFallbackText(language)
+	if strings.TrimSpace(conversation.LastReplyText) == reply {
+		return nil
+	}
+	return s.sendAndRemember(ctx, chatID, reply, stage, selectedLevelFromConversation(conversation), qualificationMissingFields(conversation.Lead)...)
+}
+
 func AudioTranscriptionFallbackText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Дауыстық хабарламаны анық түсіне алмадым. Өтінемін, мәтін түрінде жазып жіберіңіз — бірден көмектесемін."
+		return "Кешіріңіз, қазір дауыстық хабарламаларды өңдей алмаймын. Өтінемін, мәтінмен жазыңыз, мен бірден көмектесемін."
 	default:
-		return "Не смог разобрать голосовое сообщение. Напишите, пожалуйста, текстом — я сразу помогу."
+		return "Извините, сейчас я не могу обработать голосовые сообщения. Пожалуйста, напишите сообщение текстом, и я сразу помогу."
 	}
 }
 

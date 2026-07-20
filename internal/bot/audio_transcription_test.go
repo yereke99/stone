@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -28,7 +27,7 @@ func (ai *fakeAudioAI) TranscribeAudio(ctx context.Context, filePath string, mod
 	return ai.transcript, nil
 }
 
-func TestAudioTranscriptEntersNormalUnderstandingFlow(t *testing.T) {
+func TestAudioMessageAsksForTextWithoutTranscription(t *testing.T) {
 	audioURL := testAudioDownloadURL(t, []byte("fake oga"))
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -47,25 +46,21 @@ func TestAudioTranscriptEntersNormalUnderstandingFlow(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage() error = %v", err)
 	}
 
-	if !ai.called || ai.model != "test-transcribe" {
-		t.Fatalf("transcriber called=%v model=%q", ai.called, ai.model)
+	if ai.called || ai.analysisCalled {
+		t.Fatalf("audio reached AI: transcriber=%v analysis=%v", ai.called, ai.analysisCalled)
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Lead.Niche != "барбершоп / услуги барбершопа" {
-		t.Fatalf("niche = %q, want canonical barbershop", conversation.Lead.Niche)
+	if conversation.Lead.Niche != "" || conversation.Lead.Goal != "" {
+		t.Fatalf("audio fallback polluted lead: %#v", conversation.Lead)
 	}
-	if len(conversation.Messages) == 0 || conversation.Messages[0].Content != ai.transcript {
-		t.Fatalf("transcript was not saved as the customer message: %#v", conversation.Messages)
+	if len(conversation.Messages) == 0 || conversation.Messages[0].Content != "[audioMessage]" {
+		t.Fatalf("audio placeholder was not saved: %#v", conversation.Messages)
 	}
 	if len(sender.messages) != 1 {
-		t.Fatalf("messages = %#v, want one follow-up", sender.messages)
+		t.Fatalf("messages = %#v, want one fallback", sender.messages)
 	}
-	reply := strings.ToLower(sender.messages[0])
-	if strings.Contains(reply, "не сатасыз") || strings.Contains(reply, "что прода") {
-		t.Fatalf("audio transcript reply repeated known niche question: %q", sender.messages[0])
-	}
-	if !strings.Contains(reply, "мақсат") {
-		t.Fatalf("audio transcript reply should ask only goal in Kazakh: %q", sender.messages[0])
+	if sender.messages[0] != AudioTranscriptionFallbackText("ru") {
+		t.Fatalf("audio fallback = %q", sender.messages[0])
 	}
 }
 
@@ -86,15 +81,15 @@ func TestAudioTranscriptionFailureAsksForTextWithoutStateOverwrite(t *testing.T)
 	}
 
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Lead.Niche != "" || conversation.Lead.Goal != "" || conversation.LastIncomingText != "" {
+	if conversation.Lead.Niche != "" || conversation.Lead.Goal != "" || conversation.LastIncomingText != "[audioMessage]" {
 		t.Fatalf("failed audio transcription polluted state: %#v", conversation.Lead)
 	}
-	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], "голосовое сообщение") {
+	if len(sender.messages) != 1 || sender.messages[0] != AudioTranscriptionFallbackText("ru") {
 		t.Fatalf("fallback message = %#v", sender.messages)
 	}
 }
 
-func TestAudioStopTranscriptSuppressesWithoutSalesReply(t *testing.T) {
+func TestAudioDoesNotUseTranscriptForStopCommand(t *testing.T) {
 	audioURL := testAudioDownloadURL(t, []byte("fake oga"))
 	sender := &fakeSender{}
 	store, err := NewSQLiteConversationStore(context.Background(), filepath.Join(t.TempDir(), "stone.sqlite"))
@@ -118,15 +113,15 @@ func TestAudioStopTranscriptSuppressesWithoutSalesReply(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage() error = %v", err)
 	}
 
-	if len(sender.messages) != 0 || len(sender.files) != 0 {
-		t.Fatalf("audio STOP got outgoing automation: messages=%#v files=%#v", sender.messages, sender.files)
+	if len(sender.messages) != 1 || sender.messages[0] != AudioTranscriptionFallbackText("ru") || len(sender.files) != 0 {
+		t.Fatalf("audio fallback mismatch: messages=%#v files=%#v", sender.messages, sender.files)
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Stage != ClientStateOptOut || !conversation.Stopped || !conversation.AutomationClosed || !conversation.OptOut {
-		t.Fatalf("audio STOP state = stage=%q stopped=%v closed=%v optout=%v", conversation.Stage, conversation.Stopped, conversation.AutomationClosed, conversation.OptOut)
+	if conversation.Stage == ClientStateOptOut || conversation.Stopped || conversation.AutomationClosed || conversation.OptOut {
+		t.Fatalf("audio transcript unexpectedly stopped automation: stage=%q stopped=%v closed=%v optout=%v", conversation.Stage, conversation.Stopped, conversation.AutomationClosed, conversation.OptOut)
 	}
-	if !store.IsSuppressedPhoneOrChatID(chatID, NormalizePhone(chatID)) {
-		t.Fatal("audio STOP did not persist automation suppression")
+	if store.IsSuppressedPhoneOrChatID(chatID, NormalizePhone(chatID)) {
+		t.Fatal("audio transcript should not persist automation suppression")
 	}
 }
 

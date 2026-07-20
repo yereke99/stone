@@ -1310,8 +1310,8 @@ func TestOptOutStopsMarketingReplies(t *testing.T) {
 	sendText(t, service, chatID, "не интересно")
 	sendText(t, service, chatID, "алло")
 
-	if len(sender.messages) != 1 {
-		t.Fatalf("sent messages after opt-out = %#v, want only opening", sender.messages)
+	if len(sender.messages) != 2 || sender.messages[1] != StopConfirmationText("ru") {
+		t.Fatalf("sent messages after opt-out = %#v, want opening plus stop confirmation", sender.messages)
 	}
 	conversation := snapshotConversation(t, store, chatID)
 	if conversation.Stage != ClientStateOptOut || !conversation.OptOut || !conversation.AutomationClosed || !conversation.Stopped || conversation.HandedOffToOwner {

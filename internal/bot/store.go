@@ -81,6 +81,7 @@ type Conversation struct {
 	AdminOperatorNotifiedAt time.Time
 	TransferredAt           time.Time
 	ConversationSummary     string
+	Memory                  CustomerMemory
 	MissingFields           []string
 	SelectedLevel           int
 	HistoryCheckedAt        time.Time
@@ -1135,7 +1136,24 @@ func cloneConversation(conversation Conversation) Conversation {
 	for messageID, metadata := range conversation.OutgoingPackageMessages {
 		clone.OutgoingPackageMessages[messageID] = metadata
 	}
+	clone.Memory = cloneCustomerMemory(conversation.Memory)
 	clone.MissingFields = append([]string(nil), conversation.MissingFields...)
+	return clone
+}
+
+func cloneCustomerMemory(memory CustomerMemory) CustomerMemory {
+	clone := memory
+	clone.QuestionsAlreadyAsked = append([]string(nil), memory.QuestionsAlreadyAsked...)
+	clone.CustomerObjections = append([]string(nil), memory.CustomerObjections...)
+	clone.CasesSent = append([]string(nil), memory.CasesSent...)
+	clone.CaseVideosSent = append([]string(nil), memory.CaseVideosSent...)
+	clone.OffersSent = append([]string(nil), memory.OffersSent...)
+	if memory.AnswersReceived != nil {
+		clone.AnswersReceived = make(map[string]string, len(memory.AnswersReceived))
+		for field, value := range memory.AnswersReceived {
+			clone.AnswersReceived[field] = value
+		}
+	}
 	return clone
 }
 

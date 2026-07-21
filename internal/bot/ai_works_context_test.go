@@ -210,8 +210,8 @@ func TestAISalesManagerDecisionSendsTwoRelevantCasesAndQuestionnaire(t *testing.
 	if conversation.Lead.Niche != niche || conversation.Lead.ProductOrService != product || conversation.Lead.Goal != goal || conversation.Lead.City != city {
 		t.Fatalf("lead facts not saved: %#v", conversation.Lead)
 	}
-	if len(sender.files) != 2 {
-		t.Fatalf("sent files = %#v, want exactly two relevant cases", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want exactly three relevant cases", sender.files)
 	}
 	for _, file := range sender.files {
 		if !strings.Contains(file, "ai-works/interior/") {
@@ -236,8 +236,8 @@ func TestAIWorkExamplesLimitFromEnv(t *testing.T) {
 
 	t.Setenv("AI_WORK_EXAMPLES_LIMIT", "")
 	defaultSelection := selectAIWorkExamples(lead, analysis, aiWorkExamplesLimit())
-	if len(defaultSelection.Videos) != 2 {
-		t.Fatalf("default AI work examples = %d, want 2", len(defaultSelection.Videos))
+	if len(defaultSelection.Videos) != 3 {
+		t.Fatalf("default AI work examples = %d, want 3", len(defaultSelection.Videos))
 	}
 
 	t.Setenv("AI_WORK_EXAMPLES_LIMIT", "0")

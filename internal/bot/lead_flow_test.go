@@ -102,19 +102,22 @@ func TestServiceConstructionSendsNothing(t *testing.T) {
 func TestNewClientFirstIncomingSendsOpeningOnce(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
 
 	sendText(t, service, "chat-new", "Здравствуйте")
 
 	if len(sender.messages) != 1 {
 		t.Fatalf("sent messages = %d, want 1: %#v", len(sender.messages), sender.messages)
 	}
-	if got := sender.messages[0]; got != QualificationGreetingText("ru") {
+	if got := sender.messages[0]; got != FirstContactWelcomeText("ru") {
 		t.Fatalf("unexpected opening:\n%s", got)
 	}
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want three portfolio videos", sender.files)
+	}
 	conversation := snapshotConversation(t, store, "chat-new")
-	if conversation.Stage != ClientStateAwaitingQualification || !conversation.InitialMessageSent {
-		t.Fatalf("state = %q initial=%v, want awaiting qualification with opening sent", conversation.Stage, conversation.InitialMessageSent)
+	if conversation.Stage != ClientStatePackagesPresented || !conversation.InitialMessageSent || !conversation.PackagesSent {
+		t.Fatalf("state = %q initial=%v packages=%v, want packages presented with opening sent", conversation.Stage, conversation.InitialMessageSent, conversation.PackagesSent)
 	}
 }
 
@@ -264,8 +267,11 @@ func TestFoodFarmProductsExampleRequestAsksOnlyGoal(t *testing.T) {
 	}
 	last := sender.messages[len(sender.messages)-1]
 	lower := strings.ToLower(last)
-	if !strings.Contains(lower, "ai-ролики делаем") || !strings.Contains(lower, "цель") {
-		t.Fatalf("food reply did not answer and ask the goal: %q", last)
+	if !strings.Contains(last, FirstContactWelcomeText("ru")) {
+		t.Fatalf("food first-contact reply missing welcome package: %q", last)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("food first-contact files=%#v, want package videos", sender.files)
 	}
 	if strings.Contains(lower, "срок") || strings.Contains(lower, "когда") {
 		t.Fatalf("food reply asked for launch timing in the first qualification: %q", last)
@@ -899,7 +905,7 @@ func TestDavaiteWithMissingFieldsAsksOnlyMissingFields(t *testing.T) {
 		t.Fatalf("admin was notified for incomplete lead: %#v", sender.messages)
 	}
 	last := sender.messages[len(sender.messages)-1]
-	for _, want := range []string{"нишу", "цель", "пакет"} {
+	for _, want := range []string{"Stone Production", "пакет"} {
 		if !strings.Contains(last, want) {
 			t.Fatalf("missing-field reply %q does not mention %q", last, want)
 		}
@@ -1194,8 +1200,8 @@ func TestDuplicateIncomingMessageIsProcessedOnce(t *testing.T) {
 	if got := countMessagesContaining(sender.messages, "Короткий бриф"); got != 0 {
 		t.Fatalf("brief was sent immediately after duplicate package selection: %d messages=%#v", got, sender.messages)
 	}
-	if len(sender.files) != 1 {
-		t.Fatalf("selected package videos = %d, want 1: %#v", len(sender.files), sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("selected package videos = %d, want first-contact trio: %#v", len(sender.files), sender.files)
 	}
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 0 {
 		t.Fatalf("admin notifications before brief = %d, want 0: %#v", got, sender.messages)
@@ -1297,11 +1303,11 @@ func TestExistingProcessedClientContinuesFromSavedState(t *testing.T) {
 	sendText(t, service, chatID, "мебель, цель продажи, срок через неделю")
 	sendText(t, service, chatID, "сколько стоит стандарт?")
 
-	if countMessagesContaining(sender.messages, "Спасибо за обращение") != 1 {
-		t.Fatalf("opening count = %d, want 1: %#v", countMessagesContaining(sender.messages, "Спасибо за обращение"), sender.messages)
+	if countMessagesContaining(sender.messages, FirstContactWelcomeText("ru")) != 1 {
+		t.Fatalf("opening count = %d, want 1: %#v", countMessagesContaining(sender.messages, FirstContactWelcomeText("ru")), sender.messages)
 	}
 	last := sender.messages[len(sender.messages)-1]
-	if strings.Contains(last, "Спасибо за обращение") || !strings.Contains(last, "75 000") {
+	if strings.Contains(last, FirstContactWelcomeText("ru")) || !strings.Contains(last, "75 000") {
 		t.Fatalf("existing client did not continue from packages state: %q", last)
 	}
 }
@@ -1309,7 +1315,7 @@ func TestExistingProcessedClientContinuesFromSavedState(t *testing.T) {
 func TestOptOutStopsMarketingReplies(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
-	service := newTestService(sender, store, PortfolioLinks{})
+	service := newTestServiceWithVideoDir(sender, store, PortfolioLinks{}, testVideoDir(t))
 	chatID := "chat-optout"
 
 	sendText(t, service, chatID, "Здравствуйте")

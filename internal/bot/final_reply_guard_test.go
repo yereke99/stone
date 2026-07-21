@@ -64,6 +64,19 @@ func TestValidateOutgoingReplyAllowsOfficialPricesAndSafeDroneLanguage(t *testin
 	if result := validateOutgoingReply(QuestionnaireOfferText("ru"), ClientStateAwaitingQuestionnaireConfirm, Conversation{Language: "ru", QuestionnaireOfferSent: true}); result.Prevented {
 		t.Fatalf("questionnaire offer was blocked: %#v", result)
 	}
+	firstContact := FirstContactWelcomeText("ru")
+	if result := validateOutgoingReply(firstContact, ClientStateAwaitingQualification, greetingConversation); result.Prevented {
+		t.Fatalf("first-contact welcome package was blocked: %#v", result)
+	}
+	firstContactWithFAQ := FAQAnswerText(faqDuration, "ru") + "\n\n" + FirstContactWelcomeText("ru")
+	if result := validateOutgoingReply(firstContactWithFAQ, ClientStateAwaitingQualification, greetingConversation); result.Prevented {
+		t.Fatalf("first-contact FAQ welcome package was blocked: %#v", result)
+	}
+	for _, language := range []string{"kk", "en"} {
+		if result := validateOutgoingReply(FirstContactWelcomeText(language), ClientStateAwaitingQualification, Conversation{Language: language}); result.Prevented {
+			t.Fatalf("first-contact welcome package %s was blocked: %#v", language, result)
+		}
+	}
 	drone := "Мы можем подготовить AI-визуализацию/ролик под продажу. Если нужна именно реальная съёмка с дрона, это лучше отдельно уточнить с менеджером."
 	if result := validateOutgoingReply(drone, ClientStateAwaitingQualification, conversation); result.Prevented {
 		t.Fatalf("safe drone reply was blocked: %#v", result)

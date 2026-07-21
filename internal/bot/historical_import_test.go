@@ -96,8 +96,11 @@ func TestUnknownContactStillStartsNormalFlowAfterHistoricalImport(t *testing.T) 
 
 	sendText(t, service, "77029990000@c.us", "Здравствуйте")
 
-	if len(sender.messages) != 1 || sender.messages[0] != QualificationGreetingText("ru") {
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], FirstContactWelcomeText("ru")) {
 		t.Fatalf("new contact flow changed: %#v", sender.messages)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("new contact files=%#v, want first-contact package videos", sender.files)
 	}
 }
 

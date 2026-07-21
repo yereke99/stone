@@ -76,6 +76,8 @@ var videoQuantityRangePattern = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,3})\s*
 var videoQuantitySingleWithUnitPattern = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,3})\s*(?:ролик(?:а|ов)?|видео|креатив(?:а|ов)?|штук|шт\.?)(?:$|[^0-9])`)
 var bareVideoQuantityRangePattern = regexp.MustCompile(`^(\d{1,3})[-–—](\d{1,3})$`)
 var bareVideoQuantitySinglePattern = regexp.MustCompile(`^\d{1,3}$`)
+var moneyAmountPattern = regexp.MustCompile(`(?:^|[^0-9])(\d{1,3}(?:[\s\x{00a0}]\d{3})+|\d{4,7})\s*(?:тг|тенге|kzt|₸)?(?:$|[^0-9])`)
+var moneyThousandsPattern = regexp.MustCompile(`(?:^|[^0-9])(\d{2,3})\s*(?:к|k|тыс)(?:$|[^a-zа-я0-9])`)
 var urlLikePattern = regexp.MustCompile(`(?i)\b(?:https?://|www\.|(?:instagram|instagr\.am|tiktok|youtube|youtu\.be|wa|taplink|linktr|2gis)\.)[^\s<>"']+|(?:^|\s)@[a-z0-9_.]{3,}`)
 
 type LeadState struct {
@@ -237,6 +239,7 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 	confusionQuestion := isConfusionText(normalized)
 	voiceQuestion := isVoiceQuestion(normalized)
 	copyrightQuestion := isCopyrightQuestion(normalized)
+	faqKey, faqDetected := detectFAQIntent(text)
 	formatPreference := detectLikedFormats(normalized)
 	negativeSelection := isNegativeFormatSelection(normalized)
 	analysis.NicheCorrection = isNicheCorrectionText(normalized)
@@ -404,6 +407,9 @@ func AnalyzeCustomerMessage(text string, current LeadState, language string) Cus
 		} else {
 			analysis.Intent = IntentPortfolioRequest
 		}
+	case faqDetected:
+		analysis.Intent = IntentFAQ
+		analysis.FAQKey = faqKey
 	case isDurationQuestion(normalized):
 		analysis.Intent = IntentFAQ
 		analysis.FAQKey = faqDuration
@@ -1330,17 +1336,22 @@ func aiExperienceLabel(used bool) string {
 
 func extractBudget(text string) string {
 	normalized := normalizeForAnalysis(text)
-	compact := compactNumericText(normalized)
-	switch {
-	case strings.Contains(compact, "35000") || priceShortcutSelected(normalized, "35"):
-		return "35 000 тг"
-	case strings.Contains(compact, "50000") || priceShortcutSelected(normalized, "50"):
-		return "50 000 тг"
-	case strings.Contains(compact, "75000") || priceShortcutSelected(normalized, "75"):
-		return "от 75 000 тг"
-	default:
+	if !containsAny(normalized, []string{"бюджет", "budget", "қаражат"}) {
 		return ""
 	}
+	if match := moneyAmountPattern.FindStringSubmatch(normalized); len(match) > 1 {
+		return normalizeMoneyAmount(match[1]) + " тг"
+	}
+	if match := moneyThousandsPattern.FindStringSubmatch(normalized); len(match) > 1 {
+		return strings.TrimSpace(match[1]) + " 000 тг"
+	}
+	return ""
+}
+
+func normalizeMoneyAmount(value string) string {
+	value = strings.ReplaceAll(value, "\u00a0", " ")
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.TrimSpace(value)
 }
 
 func extractTargetAudience(text string) string {
@@ -2199,22 +2210,18 @@ func extractSelectedLevel(text string) int {
 	if normalized == "" {
 		return 0
 	}
-	compact := compactNumericText(normalized)
 
 	switch {
 	case containsAny(normalized, []string{"стандарт", "премиум", "standard", "premium", "стандартный"}) ||
 		containsAny(normalized, []string{"третий вариант", "3 вариант", "номер 3", "третий", "третье"}) ||
-		strings.Contains(compact, "75000") ||
 		priceShortcutSelected(normalized, "75"):
 		return 3
 	case containsAny(normalized, []string{"базов", "basic", "базалык", "базалық"}) ||
 		containsAny(normalized, []string{"второй вариант", "2 вариант", "номер 2", "второй", "второе"}) ||
-		strings.Contains(compact, "50000") ||
 		priceShortcutSelected(normalized, "50"):
 		return 2
 	case containsAny(normalized, []string{"тест", "test", "тестовый", "тестілік"}) ||
 		containsAny(normalized, []string{"первый вариант", "1 вариант", "номер 1", "первый", "первое"}) ||
-		strings.Contains(compact, "35000") ||
 		priceShortcutSelected(normalized, "35"):
 		return 1
 	default:

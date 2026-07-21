@@ -399,8 +399,8 @@ func TestQuantityDiscountScenarioUsesIndividualTermsAndQuantityContext(t *testin
 	if strings.Contains(lower, "что прода") || strings.Contains(lower, "какая у вас ниша") || strings.Contains(lower, "для какой ниши") {
 		t.Fatalf("quantity reply repeated known niche question: %q", last)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("discount scenario should not send videos before goal is known: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("discount scenario files=%#v, want one first-contact package only", sender.files)
 	}
 	for _, reply := range sender.messages {
 		assertNoForbiddenQuantityDiscountPhrases(t, reply)
@@ -446,8 +446,8 @@ func TestApproximatelyReferenceQuestionIsNotPortfolioRequest(t *testing.T) {
 	if !strings.Contains(last, "можем адаптировать") {
 		t.Fatalf("feasibility reply mismatch: %q", last)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("примерно question sent portfolio videos: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("примерно question files=%#v, want first-contact package videos", sender.files)
 	}
 }
 
@@ -534,8 +534,8 @@ func TestNicheSpecificCaseRequestAnswersWithoutGenericPortfolioFallback(t *testi
 	if !strings.Contains(strings.ToLower(last), "запчаст") || !strings.Contains(last, "близкие примеры") {
 		t.Fatalf("niche-specific case reply mismatch: %q", last)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("niche-specific case question sent generic videos: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("niche-specific case files=%#v, want first-contact videos", sender.files)
 	}
 }
 
@@ -591,8 +591,10 @@ func TestEnabledLLMReplySendsStructuredReplyAndContext(t *testing.T) {
 	}}
 	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
 	service.llmReply.Enabled = true
+	chatID := "chat-llm-reply"
+	seedPresentedPackageMessages(store, chatID)
 
-	sendText(t, service, "chat-llm-reply", "Продаем чай")
+	sendText(t, service, chatID, "Продаем чай")
 
 	if !ai.called {
 		t.Fatal("LLM reply generator was not called")
@@ -615,8 +617,10 @@ func TestLLMReplyErrorFallsBackWithoutSilence(t *testing.T) {
 	ai := &scriptedUnderstandingAI{replyErr: errors.New("reply timeout")}
 	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
 	service.llmReply.Enabled = true
+	chatID := "chat-llm-fallback"
+	seedPresentedPackageMessages(store, chatID)
 
-	sendText(t, service, "chat-llm-fallback", "Продаем чай")
+	sendText(t, service, chatID, "Продаем чай")
 
 	if !ai.called {
 		t.Fatal("LLM reply generator was not called")
@@ -637,8 +641,10 @@ func TestInvalidLLMFinalReplyFallsBackToBackendText(t *testing.T) {
 	}}
 	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
 	service.llmReply.Enabled = true
+	chatID := "chat-llm-validation-fallback"
+	seedPresentedPackageMessages(store, chatID)
 
-	sendText(t, service, "chat-llm-validation-fallback", "Продаем чай")
+	sendText(t, service, chatID, "Продаем чай")
 
 	if !ai.called {
 		t.Fatal("LLM final reply generator was not called")

@@ -19,11 +19,15 @@ func TestFAQBeforeQualificationAnswersAndAsksQualification(t *testing.T) {
 		t.Fatalf("messages = %#v, want one FAQ reply", sender.messages)
 	}
 	got := sender.messages[0]
-	if !strings.Contains(got, FAQAnswerText(faqAIProduction, "ru")) || !strings.Contains(got, QualificationQuestionsText("ru")) {
-		t.Fatalf("FAQ before qualification did not answer and continue correctly:\n%s", got)
+	if !strings.Contains(got, FAQAnswerText(faqAIProduction, "ru")) || !strings.Contains(got, FirstContactWelcomeText("ru")) {
+		t.Fatalf("FAQ before qualification did not answer and send welcome package text:\n%s", got)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("FAQ before qualification sent videos: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("FAQ before qualification files=%#v, want first-contact package videos", sender.files)
+	}
+	conversation := snapshotConversation(t, store, "chat-faq-new")
+	if conversation.Stage != ClientStatePackagesPresented || !conversation.PackagesSent || conversation.AutoPackagesSentAt.IsZero() {
+		t.Fatalf("FAQ first-contact package not persisted: stage=%q packages=%v sent_at=%v", conversation.Stage, conversation.PackagesSent, conversation.AutoPackagesSentAt)
 	}
 }
 

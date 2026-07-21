@@ -63,7 +63,8 @@ func (ai *fakeAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt strin
 func TestFirstRussianMessageSendsQualificationGreeting(t *testing.T) {
 	sender := &fakeSender{}
 	ai := &fakeAI{}
-	service := NewService(sender, ai, NewConversationStore(), "./video", PortfolioLinks{}, "auto", nil)
+	store := NewConversationStore()
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil)
 
 	err := service.HandleIncomingMessage(context.Background(), IncomingMessage{
 		ChatID: "chat",
@@ -73,17 +74,24 @@ func TestFirstRussianMessageSendsQualificationGreeting(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage() error = %v", err)
 	}
 
-	if !ai.analysisCalled {
-		t.Fatal("OpenAI understanding must be called before choosing the first qualification reply")
+	if ai.analysisCalled {
+		t.Fatal("simple first greeting must not depend on OpenAI understanding")
 	}
 	if ai.called {
-		t.Fatal("OpenAI sales reply generation must not be called for the first qualification greeting")
+		t.Fatal("OpenAI sales reply generation must not be called for the first welcome package")
 	}
 	if len(sender.messages) != 1 {
 		t.Fatalf("sent messages = %d, want 1", len(sender.messages))
 	}
-	if got := sender.messages[0]; got != QualificationGreetingText("ru") {
-		t.Fatalf("unexpected greeting:\n%s", got)
+	if got := sender.messages[0]; got != FirstContactWelcomeText("ru") {
+		t.Fatalf("unexpected welcome:\n%s", got)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want three portfolio videos", sender.files)
+	}
+	conversation := snapshotConversation(t, store, "chat")
+	if conversation.Stage != ClientStatePackagesPresented || !conversation.PackagesSent || conversation.AutoPackagesSentAt.IsZero() {
+		t.Fatalf("welcome package was not persisted: stage=%q packages=%v sent_at=%v", conversation.Stage, conversation.PackagesSent, conversation.AutoPackagesSentAt)
 	}
 }
 
@@ -100,8 +108,11 @@ func TestUnknownFirstMessageDefaultsToRussianWithoutLanguageQuestion(t *testing.
 	if sender.messages[0] == LanguageChoiceText() {
 		t.Fatalf("bot asked language choice: %#v", sender.messages)
 	}
-	if !strings.Contains(sender.messages[0], "Что продаёте") {
+	if !strings.Contains(sender.messages[0], "Stone Production") || !strings.Contains(sender.messages[0], "35 000") {
 		t.Fatalf("unexpected default ru reply: %#v", sender.messages)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want three portfolio videos", sender.files)
 	}
 }
 
@@ -119,10 +130,7 @@ func TestLanguageFollowsLatestCustomerMessageInAutoMode(t *testing.T) {
 	if len(sender.messages) < 2 {
 		t.Fatalf("sent messages = %d, want at least 2", len(sender.messages))
 	}
-	if len(sender.captions) == 0 {
-		t.Fatalf("package videos were not sent: messages=%#v", sender.messages)
-	}
-	if got := sender.captions[0]; !strings.Contains(got, "Тестовый") || !strings.Contains(got, "35 000") {
+	if got := sender.messages[len(sender.messages)-1]; !strings.Contains(got, "35 000") || strings.Contains(got, "Қай формат") {
 		t.Fatalf("language did not follow latest Russian message, got:\n%s", got)
 	}
 }
@@ -141,7 +149,7 @@ func TestRepliesUseDetectedLanguageWithoutAskingChoice(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sender := &fakeSender{}
-			service := NewService(sender, &fakeAI{}, NewConversationStore(), "./video", PortfolioLinks{}, "auto", nil)
+			service := NewService(sender, &fakeAI{}, NewConversationStore(), testVideoDir(t), PortfolioLinks{}, "auto", nil)
 
 			if err := service.HandleIncomingMessage(context.Background(), IncomingMessage{ChatID: "chat-" + tt.name, Text: tt.text}); err != nil {
 				t.Fatalf("HandleIncomingMessage() error = %v", err)
@@ -154,6 +162,9 @@ func TestRepliesUseDetectedLanguageWithoutAskingChoice(t *testing.T) {
 			}
 			if !strings.Contains(sender.messages[0], tt.contains) {
 				t.Fatalf("reply = %q, want containing %q", sender.messages[0], tt.contains)
+			}
+			if len(sender.files) != 3 {
+				t.Fatalf("sent files = %#v, want three portfolio videos", sender.files)
 			}
 		})
 	}

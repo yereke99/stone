@@ -36,6 +36,9 @@ func validateOutgoingReply(message string, stage string, conversation Conversati
 			Prevented: true,
 		}
 	}
+	if isFirstContactWelcomePackageReply(message) {
+		return outgoingReplyValidation{Message: message, Status: "passed"}
+	}
 	if echoesNegativeSelectionAsNiche(message) {
 		return outgoingReplyValidation{
 			Message:   nonRepeatedNextQuestionText(conversation.Language, conversation),

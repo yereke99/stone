@@ -152,8 +152,14 @@ func TestLLMDecisionUpdatesManyLeadFieldsInOneProductionMessage(t *testing.T) {
 		lead.Budget != "около 150 000 тенге" || lead.VideoQuantity != "1" {
 		t.Fatalf("lead fields not updated together: %#v", lead)
 	}
-	if got := sender.messages[len(sender.messages)-1]; got != reply || strings.Contains(strings.ToLower(got), "какая у вас ниша") {
-		t.Fatalf("customer reply not LLM/non-repeating: %q", got)
+	if ai.calls != 1 {
+		t.Fatalf("OpenAI understanding calls = %d, want 1 for rich first message", ai.calls)
+	}
+	if got := sender.messages[len(sender.messages)-1]; got != FirstContactWelcomeText("ru") || strings.Contains(strings.ToLower(got), "какая у вас ниша") {
+		t.Fatalf("customer reply was not the required first-contact package: %q", got)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("first-contact package did not send approved videos: %#v", sender.files)
 	}
 }
 
@@ -270,10 +276,20 @@ func TestLLMDecisionSeparatesContactFromCompanyAndABATSURegression(t *testing.T)
 	if len(lead.ProductFeatures) != 2 {
 		t.Fatalf("product features not stored: %#v", lead.ProductFeatures)
 	}
-	adminMessage := firstMessageContaining(sender.messages, "Новый квалифицированный лид WhatsApp")
-	if adminMessage == "" {
-		t.Fatalf("admin notification was not sent: %#v", sender.messages)
+	if ai.calls != 1 {
+		t.Fatalf("OpenAI understanding calls = %d, want 1 for rich first message", ai.calls)
 	}
+	if got := sender.messages[len(sender.messages)-1]; got != FirstContactWelcomeText("kk") {
+		t.Fatalf("customer reply was not the required first-contact package: %q", got)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("first-contact package did not send approved videos: %#v", sender.files)
+	}
+	adminMessage := firstMessageContaining(sender.messages, "Новый квалифицированный лид WhatsApp")
+	if adminMessage != "" {
+		t.Fatalf("admin notification should wait until first-contact package and qualification are complete:\n%s", adminMessage)
+	}
+	adminMessage = adminLeadNotificationText(conversation, "test")
 	for _, want := range []string{
 		"Компания / бренд: ABAT SU",
 		"Ниша: filtered bottled drinking water production and sales",

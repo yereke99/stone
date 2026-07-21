@@ -27,7 +27,7 @@ func (ai *fakeAudioAI) TranscribeAudio(ctx context.Context, filePath string, mod
 	return ai.transcript, nil
 }
 
-func TestAudioMessageAsksForTextWithoutTranscription(t *testing.T) {
+func TestNewAudioMessageReceivesFirstContactWelcomePackage(t *testing.T) {
 	audioURL := testAudioDownloadURL(t, []byte("fake oga"))
 	sender := &fakeSender{}
 	store := NewConversationStore()
@@ -57,14 +57,14 @@ func TestAudioMessageAsksForTextWithoutTranscription(t *testing.T) {
 		t.Fatalf("audio placeholder was not saved: %#v", conversation.Messages)
 	}
 	if len(sender.messages) != 1 {
-		t.Fatalf("messages = %#v, want one fallback", sender.messages)
+		t.Fatalf("messages = %#v, want one welcome", sender.messages)
 	}
-	if sender.messages[0] != AudioTranscriptionFallbackText("ru") {
-		t.Fatalf("audio fallback = %q", sender.messages[0])
+	if sender.messages[0] != FirstContactWelcomeText("ru") || len(sender.files) != 3 {
+		t.Fatalf("audio welcome mismatch: messages=%#v files=%#v", sender.messages, sender.files)
 	}
 }
 
-func TestAudioTranscriptionFailureAsksForTextWithoutStateOverwrite(t *testing.T) {
+func TestNewAudioWithoutDownloadURLReceivesWelcomeWithoutStateOverwrite(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	service := newAudioTestService(t, sender, store, &fakeAudioAI{})
@@ -84,8 +84,8 @@ func TestAudioTranscriptionFailureAsksForTextWithoutStateOverwrite(t *testing.T)
 	if conversation.Lead.Niche != "" || conversation.Lead.Goal != "" || conversation.LastIncomingText != "[audioMessage]" {
 		t.Fatalf("failed audio transcription polluted state: %#v", conversation.Lead)
 	}
-	if len(sender.messages) != 1 || sender.messages[0] != AudioTranscriptionFallbackText("ru") {
-		t.Fatalf("fallback message = %#v", sender.messages)
+	if len(sender.messages) != 1 || sender.messages[0] != FirstContactWelcomeText("ru") || len(sender.files) != 3 {
+		t.Fatalf("welcome package = messages=%#v files=%#v", sender.messages, sender.files)
 	}
 }
 
@@ -113,8 +113,8 @@ func TestAudioDoesNotUseTranscriptForStopCommand(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage() error = %v", err)
 	}
 
-	if len(sender.messages) != 1 || sender.messages[0] != AudioTranscriptionFallbackText("ru") || len(sender.files) != 0 {
-		t.Fatalf("audio fallback mismatch: messages=%#v files=%#v", sender.messages, sender.files)
+	if len(sender.messages) != 1 || sender.messages[0] != FirstContactWelcomeText("ru") || len(sender.files) != 3 {
+		t.Fatalf("audio welcome mismatch: messages=%#v files=%#v", sender.messages, sender.files)
 	}
 	conversation := snapshotConversation(t, store, chatID)
 	if conversation.Stage == ClientStateOptOut || conversation.Stopped || conversation.AutomationClosed || conversation.OptOut {

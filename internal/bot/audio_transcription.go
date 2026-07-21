@@ -240,6 +240,9 @@ func (s *Service) handleIncomingAudioFallback(ctx context.Context, chatID string
 		)
 		return nil
 	}
+	if firstContactWelcomePackageRequired(conversation) {
+		return s.sendFirstContactWelcomePackage(ctx, chatID, language, conversation, CustomerAnalysis{Intent: IntentGreeting})
+	}
 	stage := mediaFallbackStage(conversation)
 	reply := AudioTranscriptionFallbackText(language)
 	if strings.TrimSpace(conversation.LastReplyText) == reply {

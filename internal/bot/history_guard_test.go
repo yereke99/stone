@@ -63,18 +63,18 @@ func TestHistoryGuardUnknownChatNoPriorHistoryStartsNewClientFunnel(t *testing.T
 	if history.calls != 1 {
 		t.Fatalf("history calls = %d, want 1", history.calls)
 	}
-	if len(sender.messages) != 1 || sender.messages[0] != QualificationGreetingText("ru") {
-		t.Fatalf("messages = %#v, want qualification greeting", sender.messages)
+	if len(sender.messages) != 1 || sender.messages[0] != FirstContactWelcomeText("ru") {
+		t.Fatalf("messages = %#v, want first-contact welcome", sender.messages)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("files sent = %#v, want none", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("files sent = %#v, want three portfolio videos", sender.files)
 	}
 	conversation := snapshotConversation(t, store, chatID)
 	if conversation.HistoryClassification != HistoryClassificationNewClient || conversation.HistoryDetected {
 		t.Fatalf("history classification = %q detected=%v, want new_client false", conversation.HistoryClassification, conversation.HistoryDetected)
 	}
-	if conversation.Stage != ClientStateAwaitingQualification || !conversation.InitialMessageSent {
-		t.Fatalf("state = %q initial=%v, want awaiting qualification", conversation.Stage, conversation.InitialMessageSent)
+	if conversation.Stage != ClientStatePackagesPresented || !conversation.InitialMessageSent || !conversation.PackagesSent {
+		t.Fatalf("state = %q initial=%v packages=%v, want completed first-contact package", conversation.Stage, conversation.InitialMessageSent, conversation.PackagesSent)
 	}
 }
 
@@ -270,10 +270,10 @@ func TestDelayedPackagesSendOnceForUnansweredNewClient(t *testing.T) {
 		t.Fatalf("ProcessDueDelayedPackages() error = %v", err)
 	}
 	if len(sender.files) != 3 {
-		t.Fatalf("files sent = %#v, want three package videos", sender.files)
+		t.Fatalf("files sent = %#v, want three package videos without repeats", sender.files)
 	}
-	if got := sender.messages[len(sender.messages)-1]; got != FormatQuestionText("ru") {
-		t.Fatalf("format question = %q, want approved text", got)
+	if got := sender.messages[len(sender.messages)-1]; got != FirstContactWelcomeText("ru") {
+		t.Fatalf("welcome text = %q, want approved first-contact text", got)
 	}
 	for i, want := range []string{VideoLevel1, VideoLevel2, VideoLevel3} {
 		if filepath.Base(sender.files[i]) != want {
@@ -317,8 +317,8 @@ func TestDelayedPackagesSkipWhenNewClientRepliedBeforeDue(t *testing.T) {
 	if err := service.ProcessDueDelayedPackages(context.Background(), now); err != nil {
 		t.Fatalf("ProcessDueDelayedPackages() error = %v", err)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("files sent after client replied: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("delayed package repeated files after client replied: %#v", sender.files)
 	}
 }
 

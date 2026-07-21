@@ -119,11 +119,11 @@ func FallbackText(language string) string {
 func OpenAITemporaryFallbackText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Хабарламаңызды алдым. Қазір жүйе жауапты толық талдай алмай тұр. Қысқаша жазыңыз: не нақтылау керек немесе Instagram/сайт жіберіңіз."
+		return "Хабарламаңызды алдым. Stone Production 48 сағатта түсірілімсіз AI-жарнамалық ролик жасайды, баға 35 000 тг бастап. Ролик бойынша қай сұрақты нақтылайын?"
 	case "en":
-		return "I received your message. I cannot analyze the details reliably right now. Please write what you want to clarify or send your Instagram/website."
+		return "I received your message. Stone Production creates AI ad videos in 48 hours without filming, starting from 35,000 KZT. What should I clarify about the video?"
 	default:
-		return "Сообщение получил. Сейчас не могу надёжно разобрать детали. Напишите, пожалуйста, что нужно уточнить, или отправьте Instagram/сайт."
+		return "Сообщение получил. Stone Production делает AI-рекламные ролики за 48 часов без съёмки, стоимость от 35 000 тг. Что уточнить по ролику?"
 	}
 }
 
@@ -161,6 +161,17 @@ func QualificationGreetingText(language string) string {
 		return "Hello! Thanks for reaching out 🙌\n\nWe create AI ad videos in 48 hours without filming, ready to launch ads.\n\nPricing starts from 35,000 KZT.\n\nTo make the video fit your task, please share briefly:\n\n— What do you sell / what is your niche?\n— What is the video goal: leads, sales, or awareness?\n\nYou can also send your Instagram or website 🎯\nAfter that we will suggest the idea and format 🤝"
 	default:
 		return "Здравствуйте! Спасибо за обращение 🙌\n\nСтоимость от 35 000 тг.\n\nЧтобы сделать ролик точно под вашу задачу, напишите, пожалуйста, кратко:\n\n— Что продаёте / какая ниша?\n— Какая цель ролика: заявки, продажи или узнаваемость?\n\nТакже можете отправить Instagram или сайт 🎯\nПосле этого предложим идею и формат ролика 🤝"
+	}
+}
+
+func FirstContactWelcomeText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Сәлеметсіз бе! Stone Production түсірілімсіз 48 сағатта жарнамаға дайын AI-ролик жасайды: сценарий, AI-визуал, дыбыстау/музыка және монтаж. Пакеттер: Test — 35 000 тг, Basic — 50 000 тг, Standard — 75 000 тг бастап. Төменде үш мысал жіберемін. Test, Basic немесе Standard ішінен қайсысын қараймыз?"
+	case "en":
+		return "Hello! Stone Production creates AI ad videos in 48 hours without filming: script, AI visuals, voice/music, and ad-ready editing. Packages: Test — 35,000 KZT, Basic — 50,000 KZT, Standard — from 75,000 KZT. I will send three examples below. Which package feels closest: Test, Basic, or Standard?"
+	default:
+		return "Здравствуйте! Stone Production делает AI-рекламные ролики за 48 часов без съёмки: сценарий, AI-визуал, озвучка/музыка и монтаж под рекламу. Пакеты: Test — 35 000 тг, Basic — 50 000 тг, Standard — от 75 000 тг. Ниже отправлю три примера. Какой пакет ближе по задаче: Test, Basic или Standard?"
 	}
 }
 

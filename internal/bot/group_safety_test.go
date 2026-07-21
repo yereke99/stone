@@ -45,10 +45,10 @@ func TestPrivateWhatsAppCustomerChatStillStartsNormalFlow(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage() error = %v", err)
 	}
 
-	if !ai.analysisCalled {
-		t.Fatal("private chat did not reach AnalyzeCustomerMessage")
+	if ai.analysisCalled {
+		t.Fatal("private first greeting should not depend on AnalyzeCustomerMessage")
 	}
-	if len(sender.messages) != 1 || sender.messages[0] != QualificationGreetingText("ru") {
+	if len(sender.messages) != 1 || sender.messages[0] != FirstContactWelcomeText("ru") || len(sender.files) != 3 {
 		t.Fatalf("private chat flow changed: %#v", sender.messages)
 	}
 }

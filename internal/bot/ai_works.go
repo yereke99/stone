@@ -10,7 +10,7 @@ import (
 
 const (
 	AIWorksDir        = "ai-works"
-	maxAIWorkExamples = 2
+	maxAIWorkExamples = 3
 )
 
 type AIWorkVideo struct {

@@ -356,9 +356,34 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		)
 		return nil
 	}
+	firstContactPackageRequired := firstContactWelcomePackageRequired(conversation) && isFirstContactMeaningfulText(text)
+	firstContactLocalAnalysis := AnalyzeCustomerMessage(text, conversation.Lead, language)
+	if handled, localAnalysis, err := s.handleRequiredFirstContactWelcomePackageBeforeOpenAI(ctx, chatID, text, language, conversation); err != nil {
+		return err
+	} else if handled {
+		return nil
+	} else {
+		firstContactLocalAnalysis = localAnalysis
+	}
 
 	analysis, openAIAnalyzerUsed := s.understandCustomerMessage(ctx, chatID, msg, text, language, conversation)
 	if analysis.TechnicalFallback {
+		if firstContactPackageRequired {
+			latest, snapshotErr := s.store.Snapshot(ctx, chatID)
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			lead := latest.Lead
+			lead.ApplyAnalysis(firstContactLocalAnalysis)
+			if err := s.store.UpdateLead(ctx, chatID, lead); err != nil {
+				return err
+			}
+			latest, snapshotErr = s.store.Snapshot(ctx, chatID)
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			return s.sendFirstContactWelcomePackage(ctx, chatID, language, latest, firstContactLocalAnalysis)
+		}
 		s.warn("technical fallback reply selected because semantic decision is unavailable",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
@@ -434,6 +459,9 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	conversation, err = s.store.Snapshot(ctx, chatID)
 	if err != nil {
 		return err
+	}
+	if firstContactPackageRequired {
+		return s.sendFirstContactWelcomePackage(ctx, chatID, language, conversation, analysis)
 	}
 	s.info("incoming text analyzed",
 		zap.String("chat_hash", chatFingerprint(chatID)),
@@ -1627,50 +1655,61 @@ func (s *Service) sendAndRemember(ctx context.Context, chatID string, message st
 	backendMessage := message
 	backendAction := selectedBackendAction(stage, backendMessage, askedFields, latest)
 	replyAlreadyLLMGenerated := replySourceFromContext(ctx) == replySourceLLMPrimary
+	skipLLMReplyRewrite := isFirstContactWelcomePackageReply(backendMessage)
 	s.info("llm final reply path evaluated",
 		zap.String("chat_hash", chatFingerprint(chatID)),
 		zap.Bool("llm_reply_enabled", s.llmReply.Enabled),
 		zap.Bool("llm_reply_dry_run", s.llmReply.DryRun),
 		zap.Bool("llm_primary_reply", replyAlreadyLLMGenerated),
+		zap.Bool("skip_llm_reply_rewrite", skipLLMReplyRewrite),
 		zap.String("selected_backend_action", backendAction),
 		zap.Any("known_fields_snapshot", knownFieldsSnapshot(latest)),
 		zap.Strings("missing_fields_snapshot", qualificationMissingFields(latest.Lead)),
 	)
-	if llmMessage, called := s.maybeRewriteBackendReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest, backendAction, replyAlreadyLLMGenerated); called {
-		if strings.TrimSpace(llmMessage) != "" {
-			llmValidation := validateOutgoingReply(llmMessage, stage, latest)
-			if !llmValidation.Prevented && llmValidation.Status == "passed" && strings.TrimSpace(llmValidation.Message) != "" {
-				message = strings.TrimSpace(llmValidation.Message)
-				s.info("selected final customer reply",
-					zap.String("chat_hash", chatFingerprint(chatID)),
-					zap.String("stage", stage),
-					zap.String("final_reply_source", "llm"),
-					zap.String("selected_backend_action", backendAction),
-					zap.Bool("llm_reply_validation_passed", true),
-					zap.String("final_reply_preview", previewText(message, 180)),
-				)
+	if llmMessage, called := "", false; !skipLLMReplyRewrite {
+		llmMessage, called = s.maybeRewriteBackendReply(ctx, chatID, backendMessage, stage, selectedLevel, askedFields, latest, backendAction, replyAlreadyLLMGenerated)
+		if called {
+			if strings.TrimSpace(llmMessage) != "" {
+				llmValidation := validateOutgoingReply(llmMessage, stage, latest)
+				if !llmValidation.Prevented && llmValidation.Status == "passed" && strings.TrimSpace(llmValidation.Message) != "" {
+					message = strings.TrimSpace(llmValidation.Message)
+					s.info("selected final customer reply",
+						zap.String("chat_hash", chatFingerprint(chatID)),
+						zap.String("stage", stage),
+						zap.String("final_reply_source", "llm"),
+						zap.String("selected_backend_action", backendAction),
+						zap.Bool("llm_reply_validation_passed", true),
+						zap.String("final_reply_preview", previewText(message, 180)),
+					)
+				} else {
+					s.warn("openai final customer reply rejected by validation; using backend fallback",
+						zap.String("chat_hash", chatFingerprint(chatID)),
+						zap.String("stage", stage),
+						zap.String("selected_backend_action", backendAction),
+						zap.String("final_reply_validation", llmValidation.Status),
+						zap.Bool("fallback_used", true),
+						zap.String("fallback_reason", llmValidation.Status),
+						zap.String("llm_reply_preview", previewText(llmMessage, 180)),
+						zap.String("backend_reply_preview", previewText(backendMessage, 180)),
+					)
+					message = backendMessage
+				}
 			} else {
-				s.warn("openai final customer reply rejected by validation; using backend fallback",
+				s.info("openai final customer reply fallback used",
 					zap.String("chat_hash", chatFingerprint(chatID)),
 					zap.String("stage", stage),
 					zap.String("selected_backend_action", backendAction),
-					zap.String("final_reply_validation", llmValidation.Status),
 					zap.Bool("fallback_used", true),
-					zap.String("fallback_reason", llmValidation.Status),
-					zap.String("llm_reply_preview", previewText(llmMessage, 180)),
-					zap.String("backend_reply_preview", previewText(backendMessage, 180)),
+					zap.String("fallback_reason", "dry_run_or_generation_failed"),
 				)
-				message = backendMessage
 			}
-		} else {
-			s.info("openai final customer reply fallback used",
-				zap.String("chat_hash", chatFingerprint(chatID)),
-				zap.String("stage", stage),
-				zap.String("selected_backend_action", backendAction),
-				zap.Bool("fallback_used", true),
-				zap.String("fallback_reason", "dry_run_or_generation_failed"),
-			)
 		}
+	} else {
+		s.info("openai final customer reply skipped for deterministic first-contact package",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+			zap.String("selected_backend_action", backendAction),
+		)
 	}
 	validation := validateOutgoingReply(message, stage, latest)
 	if validation.Prevented {

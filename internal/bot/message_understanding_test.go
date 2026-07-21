@@ -131,6 +131,16 @@ func TestQuantityDiscountUnderstandingExtractsVideoQuantity(t *testing.T) {
 	}
 }
 
+func TestBudgetDoesNotSelectPackageByEmbeddedOfficialPrice(t *testing.T) {
+	analysis := AnalyzeCustomerMessage("Бюджет около 150 000 тенге", LeadState{}, "ru")
+	if analysis.SelectedLevel != 0 || analysis.PackageInterest != nil || analysis.Intent == IntentPackageSelection {
+		t.Fatalf("budget was mistaken for package selection: %#v", analysis)
+	}
+	if analysis.Budget == nil || !strings.Contains(*analysis.Budget, "150") {
+		t.Fatalf("budget was not extracted correctly: %#v", analysis.Budget)
+	}
+}
+
 func TestSamrukStyleMultilineBriefFactsAreExtracted(t *testing.T) {
 	text := "мед услуги для b2b\nопыт в крупных проектах\nкрупные компании в сфере производства, промышленность, добыча, строительство и тд\nнет оффера"
 
@@ -219,8 +229,11 @@ func TestGreetingDoesNotSaveNicheAndAsksQualification(t *testing.T) {
 	if conversation.Lead.Niche != "" {
 		t.Fatalf("greeting was saved as niche: %q", conversation.Lead.Niche)
 	}
-	if len(sender.messages) != 1 || sender.messages[0] != QualificationGreetingText("ru") {
-		t.Fatalf("greeting reply = %#v, want qualification greeting", sender.messages)
+	if len(sender.messages) != 1 || !strings.Contains(sender.messages[0], FirstContactWelcomeText("ru")) {
+		t.Fatalf("greeting reply = %#v, want first-contact welcome", sender.messages)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("greeting files=%#v, want first-contact package videos", sender.files)
 	}
 }
 
@@ -274,8 +287,11 @@ func TestKazakhForkliftRequestDoesNotAskNicheAgain(t *testing.T) {
 	if strings.Contains(reply, "не сатасыз") || strings.Contains(reply, "қай ниша") || strings.Contains(reply, "что прода") {
 		t.Fatalf("bot asked known niche again: %q", sender.messages[0])
 	}
-	if !strings.Contains(reply, "мақсат") {
-		t.Fatalf("bot should ask only missing goal in Kazakh: %q", sender.messages[0])
+	if !strings.Contains(sender.messages[0], FirstContactWelcomeText("kk")) {
+		t.Fatalf("bot should send Kazakh first-contact package: %q", sender.messages[0])
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("Kazakh first-contact files=%#v, want package videos", sender.files)
 	}
 }
 
@@ -372,8 +388,8 @@ func TestDurationQuestionAnswersFAQAndDoesNotPolluteLead(t *testing.T) {
 	if conversation.Lead.Niche != "" || conversation.Lead.Goal != "" {
 		t.Fatalf("duration question polluted lead fields: %#v", conversation.Lead)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("duration FAQ should not send videos before qualification: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("duration FAQ files=%#v, want first-contact package videos", sender.files)
 	}
 	if len(sender.messages) != 1 {
 		t.Fatalf("messages = %#v, want one FAQ reply", sender.messages)
@@ -384,6 +400,12 @@ func TestDurationQuestionAnswersFAQAndDoesNotPolluteLead(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(reply), "понял, хронометраж") {
 		t.Fatalf("duration question was echoed as qualification data: %q", reply)
+	}
+	if !strings.Contains(reply, FirstContactWelcomeText("ru")) {
+		t.Fatalf("duration first-contact reply missing welcome package text: %q", reply)
+	}
+	if conversation.Stage != ClientStatePackagesPresented || conversation.AutoPackagesSentAt.IsZero() {
+		t.Fatalf("duration first-contact package not persisted: stage=%q sent_at=%v", conversation.Stage, conversation.AutoPackagesSentAt)
 	}
 }
 
@@ -399,15 +421,15 @@ func TestCasesRequestWithoutQualificationAnswersAndAsksFields(t *testing.T) {
 	if conversation.Lead.Niche != "" {
 		t.Fatalf("cases question was saved as niche: %q", conversation.Lead.Niche)
 	}
-	if len(sender.files) != 0 {
-		t.Fatalf("videos were sent before qualification: %#v", sender.files)
+	if len(sender.files) != 3 {
+		t.Fatalf("cases first-contact files=%#v, want package videos", sender.files)
 	}
 	if len(sender.messages) != 1 {
 		t.Fatalf("messages = %#v, want a single cases answer", sender.messages)
 	}
 	reply := sender.messages[0]
-	if !strings.Contains(reply, "кейсы можем отправить") || !strings.Contains(reply, "что продаёте") || !strings.Contains(reply, "цель") {
-		t.Fatalf("cases reply did not answer and ask niche/goal: %q", reply)
+	if !strings.Contains(reply, "кейсы можем отправить") || !strings.Contains(reply, FirstContactWelcomeText("ru")) {
+		t.Fatalf("cases reply did not answer and send welcome package: %q", reply)
 	}
 }
 
@@ -427,8 +449,11 @@ func TestCasesDeliveryQuestionAnswersAndAsksFields(t *testing.T) {
 		t.Fatalf("messages = %#v, want a single delivery answer", sender.messages)
 	}
 	reply := sender.messages[0]
-	if !strings.Contains(reply, "Отправим прямо сюда") || !strings.Contains(reply, "цель") {
-		t.Fatalf("delivery reply did not answer and ask qualification: %q", reply)
+	if !strings.Contains(reply, "Отправим прямо сюда") || !strings.Contains(reply, FirstContactWelcomeText("ru")) {
+		t.Fatalf("delivery reply did not answer and send welcome package: %q", reply)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("delivery first-contact files=%#v, want package videos", sender.files)
 	}
 }
 

@@ -657,7 +657,7 @@ func TestQuotedAnswerPayloadCarriesExpectedQuestionPair(t *testing.T) {
 		Stage:         ClientStatePackagesPresented,
 		LastReplyText: "Какой формат вам понравился?",
 	}
-	payload := customerUnderstandingPayload(IncomingMessage{
+	payload := customerUnderstandingContextPayload(IncomingMessage{
 		IDMessage:       "reply-1",
 		Text:            "Оба хороши",
 		QuotedMessageID: "bot-question-1",

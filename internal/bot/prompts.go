@@ -119,11 +119,11 @@ func FallbackText(language string) string {
 func OpenAITemporaryFallbackText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":
-		return "Хабарламаңызды алдым. Қазір жүйе жауапты толық талдай алмай тұр, сәл кейін қайта жазамын немесе менеджер жалғастырады."
+		return "Хабарламаңызды алдым. Қазір жүйе жауапты толық талдай алмай тұр. Қысқаша жазыңыз: не нақтылау керек немесе Instagram/сайт жіберіңіз."
 	case "en":
-		return "I received your message. I cannot analyze the details reliably right now, so I will get back to you shortly or a manager will continue."
+		return "I received your message. I cannot analyze the details reliably right now. Please write what you want to clarify or send your Instagram/website."
 	default:
-		return "Сообщение получил. Сейчас не могу надёжно разобрать детали, поэтому вернусь с ответом чуть позже или менеджер продолжит диалог."
+		return "Сообщение получил. Сейчас не могу надёжно разобрать детали. Напишите, пожалуйста, что нужно уточнить, или отправьте Instagram/сайт."
 	}
 }
 
@@ -260,6 +260,17 @@ func HumanHandoffText(language string) string {
 		return "Got it. I will pass this to a manager so they can recommend the right format for your product. Meanwhile, you can send Instagram/website or a short description to speed up the proposal."
 	default:
 		return "Понял вас. Передам менеджеру, чтобы он предложил подходящий формат под ваш продукт. Пока можете отправить Instagram/сайт или короткое описание — это поможет быстрее подготовить предложение."
+	}
+}
+
+func ManagerEscalationFallbackText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Сұрағыңызды белгіледім. Қазір менеджерге берілгенін растай алмаймын, бірақ осында көмектесе беремін: Instagram/сайт немесе қысқа сипаттама жіберсеңіз, нақты ұсынысқа дайындаймын."
+	case "en":
+		return "I saved your request. I cannot confirm the manager transfer right now, but I can keep helping here: send your Instagram/website or a short description, and I will prepare the details for an exact proposal."
+	default:
+		return "Запрос зафиксировал. Сейчас не могу подтвердить передачу менеджеру, но продолжу помогать здесь: отправьте Instagram/сайт или короткое описание, и я подготовлю детали для точного предложения."
 	}
 }
 

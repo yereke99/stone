@@ -365,7 +365,7 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		)
 		return s.sendAndRemember(ctx, chatID, analysis.ReplyText, replyStageForConversation(conversation), selectedLevelFromConversation(conversation))
 	}
-	llmPrimaryDecision := openAIAnalyzerUsed && llmDecisionHasPrimaryAction(analysis)
+	llmPrimaryDecision := openAIAnalyzerUsed && analysis.LLMPrimaryDecision
 	if analysis.NumberedQualificationAnswer {
 		extracted := make([]string, 0, 3)
 		if analysis.Niche != nil {
@@ -708,6 +708,27 @@ func (s *Service) presentPortfolioAndPackages(ctx context.Context, chatID string
 	return s.sendPackageVideosAndAskFormat(ctx, chatID, language, false, time.Now().UTC())
 }
 
+func (s *Service) sendPackagePortfolioVideos(ctx context.Context, chatID string, language string, conversation Conversation, allowRepeat bool) (int, error) {
+	if conversation.PackagesSent || conversation.Lead.OfferSent {
+		return 0, nil
+	}
+	sent, err := s.sendVideosWithCaptions(ctx, chatID, []string{VideoLevel1, VideoLevel2, VideoLevel3}, language, allowRepeat, nil)
+	if err != nil {
+		return sent, err
+	}
+	if sent == 0 {
+		s.warn("package portfolio action selected but no videos were sent",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Strings("video_files", []string{VideoLevel1, VideoLevel2, VideoLevel3}),
+		)
+		return sent, nil
+	}
+	if err := s.store.UpdateState(context.WithoutCancel(ctx), chatID, ClientStatePackagesPresented, selectedLevelFromConversation(conversation)); err != nil {
+		return sent, err
+	}
+	return sent, nil
+}
+
 func (s *Service) handleQuantityDiscount(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
 	latest, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
@@ -986,7 +1007,35 @@ func (s *Service) completeBriefAndHandoff(ctx context.Context, chatID string, la
 	if qualification := managerQualificationForConversation(conversation); !qualification.Ready {
 		return s.askMissingBeforeManager(ctx, chatID, language, conversation, qualification.Missing)
 	}
-	if err := s.sendAndRemember(ctx, chatID, BriefCollectedText(language), StageHandoffRequired, level, fieldBrief); err != nil {
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.Lead.ReadyForManagerHandoff = true
+		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+		conversation.LeadStatus = LeadStatusHandoffRequired
+	})
+	conversation, err = s.store.Snapshot(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	analysis := CustomerAnalysis{
+		Intent:            IntentBriefAnswer,
+		ReadyForManager:   true,
+		ShouldHandoff:     true,
+		ClientIntent:      "прислал бриф, нужен следующий шаг менеджера",
+		RecommendedAction: "handoff",
+		NextAction:        "handoff",
+	}
+	result, escalationErr := s.executeManagerEscalation(ctx, chatID, analysis, "Клиент прислал бриф, нужен следующий шаг менеджера")
+	if escalationErr != nil || !result.Sent {
+		s.warn("brief manager escalation failed; customer-safe fallback selected",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("escalation_reason", result.Reason),
+			zap.Bool("manager_notification_sent", result.Sent),
+			zap.Error(escalationErr),
+		)
+		s.markManagerEscalationFailed(context.WithoutCancel(ctx), chatID)
+		return s.sendAndRemember(ctx, chatID, ManagerEscalationFallbackText(language), StageBriefRequested, level, fieldBrief)
+	}
+	if err := s.sendAndRemember(ctx, chatID, BriefCollectedText(language), ClientStateHandedOff, level, fieldBrief); err != nil {
 		return err
 	}
 	return s.cancelFollowups(ctx, chatID)
@@ -1010,14 +1059,9 @@ func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language 
 		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, handoffNote)
 		conversation.Lead.BriefCompleted = true
 		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.ReadyForManagerHandoff = true
 		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
 		conversation.LeadStatus = LeadStatusHandoffRequired
-		conversation.HandedOffToOwner = true
-		conversation.AutomationClosed = true
-		conversation.Stopped = true
-		if conversation.TransferredAt.IsZero() {
-			conversation.TransferredAt = time.Now().UTC()
-		}
 	})
 	conversation, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
@@ -1025,6 +1069,25 @@ func (s *Service) sendHumanHandoff(ctx context.Context, chatID string, language 
 	}
 	if level == 0 {
 		level = selectedLevelFromConversation(conversation)
+	}
+	analysis := CustomerAnalysis{
+		Intent:            IntentHumanRequest,
+		ReadyForManager:   true,
+		ShouldHandoff:     true,
+		ClientIntent:      "просит менеджера",
+		RecommendedAction: "handoff",
+		NextAction:        "handoff",
+	}
+	result, escalationErr := s.executeManagerEscalation(ctx, chatID, analysis, "Клиент попросил менеджера или живого оператора")
+	if escalationErr != nil || !result.Sent {
+		s.warn("human request manager escalation failed; customer-safe fallback selected",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("escalation_reason", result.Reason),
+			zap.Bool("manager_notification_sent", result.Sent),
+			zap.Error(escalationErr),
+		)
+		s.markManagerEscalationFailed(context.WithoutCancel(ctx), chatID)
+		return s.sendAndRemember(ctx, chatID, ManagerEscalationFallbackText(language), replyStageForConversation(conversation), level)
 	}
 	return s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level)
 }
@@ -1136,14 +1199,9 @@ func (s *Service) sendQualifiedLeadHandoff(ctx context.Context, chatID string, l
 		conversation.Lead.Notes = appendBriefText(conversation.Lead.Notes, handoffNote)
 		conversation.Lead.BriefCompleted = true
 		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.ReadyForManagerHandoff = true
 		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
 		conversation.LeadStatus = LeadStatusHandoffRequired
-		conversation.HandedOffToOwner = true
-		conversation.AutomationClosed = true
-		conversation.Stopped = true
-		if conversation.TransferredAt.IsZero() {
-			conversation.TransferredAt = time.Now().UTC()
-		}
 	})
 	conversation, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
@@ -1151,6 +1209,25 @@ func (s *Service) sendQualifiedLeadHandoff(ctx context.Context, chatID string, l
 	}
 	if level == 0 {
 		level = selectedLevelFromConversation(conversation)
+	}
+	analysis := CustomerAnalysis{
+		Intent:            IntentReadyToOrder,
+		ReadyForManager:   true,
+		ShouldHandoff:     true,
+		ClientIntent:      "квалифицированный лид готов к передаче менеджеру",
+		RecommendedAction: "handoff",
+		NextAction:        "handoff",
+	}
+	result, escalationErr := s.executeManagerEscalation(ctx, chatID, analysis, "Квалифицированный лид готов к передаче менеджеру")
+	if escalationErr != nil || !result.Sent {
+		s.warn("qualified lead manager escalation failed; customer-safe fallback selected",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("escalation_reason", result.Reason),
+			zap.Bool("manager_notification_sent", result.Sent),
+			zap.Error(escalationErr),
+		)
+		s.markManagerEscalationFailed(context.WithoutCancel(ctx), chatID)
+		return s.sendAndRemember(ctx, chatID, ManagerEscalationFallbackText(language), replyStageForConversation(conversation), level)
 	}
 	return s.sendAndRemember(ctx, chatID, QualifiedLeadHandoffText(language, conversation.Lead), ClientStateHandedOff, level)
 }
@@ -1847,35 +1924,61 @@ func (s *Service) sendVideosWithCaptions(ctx context.Context, chatID string, fil
 	return sent, nil
 }
 
+type managerEscalationResult struct {
+	Sent        bool
+	AlreadySent bool
+	Reason      string
+}
+
 func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage string) {
+	if _, err := s.sendManagerEscalationNotification(ctx, chatID, stage, ""); err != nil {
+		s.warn("admin notification flow failed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("stage", stage),
+			zap.Error(err),
+		)
+	}
+}
+
+func (s *Service) executeManagerEscalation(ctx context.Context, chatID string, analysis CustomerAnalysis, reason string) (managerEscalationResult, error) {
+	if strings.TrimSpace(reason) == "" {
+		conversation, err := s.store.Snapshot(ctx, chatID)
+		if err == nil {
+			reason = managerEscalationReasonFromAnalysis(analysis, conversation)
+		}
+	}
+	return s.sendManagerEscalationNotification(ctx, chatID, StageHandoffRequired, reason)
+}
+
+func (s *Service) sendManagerEscalationNotification(ctx context.Context, chatID string, stage string, reason string) (managerEscalationResult, error) {
+	result := managerEscalationResult{Reason: strings.TrimSpace(reason)}
+	if stage != StageHandoffRequired && stage != StageBriefCollected && stage != ClientStateHandedOff {
+		return result, nil
+	}
 	if len(s.adminChatIDs) == 0 {
-		return
+		return result, fmt.Errorf("manager notification is not configured")
 	}
 	if isUnsafeCustomerWhatsAppChatID(chatID) {
 		s.info("admin notification skipped because source chat is a WhatsApp group",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("stage", stage),
 		)
-		return
+		return result, nil
 	}
 	if s.isAutomationSuppressed(chatID) {
 		s.logAutomationSuppressionSkip("admin notification skipped because chat is in automation suppression list",
 			chatID,
 			zap.String("stage", stage),
 		)
-		return
+		return result, nil
 	}
-	if stage != StageHandoffRequired && stage != StageBriefCollected && stage != ClientStateHandedOff {
-		return
-	}
-
 	conversation, err := s.store.Snapshot(ctx, chatID)
 	if err != nil {
 		s.warn("admin notification snapshot failed",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.Error(err),
 		)
-		return
+		return result, err
 	}
 	operatorRequest := isOperatorRequestText(conversation.LastIncomingText)
 
@@ -1891,10 +1994,12 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 			zap.Bool("operator_request", operatorRequest),
 			zap.Error(err),
 		)
-		return
+		return result, err
 	}
 	if sent {
-		return
+		result.Sent = true
+		result.AlreadySent = true
+		return result, nil
 	}
 
 	qualification := managerQualificationForConversation(conversation)
@@ -1918,28 +2023,35 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 				current.Lead.LeadStatus = LeadStatusHot
 			}
 		})
-		return
+		return result, fmt.Errorf("manager escalation skipped because lead is incomplete: missing %s", strings.Join(qualification.Missing, ", "))
 	}
 
 	if normalizeLeadStatus(conversation.LeadStatus) != LeadStatusHandoffRequired &&
 		normalizeLeadStatus(conversation.Lead.LeadStatus) != LeadStatusHandoffRequired {
-		return
+		return result, fmt.Errorf("manager escalation skipped because lead status is not handoff_required")
 	}
 
-	message := adminLeadNotificationText(conversation)
+	if result.Reason == "" {
+		result.Reason = managerEscalationReasonFromConversation(conversation)
+	}
+	message := adminLeadNotificationText(conversation, result.Reason)
 	sentAny := false
+	var firstSendErr error
 	for _, adminChatID := range s.adminChatIDs {
 		if !canSendToWhatsAppChat(adminChatID, WhatsAppPurposeManagerNotification, s.adminChatIDs) {
 			s.blockOutgoingWhatsAppGroupMessage(adminChatID, WhatsAppPurposeManagerNotification)
 			continue
 		}
 		if err := s.sendManagerWhatsAppMessage(ctx, adminChatID, message); err != nil {
+			if firstSendErr == nil {
+				firstSendErr = err
+			}
 			s.warn("admin notification send failed",
 				zap.String("admin_chat_hash", chatFingerprint(adminChatID)),
 				zap.String("client_chat_hash", chatFingerprint(chatID)),
 				zap.Error(err),
 			)
-			return
+			continue
 		}
 		incrementOutgoingCount(ctx)
 		if err := s.store.LogOutgoingMessage(ctx, adminChatID, "text", message); err != nil {
@@ -1956,7 +2068,10 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 		sentAny = true
 	}
 	if !sentAny {
-		return
+		if firstSendErr != nil {
+			return result, firstSendErr
+		}
+		return result, fmt.Errorf("manager notification was not sent to any configured admin chat")
 	}
 
 	if operatorRequest {
@@ -1970,10 +2085,63 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 			zap.Bool("operator_request", operatorRequest),
 			zap.Error(err),
 		)
+		return result, err
+	}
+	result.Sent = true
+	return result, nil
+}
+
+func managerEscalationReasonFromAnalysis(analysis CustomerAnalysis, conversation Conversation) string {
+	switch {
+	case analysis.Intent == IntentHumanRequest:
+		return "Клиент попросил менеджера или живого оператора"
+	case analysis.Intent == IntentReadyToOrder:
+		return "Клиент готов продолжить оформление заказа"
+	case analysis.Intent == IntentBriefAnswer:
+		return "Клиент прислал данные для обработки менеджером"
+	case analysis.Intent == IntentNegativeReaction || analysis.Frustrated:
+		return "Клиент выразил недовольство, нужна реакция менеджера"
+	case strings.TrimSpace(analysis.ClientIntent) != "":
+		return strings.TrimSpace(analysis.ClientIntent)
+	case strings.TrimSpace(analysis.RecommendedNextStep) != "":
+		return strings.TrimSpace(analysis.RecommendedNextStep)
+	default:
+		return managerEscalationReasonFromConversation(conversation)
 	}
 }
 
-func adminLeadNotificationText(conversation Conversation) string {
+func managerEscalationReasonFromConversation(conversation Conversation) string {
+	if containsHumanRequest(normalizeForAnalysis(conversation.LastIncomingText)) {
+		return "Клиент попросил менеджера или живого оператора"
+	}
+	if containsReadySignal(conversation.LastIncomingText) {
+		return "Клиент готов продолжить оформление заказа"
+	}
+	if looksLikePriceQuestion(normalizeForAnalysis(conversation.LastIncomingText)) {
+		return "Клиент запросил индивидуальный или точный расчёт стоимости"
+	}
+	if summary := strings.TrimSpace(conversation.Lead.ManagerSummary); summary != "" {
+		return summary
+	}
+	return "Лид требует внимания менеджера"
+}
+
+func (s *Service) markManagerEscalationFailed(ctx context.Context, chatID string) {
+	s.store.Update(chatID, func(conversation *Conversation) {
+		conversation.HandedOffToOwner = false
+		conversation.AutomationClosed = false
+		conversation.Stopped = false
+		conversation.TransferredAt = time.Time{}
+		if normalizeLeadStatus(conversation.LeadStatus) == LeadStatusHandoffRequired {
+			conversation.LeadStatus = LeadStatusHot
+		}
+		if normalizeLeadStatus(conversation.Lead.LeadStatus) == LeadStatusHandoffRequired {
+			conversation.Lead.LeadStatus = LeadStatusHot
+		}
+	})
+}
+
+func adminLeadNotificationText(conversation Conversation, reason string) string {
 	lead := conversation.Lead
 	memory := conversation.Memory
 	caseIDs := append([]string{}, memory.CasesSent...)
@@ -2035,6 +2203,7 @@ func adminLeadNotificationText(conversation Conversation) string {
 		"Анкета: "+valueOrUnknown(questionnaireStatus),
 		"",
 		"Намерение клиента: "+adminClientIntent(conversation),
+		"Причина передачи: "+valueOrUnknown(reason),
 		"Нерешённые вопросы: "+valueOrUnknown(adminUnresolvedQuestions(conversation)),
 		"Рекомендуемый следующий шаг: "+valueOrUnknown(recommendedNextStep),
 		"Последнее сообщение клиента: "+valueOrUnknown(strings.TrimSpace(conversation.LastIncomingText)),

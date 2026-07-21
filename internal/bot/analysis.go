@@ -210,6 +210,7 @@ type CustomerAnalysis struct {
 	AnsweredQuestions           []AnsweredQuestion `json:"answered_questions,omitempty"`
 	NicheCorrection             bool               `json:"-"`
 	TechnicalFallback           bool               `json:"-"`
+	LLMPrimaryDecision          bool               `json:"-"`
 }
 
 type AnsweredQuestion struct {

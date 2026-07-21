@@ -18,9 +18,9 @@ Return JSON only, matching the schema exactly. Do not write markdown or text out
 Stone Production sells AI advertising videos made in about 48 hours without filming. The backend handles WhatsApp delivery, dedupe, STOP/admin suppression, portfolio file sending, official package prices, persistence, and manager notifications. Your job is to understand the latest client message in full context and return one structured decision that drives all normal actions.
 
 Always reason semantically from:
-- current_message: the latest incoming client message and the only source of new client facts;
-- recent_messages: up to 10 previous messages in chronological order with roles client, bot, manager, or system;
-- known_state: already collected/confirmed lead data, dialogue stage, questionnaire status, sent portfolio/videos, unanswered questions, and previous manager handoff state;
+- the chronological OpenAI chat messages after this system prompt: up to 10 relevant dialogue messages, where client messages are role user and bot messages are role assistant;
+- the latest user-role message: the only source of new client facts;
+- dynamic_backend_context: already collected/confirmed lead data, dialogue stage, questionnaire status, sent portfolio/videos, unanswered questions, previous manager handoff state, quoted context, official packages, service information, and available portfolio tags;
 - official_packages and service_information: approved pricing/capability constraints;
 - portfolio_catalog: available local example tags. You choose semantic search tags, not file paths.
 
@@ -38,9 +38,11 @@ Core decision rules:
 - Advertising goal is the goal of the requested video/campaign, not merely the company's general mission.
 - The bot does not need every possible field before handoff. If company/product/niche/request and intent to proceed are clear enough, ready_for_manager can be true with missing items left unresolved.
 - If the client asks for examples or examples would naturally move the sale forward, set should_send_portfolio true and return portfolio_search_tags. Say you will send examples now, but do not claim they were already sent.
+- If the client asks what services Stone Production provides and the price, answer with the service description and approved starting/package prices in customer_reply, set should_send_portfolio true, and ask at most one follow-up such as niche or Instagram/website.
 - Use manager_summary and recommended_next_step to prepare the manager notification from normalized data, not copied random fragments.
 - questionnaire_status must be consistent: completed or transferred_to_manager cannot coexist with questionnaire_confirmation as an unresolved question.
 - Use official_packages for prices only: Test 35 000 KZT, Basic 50 000 KZT, Standard from 75 000 KZT. Each package price is for one video unless a manager confirms a custom volume calculation.
+- Escalate with ready_for_manager/needs_human for custom or exact price calculations, non-standard volume, urgent production, unusual formats, complaints, explicit manager requests, or clear readiness to proceed. Do not claim that the manager notification succeeded; backend code decides final delivery.
 - For real actors, public figures, faces, or voices, do not promise cloning/copying without rights. Offer an original AI character or similar mood/style.
 - For soft deferrals, set next_action no_reply and reply_text empty unless a short acknowledgement is clearly needed.
 - For STOP/opt-out, set recommended_action stop_bot.
@@ -60,12 +62,15 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 		return fallback, false
 	}
 
-	payload := customerUnderstandingPayload(msg, text, language, conversation)
-	historySize := len(recentUnderstandingMessages(conversation, text))
+	messages := customerUnderstandingMessages(conversation, text)
+	systemPrompt := customerUnderstandingSystemPromptWithContext(msg, text, language, conversation)
+	hasUserRole, hasAssistantRole := openAIHistoryRolesPresent(messages)
 	s.info("openai customer decision request started",
 		zap.String("chat_hash", chatFingerprint(chatID)),
 		zap.String("state", conversation.Stage),
-		zap.Int("recent_history_size", historySize),
+		zap.Int("history_messages_loaded", len(messages)),
+		zap.Bool("history_has_user_role", hasUserRole),
+		zap.Bool("history_has_assistant_role", hasAssistantRole),
 		zap.String("questionnaire_status", questionnaireStatusForMemory(conversation)),
 		zap.Strings("unanswered_questions", nonEmptyListFromString(unresolvedQuestionForMemory(conversation))),
 	)
@@ -73,9 +78,7 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 	defer cancel()
 
 	startedAt := time.Now()
-	understanding, err := s.ai.AnalyzeCustomerMessage(aiCtx, customerUnderstandingSystemPrompt, []openai.Message{
-		{Role: "user", Content: payload},
-	})
+	understanding, err := s.ai.AnalyzeCustomerMessage(aiCtx, systemPrompt, messages)
 	latency := time.Since(startedAt)
 	if err != nil {
 		fields := []zap.Field{
@@ -117,16 +120,33 @@ func (s *Service) understandCustomerMessage(ctx context.Context, chatID string, 
 		}, false
 	}
 
+	aiPrimaryDecision := llmDecisionHasPrimaryAction(aiAnalysis)
 	analysis := aiAnalysis
-	if !llmDecisionHasPrimaryAction(aiAnalysis) {
+	if !aiPrimaryDecision {
 		analysis = mergeCustomerAnalysis(fallback, aiAnalysis)
 	}
+	analysis.LLMPrimaryDecision = aiPrimaryDecision
 	if isClientDeferText(text) {
 		analysis.Intent = IntentDefer
 		analysis.WantsQuestionnaire = false
 		analysis.ShouldHandoff = false
 		analysis.ShouldStop = false
 		analysis.Frustrated = false
+	}
+	if deterministicManagerEscalationRequired(text, analysis, conversation) {
+		analysis.ReadyForManager = true
+		analysis.ShouldHandoff = true
+		analysis.RecommendedAction = "handoff"
+		analysis.NextAction = "handoff"
+		if strings.TrimSpace(analysis.ClientIntent) == "" {
+			analysis.ClientIntent = deterministicEscalationClientIntent(text, analysis)
+		}
+		if strings.TrimSpace(analysis.ManagerSummary) == "" {
+			analysis.ManagerSummary = buildConversationSummary(conversation)
+		}
+		if strings.TrimSpace(analysis.RecommendedNextStep) == "" {
+			analysis.RecommendedNextStep = "связаться с клиентом в WhatsApp и уточнить индивидуальные условия"
+		}
 	}
 	updated := conversation.Lead
 	updated.ApplyAnalysis(analysis)
@@ -242,10 +262,160 @@ type understandingPortfolioCase struct {
 	Active bool     `json:"active"`
 }
 
-func customerUnderstandingPayload(msg IncomingMessage, text string, language string, conversation Conversation) string {
+func customerUnderstandingSystemPromptWithContext(msg IncomingMessage, text string, language string, conversation Conversation) string {
+	contextJSON := customerUnderstandingContextPayload(msg, text, language, conversation)
+	if strings.TrimSpace(contextJSON) == "" {
+		return customerUnderstandingSystemPrompt
+	}
+	return customerUnderstandingSystemPrompt + "\n\nDynamic backend context JSON:\n" + contextJSON
+}
+
+func customerUnderstandingMessages(conversation Conversation, currentText string) []openai.Message {
+	messages := normalizeOpenAIHistoryMessages(conversation.Messages)
+	currentText = strings.TrimSpace(currentText)
+	if currentText != "" && !lastHistoryMessageMatches(messages, "user", currentText) {
+		messages = append(messages, openai.Message{Role: "user", Content: currentText})
+	}
+	return limitOpenAIHistoryMessages(messages, 10)
+}
+
+func normalizeOpenAIHistoryMessages(messages []ChatMessage) []openai.Message {
+	result := make([]openai.Message, 0, len(messages))
+	for _, message := range messages {
+		role := openAIHistoryRole(message.Role)
+		if role == "" {
+			continue
+		}
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		if len(result) > 0 {
+			last := &result[len(result)-1]
+			if last.Role == role && strings.TrimSpace(last.Content) == content {
+				continue
+			}
+		}
+		result = append(result, openai.Message{Role: role, Content: content})
+	}
+	return result
+}
+
+func openAIHistoryRole(role string) string {
+	switch strings.TrimSpace(role) {
+	case "user", "customer", "client":
+		return "user"
+	case "assistant", "bot":
+		return "assistant"
+	default:
+		return ""
+	}
+}
+
+func lastHistoryMessageMatches(messages []openai.Message, role string, content string) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	last := messages[len(messages)-1]
+	return strings.TrimSpace(last.Role) == role && strings.TrimSpace(last.Content) == strings.TrimSpace(content)
+}
+
+func limitOpenAIHistoryMessages(messages []openai.Message, limit int) []openai.Message {
+	if limit <= 0 || len(messages) <= limit {
+		return append([]openai.Message(nil), messages...)
+	}
+	start := len(messages) - limit
+	for start > 0 && messages[start-1].Role == messages[start].Role {
+		start--
+	}
+	window := append([]openai.Message(nil), messages[start:]...)
+	if len(window) <= limit {
+		return window
+	}
+	extra := len(window) - limit + 1
+	merged := strings.Builder{}
+	for i := 0; i < extra; i++ {
+		if i > 0 {
+			merged.WriteString("\n")
+		}
+		merged.WriteString(strings.TrimSpace(window[i].Content))
+	}
+	result := make([]openai.Message, 0, limit)
+	result = append(result, openai.Message{Role: window[0].Role, Content: strings.TrimSpace(merged.String())})
+	result = append(result, window[extra:]...)
+	return result
+}
+
+func openAIHistoryRolesPresent(messages []openai.Message) (bool, bool) {
+	hasUser := false
+	hasAssistant := false
+	for _, message := range messages {
+		switch strings.TrimSpace(message.Role) {
+		case "user":
+			hasUser = true
+		case "assistant":
+			hasAssistant = true
+		}
+	}
+	return hasUser, hasAssistant
+}
+
+func deterministicManagerEscalationRequired(text string, analysis CustomerAnalysis, conversation Conversation) bool {
+	if conversation.AutomationClosed || conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.OptOut {
+		return false
+	}
+	if analysis.Intent == IntentHumanRequest ||
+		analysis.Intent == IntentNegativeReaction ||
+		analysis.Frustrated ||
+		analysis.ReadyForManager ||
+		analysis.ShouldHandoff {
+		return true
+	}
+	normalized := normalizeForAnalysis(text)
+	if normalized == "" {
+		return false
+	}
+	if containsHumanRequest(normalized) {
+		return true
+	}
+	if !looksLikePriceQuestion(normalized) {
+		return false
+	}
+	return containsAny(normalized, []string{
+		"точн", "конкретн", "индивидуаль", "персональ", "кастом", "custom",
+		"посчитай", "посчитайте", "просчит", "рассчит", "смет", "калькуляц",
+		"сколько будет стоить мой", "сколько будет стоить для", "под ключ",
+		"нестандарт", "особые условия", "срочно", "urgent", "large volume",
+		"много роликов", "серия роликов", "пакет на", "за 10", "за 20", "за 30",
+	})
+}
+
+func looksLikePriceQuestion(normalized string) bool {
+	return containsAny(normalized, []string{
+		"цена", "стоимость", "сколько", "прайс", "баға", "қанша", "price", "cost",
+	})
+}
+
+func deterministicEscalationClientIntent(text string, analysis CustomerAnalysis) string {
+	normalized := normalizeForAnalysis(text)
+	switch {
+	case analysis.Intent == IntentHumanRequest || containsHumanRequest(normalized):
+		return "просит связать с менеджером"
+	case analysis.Intent == IntentReadyToOrder || containsReadySignal(text):
+		return "готов продолжить оформление заказа"
+	case analysis.Intent == IntentNegativeReaction || analysis.Frustrated:
+		return "нужна реакция менеджера на недовольство клиента"
+	case looksLikePriceQuestion(normalized):
+		return "просит индивидуальный или точный расчёт стоимости"
+	default:
+		return "нужна передача менеджеру"
+	}
+}
+
+func customerUnderstandingContextPayload(msg IncomingMessage, text string, language string, conversation Conversation) string {
 	// known_state carries the persistent facts; recent_messages is the only
-	// history channel and current_message the only copy of the incoming text,
-	// so nothing is duplicated in the model context.
+	// dynamic memory channel. Dialogue text is sent separately as structured
+	// OpenAI user/assistant messages, so it is not duplicated here.
 	stateSource := conversation
 	stateSource.Messages = nil
 	stateSource.LastIncomingText = ""
@@ -256,12 +426,10 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 	payload := struct {
 		CurrentMessage struct {
 			Role      string `json:"role"`
-			Text      string `json:"text"`
 			MessageID string `json:"message_id,omitempty"`
 			Timestamp string `json:"timestamp,omitempty"`
 		} `json:"current_message"`
 		QuotedContext       understandingQuotedContext        `json:"quoted_context"`
-		RecentMessages      []understandingMessage            `json:"recent_messages"`
 		PendingQuestions    []understandingPendingQuestion    `json:"pending_questions"`
 		QuestionAnswerPairs []understandingQuestionAnswerPair `json:"question_answer_pairs"`
 		KnownState          json.RawMessage                   `json:"known_state"`
@@ -280,7 +448,6 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 		} `json:"official_packages"`
 		PortfolioCatalog []understandingPortfolioCase `json:"portfolio_catalog"`
 		Incoming         struct {
-			Text           string `json:"text,omitempty"`
 			Type           string `json:"type"`
 			Language       string `json:"language"`
 			QuotedText     string `json:"quoted_text,omitempty"`
@@ -300,13 +467,11 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 		MissingFields: requiredLeadMissingFields(conversation),
 	}
 	payload.CurrentMessage.Role = "client"
-	payload.CurrentMessage.Text = strings.TrimSpace(text)
 	payload.CurrentMessage.MessageID = strings.TrimSpace(msg.IDMessage)
 	if !msg.Timestamp.IsZero() {
 		payload.CurrentMessage.Timestamp = msg.Timestamp.UTC().Format(time.RFC3339)
 	}
 	payload.QuotedContext = quotedUnderstandingContext(msg)
-	payload.RecentMessages = recentUnderstandingMessages(conversation, text)
 	payload.PendingQuestions = pendingUnderstandingQuestions(conversation)
 	payload.QuestionAnswerPairs = questionAnswerPairsForUnderstanding(msg, text, conversation)
 	payload.ServiceInformation.BusinessName = "Stone Production"
@@ -374,7 +539,7 @@ func customerUnderstandingPayload(msg IncomingMessage, text string, language str
 
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return `{"incoming":{"text":` + strconvQuote(strings.TrimSpace(text)) + `}}`
+		return `{"incoming":{"type":` + strconvQuote(strings.TrimSpace(msg.TypeMessage)) + `}}`
 	}
 	return string(data)
 }

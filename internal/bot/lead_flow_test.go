@@ -859,7 +859,10 @@ func TestPackageSelectionSendsSelectedVideoWithCaptionWhenNotAlreadySent(t *test
 	if got := countMessagesContaining(sender.messages, BriefCollectedText("ru")); got != 1 {
 		t.Fatalf("brief acknowledgement count = %d, messages=%#v", got, sender.messages)
 	}
-	adminMessage := sender.messages[len(sender.messages)-1]
+	adminMessage := firstMessageContaining(sender.messages, "Новый квалифицированный лид WhatsApp")
+	if adminMessage == "" {
+		t.Fatalf("admin notification was not sent: %#v", sender.messages)
+	}
 	if !strings.Contains(adminMessage, "Новый квалифицированный лид WhatsApp") ||
 		!strings.Contains(adminMessage, "Пакет: Basic / Базовый") ||
 		strings.Contains(adminMessage, "\nНиша: -") ||
@@ -1134,7 +1137,10 @@ func TestQualifiedLeadNotifiesAdminOnceAndClosesAutomation(t *testing.T) {
 	if got := countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp"); got != 1 {
 		t.Fatalf("admin notifications = %d, want 1: %#v", got, sender.messages)
 	}
-	adminMessage := sender.messages[len(sender.messages)-1]
+	adminMessage := firstMessageContaining(sender.messages, "Новый квалифицированный лид WhatsApp")
+	if adminMessage == "" {
+		t.Fatalf("admin notification was not sent: %#v", sender.messages)
+	}
 	for _, want := range []string{
 		"Имя: Yerek",
 		"Телефон: +7 701 333 00 00",
@@ -1436,4 +1442,13 @@ func countMessagesContaining(messages []string, needle string) int {
 		}
 	}
 	return count
+}
+
+func firstMessageContaining(messages []string, needle string) string {
+	for _, message := range messages {
+		if strings.Contains(message, needle) {
+			return message
+		}
+	}
+	return ""
 }

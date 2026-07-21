@@ -269,10 +269,45 @@ func (s *Service) handleLLMDecisionConversation(ctx context.Context, chatID stri
 
 	ctx = context.WithValue(ctx, outgoingReplySourceKey{}, replySourceLLMPrimary)
 	askedFields := llmDecisionAskedFields(analysis)
+	if readyForManager {
+		result, escalationErr := s.executeManagerEscalation(ctx, chatID, analysis, "")
+		if escalationErr != nil || !result.Sent {
+			s.warn("llm manager escalation failed; customer-safe fallback selected",
+				zap.String("chat_hash", chatFingerprint(chatID)),
+				zap.String("intent", analysis.Intent),
+				zap.String("escalation_reason", result.Reason),
+				zap.Bool("manager_notification_sent", result.Sent),
+				zap.Error(escalationErr),
+			)
+			s.markManagerEscalationFailed(context.WithoutCancel(ctx), chatID)
+			return true, s.sendAndRemember(ctx, chatID, ManagerEscalationFallbackText(language), replyStageForConversation(conversation), selectedLevelFromConversation(conversation), askedFields...)
+		}
+		s.info("llm manager escalation succeeded before customer handoff reply",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("intent", analysis.Intent),
+			zap.String("escalation_reason", result.Reason),
+			zap.Bool("manager_notification_already_sent", result.AlreadySent),
+		)
+		return true, s.sendAndRemember(ctx, chatID, reply, ClientStateHandedOff, selectedLevelFromConversation(conversation), askedFields...)
+	}
 	if err := s.sendAndRemember(ctx, chatID, reply, stage, selectedLevelFromConversation(conversation), askedFields...); err != nil {
 		return true, err
 	}
-	if readyForManager {
+	if llmShouldSendPackageExamples(conversation, analysis) {
+		latest, err := s.store.Snapshot(ctx, chatID)
+		if err != nil {
+			return true, err
+		}
+		sent, err := s.sendPackagePortfolioVideos(ctx, chatID, language, latest, false)
+		if err != nil {
+			return true, err
+		}
+		s.info("llm package portfolio action executed",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.Int("sent_media_count", sent),
+			zap.String("intent", analysis.Intent),
+			zap.String("recommended_action", analysis.RecommendedAction),
+		)
 		return true, nil
 	}
 	if analysis.ShouldSendPortfolio || strings.TrimSpace(analysis.RecommendedAction) == "send_relevant_examples" || strings.TrimSpace(analysis.NextAction) == "send_relevant_examples" || strings.TrimSpace(analysis.NextAction) == "send_cases" {
@@ -285,6 +320,25 @@ func (s *Service) handleLLMDecisionConversation(ctx context.Context, chatID stri
 		}
 	}
 	return true, nil
+}
+
+func llmShouldSendPackageExamples(conversation Conversation, analysis CustomerAnalysis) bool {
+	if conversation.Stage == StageBriefRequested || conversation.QuestionnaireSent || conversation.Lead.BriefRequested || conversation.QuestionnaireOfferSent {
+		return false
+	}
+	if conversation.PackagesSent || conversation.Lead.OfferSent || conversation.SentPortfolio || conversation.Lead.PortfolioSent {
+		return false
+	}
+	if strings.TrimSpace(analysis.RecommendedAction) == "send_price_options" {
+		return true
+	}
+	if analysis.Intent == IntentPriceQuestion {
+		return true
+	}
+	if analysis.ShouldSendPortfolio && len(normalizePortfolioTags(analysis.PortfolioTags)) == 0 {
+		return true
+	}
+	return false
 }
 
 func llmDecisionHasPrimaryAction(analysis CustomerAnalysis) bool {
@@ -337,7 +391,6 @@ func llmDecisionAskedFields(analysis CustomerAnalysis) []string {
 }
 
 func (s *Service) applyLLMDecisionState(ctx context.Context, chatID string, conversation Conversation, analysis CustomerAnalysis, stage string, readyForManager bool) error {
-	now := time.Now().UTC()
 	level := selectedLevelFromConversation(conversation)
 	s.store.Update(chatID, func(current *Conversation) {
 		if strings.TrimSpace(analysis.QuestionnaireStatus) != "" {
@@ -385,6 +438,8 @@ func (s *Service) applyLLMDecisionState(ctx context.Context, chatID string, conv
 		}
 		if readyForManager {
 			current.Lead.ReadyForManagerHandoff = true
+			current.Lead.ContactBriefReady = true
+			current.Lead.BriefCompleted = true
 			if !isValidPackageInterest(current.Lead.SelectedPackage) {
 				current.Lead.SelectedPackage = packageNeedsManagerRecommendation
 			}
@@ -393,15 +448,6 @@ func (s *Service) applyLLMDecisionState(ctx context.Context, chatID string, conv
 			}
 			current.Lead.LeadStatus = LeadStatusHandoffRequired
 			current.LeadStatus = LeadStatusHandoffRequired
-			current.HandedOffToOwner = true
-			current.AutomationClosed = true
-			current.Stopped = true
-			if current.TransferredAt.IsZero() {
-				current.TransferredAt = now
-			}
-			current.NextFollowupAt = time.Time{}
-			current.FollowupStage = ""
-			current.FollowupReferenceAt = time.Time{}
 		}
 	})
 	return nil

@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 func (s *Service) handleFAQ(ctx context.Context, chatID string, language string, conversation Conversation, analysis CustomerAnalysis) error {
@@ -315,8 +317,30 @@ func (s *Service) completeFollowupReplyHandoff(ctx context.Context, chatID strin
 		conversation.Lead.WantsQuestionnaire = true
 		conversation.Lead.BriefCompleted = true
 		conversation.Lead.ContactBriefReady = true
+		conversation.Lead.ReadyForManagerHandoff = true
+		conversation.Lead.LeadStatus = LeadStatusHandoffRequired
+		conversation.LeadStatus = LeadStatusHandoffRequired
 		conversation.Lead.FreeText = appendBriefText(conversation.Lead.FreeText, conversation.LastIncomingText)
 	})
+	analysis := CustomerAnalysis{
+		Intent:            IntentReadyToOrder,
+		ReadyForManager:   true,
+		ShouldHandoff:     true,
+		ClientIntent:      "ответил после follow-up, нужен менеджер",
+		RecommendedAction: "handoff",
+		NextAction:        "handoff",
+	}
+	result, escalationErr := s.executeManagerEscalation(ctx, chatID, analysis, "Клиент ответил после follow-up, нужен менеджер")
+	if escalationErr != nil || !result.Sent {
+		s.warn("follow-up manager escalation failed; customer-safe fallback selected",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("escalation_reason", result.Reason),
+			zap.Bool("manager_notification_sent", result.Sent),
+			zap.Error(escalationErr),
+		)
+		s.markManagerEscalationFailed(context.WithoutCancel(ctx), chatID)
+		return s.sendAndRemember(ctx, chatID, ManagerEscalationFallbackText(language), ClientStatePackagesPresented, level)
+	}
 	if err := s.sendAndRemember(ctx, chatID, HumanHandoffText(language), ClientStateHandedOff, level); err != nil {
 		return err
 	}

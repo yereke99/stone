@@ -365,31 +365,31 @@ func TestLLMPrimarySkipsBriefAndPackageFlows(t *testing.T) {
 	}
 }
 
-func TestRecentUnderstandingMessagesExcludeCurrentAndKeepOrder(t *testing.T) {
+func TestCustomerUnderstandingMessagesIncludeCurrentAndKeepOrder(t *testing.T) {
 	conversation := Conversation{Messages: []ChatMessage{
 		{Role: "user", Content: "Здравствуйте", CreatedAt: time.Now().Add(-5 * time.Minute)},
 		{Role: "assistant", Content: "Добрый день! Чем можем помочь?", CreatedAt: time.Now().Add(-4 * time.Minute)},
 		{Role: "user", Content: "Это цены за 1 ролик верно?", CreatedAt: time.Now()},
 	}}
 
-	messages := recentUnderstandingMessages(conversation, "Это цены за 1 ролик верно?")
-	if len(messages) != 2 {
-		t.Fatalf("recent messages = %d, want 2 (current message excluded): %#v", len(messages), messages)
+	messages := customerUnderstandingMessages(conversation, "Это цены за 1 ролик верно?")
+	if len(messages) != 3 {
+		t.Fatalf("recent messages = %d, want 3 including current message: %#v", len(messages), messages)
 	}
-	if messages[0].Role != "client" || messages[1].Role != "bot" {
+	if messages[0].Role != "user" || messages[1].Role != "assistant" || messages[2].Role != "user" {
 		t.Fatalf("roles are wrong: %#v", messages)
 	}
-	if messages[0].Text != "Здравствуйте" || !strings.Contains(messages[1].Text, "Добрый день") {
+	if messages[0].Content != "Здравствуйте" || !strings.Contains(messages[1].Content, "Добрый день") || messages[2].Content != "Это цены за 1 ролик верно?" {
 		t.Fatalf("chronological order lost: %#v", messages)
 	}
 
-	payload := customerUnderstandingPayload(IncomingMessage{Text: "Это цены за 1 ролик верно?"}, "Это цены за 1 ролик верно?", "ru", conversation)
-	if got := strings.Count(payload, "Это цены за 1 ролик верно?"); got != 1 {
-		t.Fatalf("current message appears %d times in the payload, want exactly 1:\n%s", got, payload)
+	payload := customerUnderstandingContextPayload(IncomingMessage{Text: "Это цены за 1 ролик верно?"}, "Это цены за 1 ролик верно?", "ru", conversation)
+	if got := strings.Count(payload, "Это цены за 1 ролик верно?"); got != 0 {
+		t.Fatalf("current message appears %d times in dynamic context, want 0 because dialogue carries it:\n%s", got, payload)
 	}
 }
 
-func TestRecentUnderstandingMessagesCapAtTenTotal(t *testing.T) {
+func TestCustomerUnderstandingMessagesCapAtTenTotal(t *testing.T) {
 	conversation := Conversation{}
 	for i := 0; i < 8; i++ {
 		conversation.Messages = append(conversation.Messages,
@@ -397,16 +397,16 @@ func TestRecentUnderstandingMessagesCapAtTenTotal(t *testing.T) {
 			ChatMessage{Role: "assistant", Content: "ответ"},
 		)
 	}
-	messages := recentUnderstandingMessages(conversation, "")
+	messages := customerUnderstandingMessages(conversation, "")
 	if len(messages) != 10 {
 		t.Fatalf("recent messages = %d, want 10", len(messages))
 	}
 	hasCustomer, hasBot := false, false
 	for _, message := range messages {
 		switch message.Role {
-		case "client":
+		case "user":
 			hasCustomer = true
-		case "bot":
+		case "assistant":
 			hasBot = true
 		}
 	}

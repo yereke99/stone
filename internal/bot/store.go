@@ -12,7 +12,7 @@ import (
 const (
 	defaultConversationTTL = 0
 	defaultMessageTTL      = 24 * time.Hour
-	defaultHistoryLimit    = 11
+	defaultHistoryLimit    = 24
 	outgoingRepeatWindow   = 2 * time.Minute
 )
 

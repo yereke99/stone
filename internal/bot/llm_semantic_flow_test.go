@@ -2,7 +2,8 @@ package bot
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,19 +12,37 @@ import (
 )
 
 type capturingDecisionAI struct {
-	response openai.CustomerUnderstanding
-	messages []openai.Message
-	calls    int
+	response     openai.CustomerUnderstanding
+	systemPrompt string
+	messages     []openai.Message
+	calls        int
 }
 
 func (ai *capturingDecisionAI) AnalyzeCustomerMessage(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.CustomerUnderstanding, error) {
 	ai.calls++
+	ai.systemPrompt = systemPrompt
 	ai.messages = append([]openai.Message(nil), messages...)
 	return ai.response, nil
 }
 
 func (ai *capturingDecisionAI) GenerateReplyText(ctx context.Context, systemPrompt string, messages []openai.Message) (openai.ReplyTextResponse, error) {
 	return openai.ReplyTextResponse{ReplyText: ""}, nil
+}
+
+type failingAdminSender struct {
+	fakeSender
+	failChatID string
+	err        error
+}
+
+func (s *failingAdminSender) SendMessage(ctx context.Context, chatID string, message string) error {
+	if chatID == s.failChatID {
+		if s.err != nil {
+			return s.err
+		}
+		return errors.New("admin send failed")
+	}
+	return s.fakeSender.SendMessage(ctx, chatID, message)
 }
 
 func semanticDecision(reply string) openai.CustomerUnderstanding {
@@ -67,42 +86,34 @@ func TestProductionFlowSendsLatestTenRoleOrderedMessagesToLLM(t *testing.T) {
 
 	sendText(t, service, chatID, "Келесі аптаға.")
 
-	if ai.calls != 1 || len(ai.messages) != 1 {
+	if ai.calls != 1 {
 		t.Fatalf("AI calls/messages = %d/%d", ai.calls, len(ai.messages))
 	}
-	var payload struct {
-		CurrentMessage struct {
-			Role string `json:"role"`
-			Text string `json:"text"`
-		} `json:"current_message"`
-		RecentMessages []struct {
-			Role string `json:"role"`
-			Text string `json:"text"`
-		} `json:"recent_messages"`
-		KnownState json.RawMessage `json:"known_state"`
+	if len(ai.messages) != 10 {
+		t.Fatalf("messages = %d, want 10: %#v", len(ai.messages), ai.messages)
 	}
-	if err := json.Unmarshal([]byte(ai.messages[0].Content), &payload); err != nil {
-		t.Fatalf("payload json error: %v\n%s", err, ai.messages[0].Content)
+	if ai.messages[0].Role != "assistant" || ai.messages[0].Content != "bot 1" {
+		t.Fatalf("first message = %#v, want bot 1 assistant message", ai.messages[0])
 	}
-	if payload.CurrentMessage.Role != "client" || payload.CurrentMessage.Text != "Келесі аптаға." {
-		t.Fatalf("current message = %#v", payload.CurrentMessage)
+	if ai.messages[9].Role != "user" || ai.messages[9].Content != "Келесі аптаға." {
+		t.Fatalf("last message = %#v, want current user message", ai.messages[9])
 	}
-	if len(payload.RecentMessages) != 10 {
-		t.Fatalf("recent messages = %d, want 10: %#v", len(payload.RecentMessages), payload.RecentMessages)
-	}
-	if payload.RecentMessages[0].Text != "client 1" || payload.RecentMessages[9].Text != "bot 5" {
-		t.Fatalf("recent messages not chronological latest 10: %#v", payload.RecentMessages)
-	}
-	for i, message := range payload.RecentMessages {
-		if i%2 == 0 && message.Role != "client" {
-			t.Fatalf("message %d role = %q, want client", i, message.Role)
+	for i, message := range ai.messages {
+		if strings.TrimSpace(message.Content) == "" {
+			t.Fatalf("message %d has empty content", i)
 		}
-		if i%2 == 1 && message.Role != "bot" {
-			t.Fatalf("message %d role = %q, want bot", i, message.Role)
+		if message.Role != "user" && message.Role != "assistant" {
+			t.Fatalf("message %d role = %q, want user/assistant", i, message.Role)
 		}
 	}
-	if !json.Valid(payload.KnownState) || len(payload.KnownState) == 0 {
-		t.Fatal("known_state was not included as valid JSON")
+	if !strings.Contains(ai.systemPrompt, "Dynamic backend context JSON:") {
+		t.Fatal("dynamic backend context was not included in the system prompt")
+	}
+	if strings.Contains(ai.systemPrompt, `"text":"Келесі аптаға."`) {
+		t.Fatal("latest customer text was duplicated into dynamic backend context")
+	}
+	if !strings.Contains(ai.systemPrompt, `"known_state"`) {
+		t.Fatal("known_state was not included in dynamic backend context")
 	}
 }
 
@@ -143,6 +154,55 @@ func TestLLMDecisionUpdatesManyLeadFieldsInOneProductionMessage(t *testing.T) {
 	}
 	if got := sender.messages[len(sender.messages)-1]; got != reply || strings.Contains(strings.ToLower(got), "какая у вас ниша") {
 		t.Fatalf("customer reply not LLM/non-repeating: %q", got)
+	}
+}
+
+func TestServiceAndCostQuestionAnswersAndSendsApprovedPortfolioVideos(t *testing.T) {
+	sender := &fakeSender{fileMessageIDs: []string{"test-video-id", "basic-video-id", "standard-video-id"}}
+	store := NewConversationStore()
+	reply := "Здравствуйте! Stone Production делает AI-рекламные ролики без съёмки: сценарий, AI-визуал, монтаж, озвучка и подготовка под рекламу. Стоимость: Test — 35 000 тг, Basic — 50 000 тг, Standard — от 75 000 тг. Сейчас отправлю три примера. Подскажите, какая у вас ниша?"
+	response := semanticDecision(reply)
+	response.Intent = "price_question"
+	response.RecommendedAction = "send_price_options"
+	response.NextAction = "send_relevant_examples"
+	response.ShouldSendPortfolio = true
+	response.PortfolioTags = []string{}
+	response.PortfolioSearchTags = []string{}
+	ai := &capturingDecisionAI{response: response}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil, "77019519013@c.us")
+	chatID := "chat-services-cost"
+
+	sendText(t, service, chatID, "Здравствуйте! Какие услуги предлагаете и стоимость?")
+
+	clientReplies := messagesToChat(sender, chatID)
+	if len(clientReplies) != 1 {
+		t.Fatalf("client replies = %#v, want one text reply", clientReplies)
+	}
+	lower := strings.ToLower(clientReplies[0])
+	for _, forbidden := range []string{"сообщение получили", "вернёмся с ответом", "вернемся с ответом", "менеджер продолжит", "не понимаю"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("reply used prohibited fallback %q: %q", forbidden, clientReplies[0])
+		}
+	}
+	for _, want := range []string{"ai-рекламные ролики", "35 000", "50 000", "75 000"} {
+		if !strings.Contains(lower, strings.ToLower(want)) {
+			t.Fatalf("reply missing %q: %q", want, clientReplies[0])
+		}
+	}
+	if countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp") != 0 {
+		t.Fatalf("generic services/price question escalated unexpectedly: %#v", sender.messages)
+	}
+	if len(sender.files) != 3 {
+		t.Fatalf("sent files = %#v, want three approved portfolio videos", sender.files)
+	}
+	for i, want := range []string{VideoLevel1, VideoLevel2, VideoLevel3} {
+		if got := filepath.Base(sender.files[i]); got != want {
+			t.Fatalf("file %d = %q, want %q", i, got, want)
+		}
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if !conversation.PackagesSent || !conversation.SentPortfolio {
+		t.Fatalf("package portfolio state not persisted: packages=%v portfolio=%v", conversation.PackagesSent, conversation.SentPortfolio)
 	}
 }
 
@@ -210,7 +270,10 @@ func TestLLMDecisionSeparatesContactFromCompanyAndABATSURegression(t *testing.T)
 	if len(lead.ProductFeatures) != 2 {
 		t.Fatalf("product features not stored: %#v", lead.ProductFeatures)
 	}
-	adminMessage := sender.messages[len(sender.messages)-1]
+	adminMessage := firstMessageContaining(sender.messages, "Новый квалифицированный лид WhatsApp")
+	if adminMessage == "" {
+		t.Fatalf("admin notification was not sent: %#v", sender.messages)
+	}
 	for _, want := range []string{
 		"Компания / бренд: ABAT SU",
 		"Ниша: filtered bottled drinking water production and sales",
@@ -226,6 +289,53 @@ func TestLLMDecisionSeparatesContactFromCompanyAndABATSURegression(t *testing.T)
 	}
 	if strings.Contains(adminMessage, "questionnaire_confirmation") {
 		t.Fatalf("questionnaire state contradiction in admin message:\n%s", adminMessage)
+	}
+}
+
+func TestLLMHandoffNotificationFailureDoesNotClaimTransfer(t *testing.T) {
+	adminChatID := "77019519013@c.us"
+	sender := &failingAdminSender{failChatID: adminChatID, err: errors.New("green api unavailable")}
+	store := NewConversationStore()
+	reply := "Данные получил, передаю менеджеру. Он продолжит по стоимости."
+	response := semanticDecision(reply)
+	response.Intent = "human_request"
+	response.ReadyForManager = true
+	response.NeedsHuman = true
+	response.RecommendedAction = "handoff"
+	response.NextAction = "handoff"
+	response.CustomerReply = reply
+	response.ReplyText = reply
+	response.ClientIntent = "просит менеджера"
+	response.ManagerSummary = "Клиент просит точный расчёт и менеджера."
+	response.LeadUpdates.ReadinessForManagerHandoff = true
+	response.LeadUpdates.BusinessNiche = testString("салон красоты")
+	response.LeadUpdates.AdvertisingGoal = testString("получать заявки")
+	response.LeadUpdates.SelectedPackage = testString("standard")
+	response.ExtractedFields.Niche = testString("салон красоты")
+	response.ExtractedFields.Goal = testString("получать заявки")
+	response.ExtractedFields.PackageInterest = testString("standard")
+	ai := &capturingDecisionAI{response: response}
+	service := NewService(sender, ai, store, testVideoDir(t), PortfolioLinks{}, "auto", nil, adminChatID)
+	chatID := "chat-handoff-failure"
+
+	sendText(t, service, chatID, "Нужен точный расчет, передайте менеджеру")
+
+	clientReplies := messagesToChat(&sender.fakeSender, chatID)
+	if len(clientReplies) != 1 {
+		t.Fatalf("client replies = %#v, want one safe fallback", clientReplies)
+	}
+	if clientReplies[0] != ManagerEscalationFallbackText("ru") {
+		t.Fatalf("client reply = %q, want safe fallback", clientReplies[0])
+	}
+	if strings.Contains(strings.ToLower(clientReplies[0]), "передаю менеджеру") {
+		t.Fatalf("fallback falsely claimed transfer: %q", clientReplies[0])
+	}
+	conversation := snapshotConversation(t, store, chatID)
+	if !conversation.AdminNotifiedAt.IsZero() || conversation.HandedOffToOwner || conversation.AutomationClosed || conversation.Stopped {
+		t.Fatalf("failed escalation marked as transferred: admin=%v handed=%v closed=%v stopped=%v", conversation.AdminNotifiedAt, conversation.HandedOffToOwner, conversation.AutomationClosed, conversation.Stopped)
+	}
+	if countMessagesContaining(sender.messages, "Новый квалифицированный лид WhatsApp") != 0 {
+		t.Fatalf("failed admin notification was recorded as sent: %#v", sender.messages)
 	}
 }
 

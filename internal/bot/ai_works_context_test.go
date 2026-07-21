@@ -218,8 +218,8 @@ func TestAISalesManagerDecisionSendsTwoRelevantCasesAndQuestionnaire(t *testing.
 			t.Fatalf("non-interior case sent: %#v", sender.files)
 		}
 	}
-	if !conversation.QuestionnaireOfferSent {
-		t.Fatalf("questionnaire offer was not recorded after cases: %#v", conversation)
+	if conversation.QuestionnaireOfferSent {
+		t.Fatalf("questionnaire offer should be model-driven, got recorded after cases: %#v", conversation)
 	}
 	joined := strings.Join(sender.messages, "\n")
 	if strings.Contains(strings.ToLower(joined), "какая у вас ниша") || strings.Contains(strings.ToLower(joined), "что прода") {

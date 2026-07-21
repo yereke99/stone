@@ -217,8 +217,8 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	if senderName := strings.TrimSpace(msg.SenderName); senderName != "" {
 		s.store.Update(chatID, func(conversation *Conversation) {
 			conversation.DisplayName = senderName
-			if strings.TrimSpace(conversation.Lead.ClientName) == "" {
-				conversation.Lead.ClientName = senderName
+			if strings.TrimSpace(conversation.Lead.ContactName) == "" {
+				conversation.Lead.ContactName = senderName
 			}
 		})
 	}
@@ -358,6 +358,14 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	}
 
 	analysis, openAIAnalyzerUsed := s.understandCustomerMessage(ctx, chatID, msg, text, language, conversation)
+	if analysis.TechnicalFallback {
+		s.warn("technical fallback reply selected because semantic decision is unavailable",
+			zap.String("chat_hash", chatFingerprint(chatID)),
+			zap.String("message_id", strings.TrimSpace(msg.IDMessage)),
+		)
+		return s.sendAndRemember(ctx, chatID, analysis.ReplyText, replyStageForConversation(conversation), selectedLevelFromConversation(conversation))
+	}
+	llmPrimaryDecision := openAIAnalyzerUsed && llmDecisionHasPrimaryAction(analysis)
 	if analysis.NumberedQualificationAnswer {
 		extracted := make([]string, 0, 3)
 		if analysis.Niche != nil {
@@ -375,22 +383,24 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 			zap.Strings("qualification_fields_extracted", extracted),
 		)
 	}
-	if faqKey, ok := detectFAQIntent(text); ok {
-		analysis.Intent = IntentFAQ
-		analysis.FAQKey = faqKey
+	if !llmPrimaryDecision {
+		if faqKey, ok := detectFAQIntent(text); ok {
+			analysis.Intent = IntentFAQ
+			analysis.FAQKey = faqKey
+		}
+		if replyPackageDetected {
+			analysis.SelectedLevel = levelByPackageKey(replyPackage)
+			analysis.PackageInterest = stringPointer(replyPackage)
+			analysis.Intent = IntentPackageSelection
+		}
+		if conversationIsWaitingForBrief(conversation) {
+			analysis = normalizeBriefRequestedAnalysis(text, analysis, conversation)
+		}
+		if isBriefAnswerForConversation(text, analysis, conversation) {
+			analysis.Intent = IntentBriefAnswer
+		}
 	}
-	if replyPackageDetected {
-		analysis.SelectedLevel = levelByPackageKey(replyPackage)
-		analysis.PackageInterest = stringPointer(replyPackage)
-		analysis.Intent = IntentPackageSelection
-	}
-	if conversationIsWaitingForBrief(conversation) {
-		analysis = normalizeBriefRequestedAnalysis(text, analysis, conversation)
-	}
-	if isBriefAnswerForConversation(text, analysis, conversation) {
-		analysis.Intent = IntentBriefAnswer
-	}
-	if !isBusinessRelevantMessage(text, analysis, analysis.FAQKey != "", conversation) {
+	if !llmPrimaryDecision && !isBusinessRelevantMessage(text, analysis, analysis.FAQKey != "", conversation) {
 		s.info("incoming message ignored because it is outside stone production flow",
 			zap.String("chat_hash", chatFingerprint(chatID)),
 			zap.String("state", conversation.Stage),
@@ -412,7 +422,7 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 		zap.Bool("asks_for_food_examples", analysis.AsksForFoodExamples),
 		zap.Bool("asks_for_more_options", analysis.AsksForMoreOptions),
 	)
-	if replyPackageDetected {
+	if !llmPrimaryDecision && replyPackageDetected {
 		level := levelByPackageKey(replyPackage)
 		if level > 0 {
 			s.store.Update(chatID, func(conversation *Conversation) {
@@ -438,10 +448,10 @@ func (s *Service) ProcessIncomingWhatsAppMessage(ctx context.Context, msg Incomi
 	)
 
 	_ = lead
-	return s.handleSalesState(ctx, chatID, text, language, conversation, analysis)
+	return s.handleSalesState(ctx, chatID, text, language, conversation, analysis, llmPrimaryDecision)
 }
 
-func (s *Service) handleSalesState(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis) error {
+func (s *Service) handleSalesState(ctx context.Context, chatID string, text string, language string, conversation Conversation, analysis CustomerAnalysis, llmPrimaryDecision bool) error {
 	state := clientStateForConversation(&conversation)
 	if analysis.Intent == IntentDefer || isClientDeferText(text) {
 		s.info("state machine deferred reply silently",
@@ -481,6 +491,11 @@ func (s *Service) handleSalesState(ctx context.Context, chatID string, text stri
 	}
 	if isReplyAfterWeeklyFollowup(conversation) {
 		return s.completeFollowupReplyHandoff(ctx, chatID, language, selectedLevelFromConversation(conversation))
+	}
+	if handled, err := s.handleLLMDecisionConversation(ctx, chatID, language, conversation, analysis, llmPrimaryDecision); err != nil {
+		return err
+	} else if handled {
+		return nil
 	}
 	if analysis.Intent == IntentHumanRequest {
 		level := analysis.SelectedLevel
@@ -1961,12 +1976,27 @@ func (s *Service) notifyAdminsIfNeeded(ctx context.Context, chatID string, stage
 func adminLeadNotificationText(conversation Conversation) string {
 	lead := conversation.Lead
 	memory := conversation.Memory
-	casesSent := strings.Join(memory.CasesSent, ", ")
+	caseIDs := append([]string{}, memory.CasesSent...)
+	caseIDs = append(caseIDs, lead.PortfolioCasesSent...)
+	casesSent := strings.Join(caseIDs, ", ")
 	if casesSent == "" {
 		casesSent = strings.Join(memory.CaseVideosSent, ", ")
 	}
-	objections := strings.Join(memory.CustomerObjections, "; ")
+	objectionItems := append([]string{}, memory.CustomerObjections...)
+	objectionItems = append(objectionItems, lead.Objections...)
+	objections := strings.Join(objectionItems, "; ")
 	questionnaireStatus := questionnaireStatusForMemory(conversation)
+	if strings.TrimSpace(lead.QuestionnaireStatus) != "" {
+		questionnaireStatus = strings.TrimSpace(lead.QuestionnaireStatus)
+	}
+	summary := strings.TrimSpace(lead.ManagerSummary)
+	if summary == "" {
+		summary = strings.TrimSpace(conversation.ConversationSummary)
+	}
+	recommendedNextStep := strings.TrimSpace(lead.RecommendedNextStep)
+	if recommendedNextStep == "" {
+		recommendedNextStep = "связаться с клиентом в WhatsApp, подтвердить формат и следующий производственный шаг"
+	}
 	lines := []string{
 		"Новый квалифицированный лид WhatsApp",
 		"",
@@ -1977,29 +2007,40 @@ func adminLeadNotificationText(conversation Conversation) string {
 	lines = append(lines,
 		"Телефон: "+formatPhoneForAdmin(conversation.ChatID),
 		"ChatID: "+strings.TrimSpace(conversation.ChatID),
-		"Язык: "+valueOrDash(normalizeLanguageCode(conversation.Language)),
+		"Язык: "+valueOrUnknown(normalizeLanguageCode(conversation.Language)),
 		"",
-		"Компания / бренд: "+valueOrDash(lead.ClientName),
-		"Ниша: "+valueOrDash(lead.Niche),
-		"Детали бизнеса: "+valueOrDash(lead.StrongSide),
-		"Продукт / услуга: "+valueOrDash(lead.ProductOrService),
-		"Цель: "+valueOrDash(lead.Goal),
-		"Аудитория: "+valueOrDash(lead.TargetAudience),
-		"Срок: "+valueOrDash(lead.Deadline),
-		"Бюджет: "+valueOrDash(lead.Budget),
-		"Объём роликов: "+valueOrDash(lead.VideoQuantity),
+		"Контактное имя: "+valueOrUnknown(firstNonEmpty(lead.ContactName, conversation.DisplayName)),
+		"Компания / бренд: "+valueOrUnknown(adminCompanyBrand(conversation)),
+		"Ниша: "+valueOrUnknown(lead.Niche),
+		"Продукт / услуга: "+valueOrUnknown(lead.ProductOrService),
+		"Детали бизнеса: "+valueOrUnknown(firstNonEmpty(lead.BusinessDescription, lead.StrongSide)),
+		"Особенности продукта: "+valueOrUnknown(strings.Join(lead.ProductFeatures, "; ")),
+		"Преимущества: "+valueOrUnknown(strings.Join(lead.ProductAdvantages, "; ")),
+		"Цель: "+valueOrUnknown(lead.Goal),
+		"Желаемый результат: "+valueOrUnknown(lead.DesiredResult),
+		"Аудитория: "+valueOrUnknown(lead.TargetAudience),
+		"География: "+valueOrUnknown(firstNonEmpty(lead.GeographicMarket, lead.City)),
+		"Тип ролика: "+valueOrUnknown(lead.DesiredVideoType),
+		"Формат ролика: "+valueOrUnknown(lead.DesiredVideoFormat),
+		"Стиль: "+valueOrUnknown(lead.DesiredStyle),
+		"Длительность: "+valueOrUnknown(lead.VideoDuration),
+		"Площадка: "+valueOrUnknown(firstNonEmpty(lead.DistributionPlatform, lead.Platform)),
+		"Срок: "+valueOrUnknown(lead.Deadline),
+		"Бюджет: "+valueOrUnknown(lead.Budget),
+		"Объём роликов: "+valueOrUnknown(lead.VideoQuantity),
 		"Пакет: "+adminPackageLabel(lead.SelectedPackage),
-		"Кейсы отправлены: "+valueOrDash(casesSent),
-		"Возражения / вопросы: "+valueOrDash(objections),
-		"Анкета: "+valueOrDash(questionnaireStatus),
+		"Кейсы отправлены: "+valueOrUnknown(casesSent),
+		"Возражения: "+valueOrUnknown(objections),
+		"Вопросы клиента: "+valueOrUnknown(strings.Join(lead.ClientQuestions, "; ")),
+		"Анкета: "+valueOrUnknown(questionnaireStatus),
 		"",
 		"Намерение клиента: "+adminClientIntent(conversation),
-		"Нерешённые вопросы: "+valueOrDash(unresolvedQuestionForMemory(conversation)),
-		"Рекомендуемый следующий шаг: связаться с клиентом в WhatsApp, подтвердить пакет/формат и следующий производственный шаг.",
-		"Последнее сообщение клиента: "+strings.TrimSpace(conversation.LastIncomingText),
+		"Нерешённые вопросы: "+valueOrUnknown(adminUnresolvedQuestions(conversation)),
+		"Рекомендуемый следующий шаг: "+valueOrUnknown(recommendedNextStep),
+		"Последнее сообщение клиента: "+valueOrUnknown(strings.TrimSpace(conversation.LastIncomingText)),
 		"",
 		"Резюме диалога:",
-		strings.TrimSpace(conversation.ConversationSummary),
+		valueOrUnknown(summary),
 		"",
 		"Последние сообщения:",
 		adminRecentConversationLines(conversation, 8),
@@ -2054,13 +2095,21 @@ func isHandoffAcknowledgementText(content string) bool {
 }
 
 func adminClientName(conversation Conversation) string {
-	if name := strings.TrimSpace(conversation.Lead.ClientName); name != "" {
+	if name := strings.TrimSpace(conversation.Lead.ContactName); name != "" {
 		return name
 	}
 	return strings.TrimSpace(conversation.DisplayName)
 }
 
+func adminCompanyBrand(conversation Conversation) string {
+	lead := conversation.Lead
+	return firstNonEmpty(lead.CompanyName, lead.BrandName, lead.ClientName)
+}
+
 func adminClientIntent(conversation Conversation) string {
+	if intent := strings.TrimSpace(conversation.Lead.ClientIntent); intent != "" {
+		return intent
+	}
 	if conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire {
 		return "хочет продолжить / готов к обработке заявки"
 	}
@@ -2117,8 +2166,15 @@ func adminPackageLabel(packageKey string) string {
 	case packageNeedsManagerRecommendation:
 		return "нужна рекомендация менеджера"
 	default:
-		return valueOrDash(packageKey)
+		return valueOrUnknown(packageKey)
 	}
+}
+
+func adminUnresolvedQuestions(conversation Conversation) string {
+	if len(conversation.Lead.UnresolvedQuestions) > 0 {
+		return strings.Join(conversation.Lead.UnresolvedQuestions, "; ")
+	}
+	return unresolvedQuestionForMemory(conversation)
 }
 
 func normalizeAdminChatIDs(values []string) []string {
@@ -2196,6 +2252,14 @@ func valueOrDash(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "-"
+	}
+	return value
+}
+
+func valueOrUnknown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return "не указано"
 	}
 	return value
 }

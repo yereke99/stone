@@ -75,13 +75,13 @@ func refreshCustomerMemory(conversation *Conversation) {
 		setFact(&memory.Phone, phoneFromChatID(conversation.ChatID), FactStatusConfirmed)
 	}
 	setFact(&memory.PreferredLanguage, normalizeLanguageCode(conversation.Language), FactStatusConfirmed)
-	setFact(&memory.CompanyName, lead.ClientName, FactStatusConfirmed)
+	setFact(&memory.CompanyName, firstNonEmpty(lead.CompanyName, lead.BrandName, lead.ClientName), FactStatusConfirmed)
 	setFact(&memory.Niche, lead.Niche, FactStatusConfirmed)
-	setFact(&memory.DetailedBusinessActivity, lead.StrongSide, FactStatusConfirmed)
+	setFact(&memory.DetailedBusinessActivity, firstNonEmpty(lead.BusinessDescription, lead.StrongSide), FactStatusConfirmed)
 	setFact(&memory.ProductOrService, lead.ProductOrService, FactStatusConfirmed)
 	setFact(&memory.AdvertisingGoal, lead.Goal, FactStatusConfirmed)
 	setFact(&memory.TargetAudience, lead.TargetAudience, FactStatusConfirmed)
-	setFact(&memory.RequestedContentFormat, lead.SelectedPackage, FactStatusConfirmed)
+	setFact(&memory.RequestedContentFormat, firstNonEmpty(lead.DesiredVideoFormat, lead.DesiredVideoType, lead.SelectedPackage), FactStatusConfirmed)
 	setFact(&memory.ApproximateDeadline, lead.Deadline, FactStatusConfirmed)
 	setFact(&memory.ApproximateBudget, lead.Budget, FactStatusConfirmed)
 	setFact(&memory.IntentLevel, normalizeLeadStatus(conversation.LeadStatus), FactStatusConfirmed)
@@ -114,6 +114,18 @@ func refreshCustomerMemory(conversation *Conversation) {
 	if strings.TrimSpace(lead.Budget) != "" {
 		memory.AnswersReceived[fieldBudget] = strings.TrimSpace(lead.Budget)
 	}
+	if strings.TrimSpace(lead.CompanyName) != "" {
+		memory.AnswersReceived[fieldCompanyName] = strings.TrimSpace(lead.CompanyName)
+	}
+	if strings.TrimSpace(lead.BrandName) != "" {
+		memory.AnswersReceived[fieldBrandName] = strings.TrimSpace(lead.BrandName)
+	}
+	if strings.TrimSpace(lead.DesiredVideoFormat) != "" {
+		memory.AnswersReceived[fieldVideoFormat] = strings.TrimSpace(lead.DesiredVideoFormat)
+	}
+	if strings.TrimSpace(lead.DistributionPlatform) != "" {
+		memory.AnswersReceived[fieldDistributionPlatform] = strings.TrimSpace(lead.DistributionPlatform)
+	}
 	if strings.TrimSpace(lead.CopyrightConcern) != "" {
 		memory.CustomerObjections = appendUniqueString(memory.CustomerObjections, lead.CopyrightConcern)
 	}
@@ -141,14 +153,19 @@ func refreshCustomerMemory(conversation *Conversation) {
 
 func questionnaireStatusForMemory(conversation Conversation) string {
 	switch {
+	case conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero():
+		return "transferred_to_manager"
 	case conversation.Lead.BriefCompleted || conversation.BriefCollected:
 		return "completed"
 	case conversation.QuestionnaireSent || conversation.Lead.BriefRequested:
-		return "sent"
+		if strings.TrimSpace(conversation.Lead.FreeText) != "" || strings.TrimSpace(conversation.Lead.Notes) != "" {
+			return "partially_completed"
+		}
+		return "awaiting_answers"
 	case conversation.QuestionnaireOfferSent || conversation.WantsQuestionnaire || conversation.Lead.WantsQuestionnaire:
-		return "offered"
+		return "awaiting_confirmation"
 	default:
-		return "unknown"
+		return "not_offered"
 	}
 }
 
@@ -161,6 +178,12 @@ func qualificationStatusLabelForMemory(conversation Conversation) string {
 }
 
 func unresolvedQuestionForMemory(conversation Conversation) string {
+	if conversation.HandedOffToOwner || !conversation.TransferredAt.IsZero() || conversation.Lead.BriefCompleted || conversation.BriefCollected {
+		return ""
+	}
+	if len(conversation.Lead.UnresolvedQuestions) > 0 {
+		return strings.Join(conversation.Lead.UnresolvedQuestions, ",")
+	}
 	if missing := requiredLeadMissingFields(conversation); len(missing) > 0 {
 		return strings.Join(missing, ",")
 	}
@@ -169,6 +192,15 @@ func unresolvedQuestionForMemory(conversation Conversation) string {
 	}
 	if conversation.QuestionnaireSent && !conversation.Lead.BriefCompleted {
 		return "questionnaire_answers"
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
 	}
 	return ""
 }

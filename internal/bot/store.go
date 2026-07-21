@@ -12,7 +12,7 @@ import (
 const (
 	defaultConversationTTL = 0
 	defaultMessageTTL      = 24 * time.Hour
-	defaultHistoryLimit    = 10
+	defaultHistoryLimit    = 11
 	outgoingRepeatWindow   = 2 * time.Minute
 )
 
@@ -1229,8 +1229,47 @@ func completedFieldsForLead(lead LeadState) map[string]bool {
 	if strings.TrimSpace(lead.ProductOrService) != "" {
 		completed[fieldProductService] = true
 	}
+	if strings.TrimSpace(lead.ContactName) != "" {
+		completed[fieldContactName] = true
+	}
+	if strings.TrimSpace(lead.CompanyName) != "" {
+		completed[fieldCompanyName] = true
+	}
+	if strings.TrimSpace(lead.BrandName) != "" {
+		completed[fieldBrandName] = true
+	}
+	if strings.TrimSpace(lead.BusinessDescription) != "" {
+		completed[fieldBusinessDescription] = true
+	}
+	if len(lead.ProductFeatures) > 0 {
+		completed[fieldProductFeatures] = true
+	}
+	if len(lead.ProductAdvantages) > 0 {
+		completed[fieldProductAdvantages] = true
+	}
+	if strings.TrimSpace(lead.DesiredResult) != "" {
+		completed[fieldDesiredResult] = true
+	}
 	if strings.TrimSpace(lead.TargetAudience) != "" {
 		completed[fieldTargetAudience] = true
+	}
+	if strings.TrimSpace(lead.GeographicMarket) != "" {
+		completed[fieldGeographicMarket] = true
+	}
+	if strings.TrimSpace(lead.DesiredVideoType) != "" {
+		completed[fieldVideoType] = true
+	}
+	if strings.TrimSpace(lead.DesiredVideoFormat) != "" {
+		completed[fieldVideoFormat] = true
+	}
+	if strings.TrimSpace(lead.DesiredStyle) != "" {
+		completed[fieldVideoStyle] = true
+	}
+	if strings.TrimSpace(lead.VideoDuration) != "" {
+		completed[fieldVideoDuration] = true
+	}
+	if strings.TrimSpace(lead.DistributionPlatform) != "" {
+		completed[fieldDistributionPlatform] = true
 	}
 	if len(lead.ReferenceLinks) > 0 || strings.TrimSpace(lead.WebsiteOrInstagram) != "" {
 		completed[fieldReferenceLinks] = true
@@ -1272,8 +1311,16 @@ func mergeCompletedFields(existing map[string]bool, derived map[string]bool) map
 
 func normalizeFieldName(field string) string {
 	switch strings.TrimSpace(field) {
+	case "business_niche":
+		return fieldNiche
+	case "advertising_goal":
+		return fieldGoal
 	case "platforms":
 		return fieldPlatform
+	case "distribution_channel":
+		return fieldDistributionPlatform
+	case "number_of_videos":
+		return fieldVideoQuantity
 	case "quantity":
 		return fieldVideoQuantity
 	case "previous_ai_ads":
@@ -1281,7 +1328,10 @@ func normalizeFieldName(field string) string {
 	case fieldPackage:
 		return fieldPackageInterest
 	case fieldNiche, fieldCity, fieldGoal, fieldPlatform, fieldDeadline, fieldPreviousAIAds,
-		fieldPackageInterest, fieldBudget, fieldVideoQuantity, fieldProductService, fieldTargetAudience,
+		fieldPackageInterest, fieldBudget, fieldVideoQuantity, fieldContactName, fieldCompanyName,
+		fieldBrandName, fieldProductService, fieldProductFeatures, fieldProductAdvantages,
+		fieldTargetAudience, fieldBusinessDescription, fieldDesiredResult, fieldGeographicMarket,
+		fieldVideoType, fieldVideoFormat, fieldVideoStyle, fieldVideoDuration, fieldDistributionPlatform,
 		fieldReferenceLinks, fieldLikedFormats, fieldVoicePreference, fieldBrief:
 		return strings.TrimSpace(field)
 	default:

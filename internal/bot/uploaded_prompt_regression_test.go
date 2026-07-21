@@ -95,9 +95,35 @@ func TestShortNicheAndDeadlineAsksOnlyGoal(t *testing.T) {
 func TestOpenAIRecommendedHandoffSavesFieldsAndNotifiesAdmin(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
+	reply := "Данные получил, передаю менеджеру. Он продолжит по формату и запуску."
 	ai := &scriptedUnderstandingAI{response: openai.CustomerUnderstanding{
-		Language: "ru",
-		Intent:   "choose_package",
+		Language:            "ru",
+		Intent:              "package_selection",
+		MessageMeaning:      "Клиент указал стирку ковров в Алматы, стандартный пакет и срок завтра.",
+		ShouldUpdateState:   true,
+		ReadyForManager:     true,
+		CustomerReply:       reply,
+		ReplyText:           reply,
+		RecommendedAction:   "handoff",
+		NextAction:          "handoff",
+		QuestionnaireStatus: "transferred_to_manager",
+		ClientIntent:        "готов передать задачу менеджеру",
+		ManagerSummary:      "Клиенту нужен ролик для стирки ковров в Алматы, выбран Standard, срок завтра.",
+		RecommendedNextStep: "Связаться с клиентом и подтвердить запуск Standard.",
+		MissingFields:       []string{},
+		ConfirmedFields:     []string{"niche", "city", "deadline", "package_interest"},
+		PortfolioTags:       []string{},
+		PortfolioSearchTags: []string{},
+		UnresolvedQuestions: []string{},
+		LeadUpdates: openai.CustomerLeadUpdates{
+			BusinessNiche:              testString("Стирка ковров"),
+			GeographicMarket:           testString("Алматы"),
+			Deadline:                   testString("завтра"),
+			SelectedPackage:            testString("standard"),
+			QuestionnaireStatus:        testString("transferred_to_manager"),
+			ReadinessForManagerHandoff: true,
+			RecommendedNextStep:        testString("Связаться с клиентом и подтвердить запуск Standard."),
+		},
 		Extracted: openai.CustomerUnderstandingExtracted{
 			Niche:           testString("Стирка ковров"),
 			City:            testString("Алматы"),
@@ -127,12 +153,15 @@ func TestOpenAIRecommendedHandoffSavesFieldsAndNotifiesAdmin(t *testing.T) {
 		t.Fatalf("admin notification count = %d messages=%#v", got, sender.messages)
 	}
 	lastClientReply := messagesToChat(sender, chatID)[0]
+	if lastClientReply != reply {
+		t.Fatalf("client reply = %q, want LLM reply %q", lastClientReply, reply)
+	}
 	if strings.Contains(strings.ToLower(lastClientReply), "подскажите") {
 		t.Fatalf("handoff reply asked another question: %q", lastClientReply)
 	}
 }
 
-func TestOpenAIFailureFallsBackToDeterministicUnderstanding(t *testing.T) {
+func TestOpenAIFailureUsesTechnicalFallbackWithoutMutatingLead(t *testing.T) {
 	sender := &fakeSender{}
 	store := NewConversationStore()
 	ai := &scriptedUnderstandingAI{err: errors.New("timeout")}
@@ -146,12 +175,15 @@ func TestOpenAIFailureFallsBackToDeterministicUnderstanding(t *testing.T) {
 		t.Fatal("OpenAI understanding was not attempted")
 	}
 	conversation := snapshotConversation(t, store, chatID)
-	if conversation.Lead.Niche != "стирка ковров" || conversation.Lead.City != "Алматы" {
-		t.Fatalf("fallback did not save deterministic fields: %#v", conversation.Lead)
+	if conversation.Lead.Niche != "" || conversation.Lead.City != "" {
+		t.Fatalf("technical fallback mutated lead fields: %#v", conversation.Lead)
 	}
-	last := strings.ToLower(sender.messages[len(sender.messages)-1])
-	if strings.Contains(last, "подскажите нишу") || strings.Contains(last, "для какой ниши") {
-		t.Fatalf("fallback repeated known niche question: %q", sender.messages[len(sender.messages)-1])
+	if len(sender.messages) == 0 {
+		t.Fatal("technical fallback did not send a client reply")
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if last != OpenAITemporaryFallbackText("ru") {
+		t.Fatalf("fallback reply = %q, want %q", last, OpenAITemporaryFallbackText("ru"))
 	}
 }
 

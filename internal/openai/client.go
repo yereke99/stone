@@ -152,6 +152,7 @@ type CustomerUnderstanding struct {
 	Intent                string                     `json:"intent"`
 	MessageMeaning        string                     `json:"message_meaning"`
 	ShouldUpdateState     bool                       `json:"should_update_state"`
+	LeadUpdates           CustomerLeadUpdates        `json:"lead_updates"`
 	Niche                 *string                    `json:"niche"`
 	Goal                  *string                    `json:"goal"`
 	Deadline              *string                    `json:"deadline"`
@@ -183,6 +184,21 @@ type CustomerUnderstanding struct {
 	RecommendedAction     string                     `json:"recommended_action"`
 	PortfolioTags         []string                   `json:"portfolio_tags"`
 	AnsweredQuestions     []CustomerAnsweredQuestion `json:"answered_questions"`
+	ConfirmedFields       []string                   `json:"confirmed_fields"`
+	InferredFields        []string                   `json:"inferred_fields"`
+	UnknownFields         []string                   `json:"unknown_fields"`
+	CorrectedFields       []string                   `json:"corrected_fields"`
+	QuestionnaireStatus   string                     `json:"questionnaire_status"`
+	ClientIntent          string                     `json:"client_intent"`
+	ReadyForManager       bool                       `json:"ready_for_manager"`
+	ShouldSendPortfolio   bool                       `json:"should_send_portfolio"`
+	PortfolioSearchTags   []string                   `json:"portfolio_search_tags"`
+	ShouldAskQuestion     bool                       `json:"should_ask_question"`
+	NextQuestionField     *string                    `json:"next_question_field"`
+	CustomerReply         string                     `json:"customer_reply"`
+	ManagerSummary        string                     `json:"manager_summary"`
+	UnresolvedQuestions   []string                   `json:"unresolved_questions"`
+	RecommendedNextStep   string                     `json:"recommended_next_step"`
 	ReplyText             string                     `json:"reply_text"`
 	NextAction            string                     `json:"next_action"`
 	Confidence            float64                    `json:"confidence"`
@@ -195,6 +211,40 @@ type CustomerUnderstanding struct {
 	Sentiment       CustomerUnderstandingSentiment `json:"sentiment,omitempty"`
 	StateUpdate     CustomerUnderstandingState     `json:"state_update,omitempty"`
 	ReplyPlan       CustomerUnderstandingReplyPlan `json:"reply_plan,omitempty"`
+}
+
+type CustomerLeadUpdates struct {
+	ContactName                 *string  `json:"contact_name"`
+	CompanyName                 *string  `json:"company_name"`
+	BrandName                   *string  `json:"brand_name"`
+	BusinessNiche               *string  `json:"business_niche"`
+	BusinessDescription         *string  `json:"business_description"`
+	ProductOrService            *string  `json:"product_or_service"`
+	ProductFeatures             []string `json:"product_features"`
+	ProductAdvantages           []string `json:"product_advantages"`
+	AdvertisingGoal             *string  `json:"advertising_goal"`
+	DesiredResult               *string  `json:"desired_result"`
+	TargetAudience              *string  `json:"target_audience"`
+	GeographicMarket            *string  `json:"geographic_market"`
+	DesiredVideoType            *string  `json:"desired_video_type"`
+	DesiredVideoFormat          *string  `json:"desired_video_format"`
+	DesiredStyle                *string  `json:"desired_style"`
+	VideoDuration               *string  `json:"video_duration"`
+	DistributionPlatform        *string  `json:"distribution_platform"`
+	Deadline                    *string  `json:"deadline"`
+	Budget                      *string  `json:"budget"`
+	NumberOfVideos              *string  `json:"number_of_videos"`
+	SelectedPackage             *string  `json:"selected_package"`
+	PackageRecommendationNeeded bool     `json:"package_recommendation_needed"`
+	ExamplesRequested           bool     `json:"examples_requested"`
+	PortfolioCasesAlreadySent   []string `json:"portfolio_cases_already_sent"`
+	Objections                  []string `json:"objections"`
+	ClientQuestions             []string `json:"client_questions"`
+	ClientIntent                *string  `json:"client_intent"`
+	QuestionnaireStatus         *string  `json:"questionnaire_status"`
+	ReadinessForManagerHandoff  bool     `json:"readiness_for_manager_handoff"`
+	UnresolvedQuestions         []string `json:"unresolved_questions"`
+	RecommendedNextStep         *string  `json:"recommended_next_step"`
 }
 
 type CustomerUnderstandingExtracted struct {
@@ -738,9 +788,25 @@ func conversationDecisionSchema(name string) map[string]any {
 			"intent",
 			"message_meaning",
 			"should_update_state",
+			"lead_updates",
 			"extracted_fields",
 			"do_not_overwrite_fields",
 			"answered_questions",
+			"confirmed_fields",
+			"inferred_fields",
+			"unknown_fields",
+			"corrected_fields",
+			"questionnaire_status",
+			"client_intent",
+			"ready_for_manager",
+			"should_send_portfolio",
+			"portfolio_search_tags",
+			"should_ask_question",
+			"next_question_field",
+			"customer_reply",
+			"manager_summary",
+			"unresolved_questions",
+			"recommended_next_step",
 			"missing_fields",
 			"recommended_action",
 			"reply_text",
@@ -753,9 +819,25 @@ func conversationDecisionSchema(name string) map[string]any {
 			"intent":                  conversationIntentSchema(),
 			"message_meaning":         map[string]any{"type": "string"},
 			"should_update_state":     map[string]any{"type": "boolean"},
+			"lead_updates":            leadUpdatesSchema(),
 			"extracted_fields":        extractedFieldsSchema(),
 			"do_not_overwrite_fields": businessFieldListSchema(),
 			"answered_questions":      answeredQuestionsSchema(),
+			"confirmed_fields":        businessFieldListSchema(),
+			"inferred_fields":         businessFieldListSchema(),
+			"unknown_fields":          businessFieldListSchema(),
+			"corrected_fields":        businessFieldListSchema(),
+			"questionnaire_status":    questionnaireStatusSchema(),
+			"client_intent":           map[string]any{"type": "string"},
+			"ready_for_manager":       map[string]any{"type": "boolean"},
+			"should_send_portfolio":   map[string]any{"type": "boolean"},
+			"portfolio_search_tags":   stringArraySchema(),
+			"should_ask_question":     map[string]any{"type": "boolean"},
+			"next_question_field":     nullableBusinessFieldSchema(),
+			"customer_reply":          map[string]any{"type": "string"},
+			"manager_summary":         map[string]any{"type": "string"},
+			"unresolved_questions":    stringArraySchema(),
+			"recommended_next_step":   map[string]any{"type": "string"},
 			"missing_fields":          businessFieldListSchema(),
 			"recommended_action":      recommendedActionSchema(),
 			"reply_text":              map[string]any{"type": "string"},
@@ -780,9 +862,25 @@ func customerUnderstandingSchema() map[string]any {
 			"intent",
 			"message_meaning",
 			"should_update_state",
+			"lead_updates",
 			"extracted_fields",
 			"do_not_overwrite_fields",
 			"answered_questions",
+			"confirmed_fields",
+			"inferred_fields",
+			"unknown_fields",
+			"corrected_fields",
+			"questionnaire_status",
+			"client_intent",
+			"ready_for_manager",
+			"should_send_portfolio",
+			"portfolio_search_tags",
+			"should_ask_question",
+			"next_question_field",
+			"customer_reply",
+			"manager_summary",
+			"unresolved_questions",
+			"recommended_next_step",
 			"missing_fields",
 			"recommended_action",
 			"reply_text",
@@ -799,9 +897,25 @@ func customerUnderstandingSchema() map[string]any {
 			"intent":                  conversationIntentSchema(),
 			"message_meaning":         map[string]any{"type": "string"},
 			"should_update_state":     map[string]any{"type": "boolean"},
+			"lead_updates":            leadUpdatesSchema(),
 			"extracted_fields":        extractedFieldsSchema(),
 			"do_not_overwrite_fields": businessFieldListSchema(),
 			"answered_questions":      answeredQuestionsSchema(),
+			"confirmed_fields":        businessFieldListSchema(),
+			"inferred_fields":         businessFieldListSchema(),
+			"unknown_fields":          businessFieldListSchema(),
+			"corrected_fields":        businessFieldListSchema(),
+			"questionnaire_status":    questionnaireStatusSchema(),
+			"client_intent":           map[string]any{"type": "string"},
+			"ready_for_manager":       map[string]any{"type": "boolean"},
+			"should_send_portfolio":   map[string]any{"type": "boolean"},
+			"portfolio_search_tags":   stringArraySchema(),
+			"should_ask_question":     map[string]any{"type": "boolean"},
+			"next_question_field":     nullableBusinessFieldSchema(),
+			"customer_reply":          map[string]any{"type": "string"},
+			"manager_summary":         map[string]any{"type": "string"},
+			"unresolved_questions":    stringArraySchema(),
+			"recommended_next_step":   map[string]any{"type": "string"},
 			"missing_fields":          businessFieldListSchema(),
 			"recommended_action":      recommendedActionSchema(),
 			"reply_text":              map[string]any{"type": "string"},
@@ -825,6 +939,17 @@ func nullablePackageSchema() map[string]any {
 	return map[string]any{
 		"type": []string{"string", "null"},
 		"enum": []any{"test", "basic", "standard", "needs_manager_recommendation", "unknown", nil},
+	}
+}
+
+func nullableBusinessFieldSchema() map[string]any {
+	values := []any{nil}
+	for _, field := range businessFieldNames() {
+		values = append(values, field)
+	}
+	return map[string]any{
+		"type": []string{"string", "null"},
+		"enum": values,
 	}
 }
 
@@ -896,26 +1021,76 @@ func businessFieldListSchema() map[string]any {
 		"type": "array",
 		"items": map[string]any{
 			"type": "string",
-			"enum": []string{
-				"niche",
-				"product_or_service",
-				"target_audience",
-				"goal",
-				"deadline",
-				"quantity",
-				"video_quantity",
-				"budget",
-				"reference_links",
-				"liked_formats",
-				"selected_package",
-				"package_interest",
-				"voice_preference",
-				"copyright_concern",
-				"campaign_context",
-				"hook_idea",
-				"city",
-				"website_or_instagram",
-			},
+			"enum": businessFieldNames(),
+		},
+	}
+}
+
+func businessFieldNames() []string {
+	return []string{
+		"contact_name",
+		"company_name",
+		"brand_name",
+		"business_niche",
+		"business_description",
+		"niche",
+		"product_or_service",
+		"product_features",
+		"product_advantages",
+		"advertising_goal",
+		"goal",
+		"desired_result",
+		"target_audience",
+		"geographic_market",
+		"city",
+		"desired_video_type",
+		"desired_video_format",
+		"desired_style",
+		"video_duration",
+		"distribution_platform",
+		"platform",
+		"deadline",
+		"quantity",
+		"number_of_videos",
+		"video_quantity",
+		"budget",
+		"reference_links",
+		"liked_formats",
+		"selected_package",
+		"package_interest",
+		"package_recommendation_needed",
+		"voice_preference",
+		"copyright_concern",
+		"campaign_context",
+		"hook_idea",
+		"website_or_instagram",
+		"business_link",
+		"strong_side",
+		"offer",
+		"examples_requested",
+		"portfolio_cases_already_sent",
+		"objections",
+		"client_questions",
+		"client_intent",
+		"questionnaire_status",
+		"readiness_for_manager_handoff",
+		"unresolved_questions",
+		"recommended_next_step",
+	}
+}
+
+func questionnaireStatusSchema() map[string]any {
+	return map[string]any{
+		"type": "string",
+		"enum": []string{
+			"not_offered",
+			"offered",
+			"awaiting_confirmation",
+			"awaiting_answers",
+			"partially_completed",
+			"completed",
+			"transferred_to_manager",
+			"unknown",
 		},
 	}
 }
@@ -937,6 +1112,79 @@ func answeredQuestionsSchema() map[string]any {
 					"maximum": 1,
 				},
 			},
+		},
+	}
+}
+
+func leadUpdatesSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"contact_name",
+			"company_name",
+			"brand_name",
+			"business_niche",
+			"business_description",
+			"product_or_service",
+			"product_features",
+			"product_advantages",
+			"advertising_goal",
+			"desired_result",
+			"target_audience",
+			"geographic_market",
+			"desired_video_type",
+			"desired_video_format",
+			"desired_style",
+			"video_duration",
+			"distribution_platform",
+			"deadline",
+			"budget",
+			"number_of_videos",
+			"selected_package",
+			"package_recommendation_needed",
+			"examples_requested",
+			"portfolio_cases_already_sent",
+			"objections",
+			"client_questions",
+			"client_intent",
+			"questionnaire_status",
+			"readiness_for_manager_handoff",
+			"unresolved_questions",
+			"recommended_next_step",
+		},
+		"properties": map[string]any{
+			"contact_name":                  nullableStringSchema(),
+			"company_name":                  nullableStringSchema(),
+			"brand_name":                    nullableStringSchema(),
+			"business_niche":                nullableStringSchema(),
+			"business_description":          nullableStringSchema(),
+			"product_or_service":            nullableStringSchema(),
+			"product_features":              stringArraySchema(),
+			"product_advantages":            stringArraySchema(),
+			"advertising_goal":              nullableStringSchema(),
+			"desired_result":                nullableStringSchema(),
+			"target_audience":               nullableStringSchema(),
+			"geographic_market":             nullableStringSchema(),
+			"desired_video_type":            nullableStringSchema(),
+			"desired_video_format":          nullableStringSchema(),
+			"desired_style":                 nullableStringSchema(),
+			"video_duration":                nullableStringSchema(),
+			"distribution_platform":         nullableStringSchema(),
+			"deadline":                      nullableStringSchema(),
+			"budget":                        nullableStringSchema(),
+			"number_of_videos":              nullableStringSchema(),
+			"selected_package":              nullablePackageSchema(),
+			"package_recommendation_needed": map[string]any{"type": "boolean"},
+			"examples_requested":            map[string]any{"type": "boolean"},
+			"portfolio_cases_already_sent":  stringArraySchema(),
+			"objections":                    stringArraySchema(),
+			"client_questions":              stringArraySchema(),
+			"client_intent":                 nullableStringSchema(),
+			"questionnaire_status":          map[string]any{"type": []string{"string", "null"}, "enum": []any{"not_offered", "offered", "awaiting_confirmation", "awaiting_answers", "partially_completed", "completed", "transferred_to_manager", "unknown", nil}},
+			"readiness_for_manager_handoff": map[string]any{"type": "boolean"},
+			"unresolved_questions":          stringArraySchema(),
+			"recommended_next_step":         nullableStringSchema(),
 		},
 	}
 }

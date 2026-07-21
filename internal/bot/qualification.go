@@ -14,6 +14,11 @@ type managerQualification struct {
 }
 
 func managerQualificationForConversation(conversation Conversation) managerQualification {
+	if conversation.Lead.ReadyForManagerHandoff ||
+		conversation.HandedOffToOwner ||
+		!conversation.TransferredAt.IsZero() {
+		return managerQualification{Ready: true}
+	}
 	missing := requiredLeadMissingFields(conversation)
 	return managerQualification{
 		Ready:   len(missing) == 0,
@@ -25,6 +30,9 @@ func managerQualificationForConversation(conversation Conversation) managerQuali
 // required — the bot never asks for it during qualification, so a lead with
 // niche, goal and a package interest is complete enough for the manager.
 func leadHasRequiredManagerFields(lead LeadState) bool {
+	if lead.ReadyForManagerHandoff {
+		return true
+	}
 	if leadHasCollectedBrief(lead) {
 		return true
 	}
@@ -114,9 +122,9 @@ func isValidGoal(value string) bool {
 		return false
 	}
 	return containsAny(clean, []string{
-		"клиент", "заяв", "лид", "продаж", "сат", "ролик", "контент", "reels", "рилс",
+		"клиент", "заяв", "лид", "продаж", "заказ", "достав", "сат", "ролик", "контент", "reels", "рилс",
 		"instagram", "tiktok", "тик ток", "продвиж", "реклам", "жарнама", "курс",
-		"product", "service", "clients", "sales", "ads", "content",
+		"product", "service", "clients", "sales", "orders", "delivery", "ads", "content",
 	})
 }
 

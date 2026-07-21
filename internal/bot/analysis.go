@@ -8,23 +8,36 @@ import (
 )
 
 const (
-	fieldNiche           = "niche"
-	fieldCity            = "city"
-	fieldGoal            = "goal"
-	fieldPlatform        = "platform"
-	fieldPlatforms       = fieldPlatform
-	fieldDeadline        = "deadline"
-	fieldPreviousAIAds   = "ai_experience"
-	fieldPackage         = "package"
-	fieldPackageInterest = "package_interest"
-	fieldBudget          = "budget"
-	fieldVideoQuantity   = "video_quantity"
-	fieldProductService  = "product_or_service"
-	fieldTargetAudience  = "target_audience"
-	fieldReferenceLinks  = "reference_links"
-	fieldLikedFormats    = "liked_formats"
-	fieldVoicePreference = "voice_preference"
-	fieldBrief           = "brief"
+	fieldNiche                = "niche"
+	fieldCity                 = "city"
+	fieldGoal                 = "goal"
+	fieldPlatform             = "platform"
+	fieldPlatforms            = fieldPlatform
+	fieldDeadline             = "deadline"
+	fieldPreviousAIAds        = "ai_experience"
+	fieldPackage              = "package"
+	fieldPackageInterest      = "package_interest"
+	fieldBudget               = "budget"
+	fieldVideoQuantity        = "video_quantity"
+	fieldContactName          = "contact_name"
+	fieldCompanyName          = "company_name"
+	fieldBrandName            = "brand_name"
+	fieldProductService       = "product_or_service"
+	fieldProductFeatures      = "product_features"
+	fieldProductAdvantages    = "product_advantages"
+	fieldTargetAudience       = "target_audience"
+	fieldBusinessDescription  = "business_description"
+	fieldDesiredResult        = "desired_result"
+	fieldGeographicMarket     = "geographic_market"
+	fieldVideoType            = "desired_video_type"
+	fieldVideoFormat          = "desired_video_format"
+	fieldVideoStyle           = "desired_style"
+	fieldVideoDuration        = "video_duration"
+	fieldDistributionPlatform = "distribution_platform"
+	fieldReferenceLinks       = "reference_links"
+	fieldLikedFormats         = "liked_formats"
+	fieldVoicePreference      = "voice_preference"
+	fieldBrief                = "brief"
 
 	IntentGreeting                 = "greeting"
 	IntentAnswer                   = "answer"
@@ -92,7 +105,30 @@ type LeadState struct {
 	SelectedPackage          string   `json:"selected_package,omitempty"`
 	WantsQuestionnaire       bool     `json:"wants_questionnaire,omitempty"`
 	ClientName               string   `json:"client_name,omitempty"`
+	ContactName              string   `json:"contact_name,omitempty"`
+	CompanyName              string   `json:"company_name,omitempty"`
+	BrandName                string   `json:"brand_name,omitempty"`
 	TargetAudience           string   `json:"target_audience,omitempty"`
+	BusinessDescription      string   `json:"business_description,omitempty"`
+	ProductFeatures          []string `json:"product_features,omitempty"`
+	ProductAdvantages        []string `json:"product_advantages,omitempty"`
+	DesiredResult            string   `json:"desired_result,omitempty"`
+	GeographicMarket         string   `json:"geographic_market,omitempty"`
+	DesiredVideoType         string   `json:"desired_video_type,omitempty"`
+	DesiredVideoFormat       string   `json:"desired_video_format,omitempty"`
+	DesiredStyle             string   `json:"desired_style,omitempty"`
+	VideoDuration            string   `json:"video_duration,omitempty"`
+	DistributionPlatform     string   `json:"distribution_platform,omitempty"`
+	ExamplesRequested        bool     `json:"examples_requested,omitempty"`
+	PortfolioCasesSent       []string `json:"portfolio_cases_sent,omitempty"`
+	Objections               []string `json:"objections,omitempty"`
+	ClientQuestions          []string `json:"client_questions,omitempty"`
+	ClientIntent             string   `json:"client_intent,omitempty"`
+	QuestionnaireStatus      string   `json:"questionnaire_status,omitempty"`
+	ReadyForManagerHandoff   bool     `json:"ready_for_manager_handoff,omitempty"`
+	UnresolvedQuestions      []string `json:"unresolved_questions,omitempty"`
+	RecommendedNextStep      string   `json:"recommended_next_step,omitempty"`
+	ManagerSummary           string   `json:"manager_summary,omitempty"`
 	Notes                    string   `json:"notes,omitempty"`
 	FreeText                 string   `json:"free_text,omitempty"`
 	PortfolioSent            bool     `json:"portfolio_sent,omitempty"`
@@ -104,46 +140,76 @@ type LeadState struct {
 }
 
 type CustomerAnalysis struct {
-	Niche               *string  `json:"niche"`
-	City                *string  `json:"city,omitempty"`
-	Goal                *string  `json:"goal"`
-	Platforms           []string `json:"platforms"`
-	Deadline            *string  `json:"deadline"`
-	PreviousAIAds       *bool    `json:"previous_ai_ads"`
-	AIExperience        *string  `json:"ai_experience,omitempty"`
-	Budget              *string  `json:"budget,omitempty"`
-	VideoQuantity       *string  `json:"video_quantity,omitempty"`
-	VoicePreference     *string  `json:"voice_preference,omitempty"`
-	CopyrightConcern    *string  `json:"copyright_concern,omitempty"`
-	CampaignContext     *string  `json:"campaign_context,omitempty"`
-	HookIdea            *string  `json:"hook_idea,omitempty"`
-	LikedFormats        []string `json:"liked_formats,omitempty"`
-	TargetAudience      *string  `json:"target_audience,omitempty"`
-	ProductOrService    *string  `json:"product_or_service,omitempty"`
-	StrongSide          *string  `json:"strong_side,omitempty"`
-	Offer               *string  `json:"offer,omitempty"`
-	BusinessLink        *string  `json:"business_link,omitempty"`
-	ReferenceLinks      []string `json:"reference_links,omitempty"`
-	Intent              string   `json:"intent"`
-	SelectedLevel       int      `json:"selected_level,omitempty"`
-	PackageInterest     *string  `json:"package_interest,omitempty"`
-	WantsQuestionnaire  bool     `json:"wants_questionnaire,omitempty"`
-	ShouldHandoff       bool     `json:"should_handoff,omitempty"`
-	ShouldStop          bool     `json:"should_stop,omitempty"`
-	Frustrated          bool     `json:"frustrated,omitempty"`
-	AsksForFoodExamples bool     `json:"asks_for_food_examples,omitempty"`
-	AsksForMoreOptions  bool     `json:"asks_for_more_options,omitempty"`
-	PortfolioTags       []string `json:"portfolio_tags,omitempty"`
-	RecommendedAction   string   `json:"recommended_action,omitempty"`
-	NextAction          string   `json:"next_action,omitempty"`
-	ReplyText           string   `json:"reply_text,omitempty"`
-	Confidence          float64  `json:"confidence,omitempty"`
-	FAQKey              string   `json:"faq_key,omitempty"`
-	MissingFields       []string `json:"missing_fields"`
+	Niche                *string  `json:"niche"`
+	City                 *string  `json:"city,omitempty"`
+	Goal                 *string  `json:"goal"`
+	Platforms            []string `json:"platforms"`
+	Deadline             *string  `json:"deadline"`
+	PreviousAIAds        *bool    `json:"previous_ai_ads"`
+	AIExperience         *string  `json:"ai_experience,omitempty"`
+	Budget               *string  `json:"budget,omitempty"`
+	VideoQuantity        *string  `json:"video_quantity,omitempty"`
+	VoicePreference      *string  `json:"voice_preference,omitempty"`
+	CopyrightConcern     *string  `json:"copyright_concern,omitempty"`
+	CampaignContext      *string  `json:"campaign_context,omitempty"`
+	HookIdea             *string  `json:"hook_idea,omitempty"`
+	LikedFormats         []string `json:"liked_formats,omitempty"`
+	TargetAudience       *string  `json:"target_audience,omitempty"`
+	ProductOrService     *string  `json:"product_or_service,omitempty"`
+	StrongSide           *string  `json:"strong_side,omitempty"`
+	Offer                *string  `json:"offer,omitempty"`
+	ContactName          *string  `json:"contact_name,omitempty"`
+	CompanyName          *string  `json:"company_name,omitempty"`
+	BrandName            *string  `json:"brand_name,omitempty"`
+	BusinessDescription  *string  `json:"business_description,omitempty"`
+	ProductFeatures      []string `json:"product_features,omitempty"`
+	ProductAdvantages    []string `json:"product_advantages,omitempty"`
+	DesiredResult        *string  `json:"desired_result,omitempty"`
+	GeographicMarket     *string  `json:"geographic_market,omitempty"`
+	DesiredVideoType     *string  `json:"desired_video_type,omitempty"`
+	DesiredVideoFormat   *string  `json:"desired_video_format,omitempty"`
+	DesiredStyle         *string  `json:"desired_style,omitempty"`
+	VideoDuration        *string  `json:"video_duration,omitempty"`
+	DistributionPlatform *string  `json:"distribution_platform,omitempty"`
+	BusinessLink         *string  `json:"business_link,omitempty"`
+	ReferenceLinks       []string `json:"reference_links,omitempty"`
+	Intent               string   `json:"intent"`
+	SelectedLevel        int      `json:"selected_level,omitempty"`
+	PackageInterest      *string  `json:"package_interest,omitempty"`
+	WantsQuestionnaire   bool     `json:"wants_questionnaire,omitempty"`
+	ShouldHandoff        bool     `json:"should_handoff,omitempty"`
+	ShouldStop           bool     `json:"should_stop,omitempty"`
+	Frustrated           bool     `json:"frustrated,omitempty"`
+	AsksForFoodExamples  bool     `json:"asks_for_food_examples,omitempty"`
+	AsksForMoreOptions   bool     `json:"asks_for_more_options,omitempty"`
+	PortfolioTags        []string `json:"portfolio_tags,omitempty"`
+	ShouldSendPortfolio  bool     `json:"should_send_portfolio,omitempty"`
+	ShouldAskQuestion    bool     `json:"should_ask_question,omitempty"`
+	NextQuestionField    string   `json:"next_question_field,omitempty"`
+	QuestionnaireStatus  string   `json:"questionnaire_status,omitempty"`
+	ClientIntent         string   `json:"client_intent,omitempty"`
+	ReadyForManager      bool     `json:"ready_for_manager,omitempty"`
+	ManagerSummary       string   `json:"manager_summary,omitempty"`
+	UnresolvedQuestions  []string `json:"unresolved_questions,omitempty"`
+	RecommendedNextStep  string   `json:"recommended_next_step,omitempty"`
+	ConfirmedFields      []string `json:"confirmed_fields,omitempty"`
+	InferredFields       []string `json:"inferred_fields,omitempty"`
+	UnknownFields        []string `json:"unknown_fields,omitempty"`
+	CorrectedFields      []string `json:"corrected_fields,omitempty"`
+	ClientQuestions      []string `json:"client_questions,omitempty"`
+	Objections           []string `json:"objections,omitempty"`
+	ExamplesRequested    bool     `json:"examples_requested,omitempty"`
+	RecommendedAction    string   `json:"recommended_action,omitempty"`
+	NextAction           string   `json:"next_action,omitempty"`
+	ReplyText            string   `json:"reply_text,omitempty"`
+	Confidence           float64  `json:"confidence,omitempty"`
+	FAQKey               string   `json:"faq_key,omitempty"`
+	MissingFields        []string `json:"missing_fields"`
 
 	NumberedQualificationAnswer bool               `json:"-"`
 	AnsweredQuestions           []AnsweredQuestion `json:"answered_questions,omitempty"`
 	NicheCorrection             bool               `json:"-"`
+	TechnicalFallback           bool               `json:"-"`
 }
 
 type AnsweredQuestion struct {
@@ -395,6 +461,19 @@ func (a CustomerAnalysis) HasBusinessSignal() bool {
 		a.ProductOrService != nil ||
 		a.StrongSide != nil ||
 		a.Offer != nil ||
+		a.ContactName != nil ||
+		a.CompanyName != nil ||
+		a.BrandName != nil ||
+		a.BusinessDescription != nil ||
+		len(a.ProductFeatures) > 0 ||
+		len(a.ProductAdvantages) > 0 ||
+		a.DesiredResult != nil ||
+		a.GeographicMarket != nil ||
+		a.DesiredVideoType != nil ||
+		a.DesiredVideoFormat != nil ||
+		a.DesiredStyle != nil ||
+		a.VideoDuration != nil ||
+		a.DistributionPlatform != nil ||
 		a.SelectedLevel > 0 ||
 		a.PackageInterest != nil ||
 		a.BusinessLink != nil ||
@@ -468,6 +547,90 @@ func (s *LeadState) ApplyAnalysis(analysis CustomerAnalysis) {
 	}
 	if analysis.Offer != nil && strings.TrimSpace(*analysis.Offer) != "" {
 		s.Offer = strings.TrimSpace(*analysis.Offer)
+	}
+	if analysis.ContactName != nil && strings.TrimSpace(*analysis.ContactName) != "" {
+		s.ContactName = strings.TrimSpace(*analysis.ContactName)
+	}
+	if analysis.CompanyName != nil && strings.TrimSpace(*analysis.CompanyName) != "" {
+		s.CompanyName = strings.TrimSpace(*analysis.CompanyName)
+		s.ClientName = strings.TrimSpace(*analysis.CompanyName)
+	}
+	if analysis.BrandName != nil && strings.TrimSpace(*analysis.BrandName) != "" {
+		s.BrandName = strings.TrimSpace(*analysis.BrandName)
+		if strings.TrimSpace(s.CompanyName) == "" && strings.TrimSpace(s.ClientName) == "" {
+			s.ClientName = strings.TrimSpace(*analysis.BrandName)
+		}
+	}
+	if analysis.BusinessDescription != nil && strings.TrimSpace(*analysis.BusinessDescription) != "" {
+		s.BusinessDescription = strings.TrimSpace(*analysis.BusinessDescription)
+		if strings.TrimSpace(s.StrongSide) == "" {
+			s.StrongSide = strings.TrimSpace(*analysis.BusinessDescription)
+		}
+	}
+	for _, feature := range analysis.ProductFeatures {
+		s.ProductFeatures = appendUniqueString(s.ProductFeatures, feature)
+	}
+	for _, advantage := range analysis.ProductAdvantages {
+		s.ProductAdvantages = appendUniqueString(s.ProductAdvantages, advantage)
+	}
+	if analysis.DesiredResult != nil && strings.TrimSpace(*analysis.DesiredResult) != "" {
+		s.DesiredResult = strings.TrimSpace(*analysis.DesiredResult)
+	}
+	if analysis.GeographicMarket != nil && strings.TrimSpace(*analysis.GeographicMarket) != "" {
+		s.GeographicMarket = strings.TrimSpace(*analysis.GeographicMarket)
+		if strings.TrimSpace(s.City) == "" {
+			s.City = strings.TrimSpace(*analysis.GeographicMarket)
+		}
+	}
+	if analysis.DesiredVideoType != nil && strings.TrimSpace(*analysis.DesiredVideoType) != "" {
+		s.DesiredVideoType = strings.TrimSpace(*analysis.DesiredVideoType)
+	}
+	if analysis.DesiredVideoFormat != nil && strings.TrimSpace(*analysis.DesiredVideoFormat) != "" {
+		s.DesiredVideoFormat = strings.TrimSpace(*analysis.DesiredVideoFormat)
+		s.LikedFormats = appendUniqueString(s.LikedFormats, strings.TrimSpace(*analysis.DesiredVideoFormat))
+	}
+	if analysis.DesiredStyle != nil && strings.TrimSpace(*analysis.DesiredStyle) != "" {
+		s.DesiredStyle = strings.TrimSpace(*analysis.DesiredStyle)
+	}
+	if analysis.VideoDuration != nil && strings.TrimSpace(*analysis.VideoDuration) != "" {
+		s.VideoDuration = strings.TrimSpace(*analysis.VideoDuration)
+	}
+	if analysis.DistributionPlatform != nil && strings.TrimSpace(*analysis.DistributionPlatform) != "" {
+		s.DistributionPlatform = strings.TrimSpace(*analysis.DistributionPlatform)
+		s.Platforms = mergePlatforms(s.Platforms, platformsFromAIString(*analysis.DistributionPlatform))
+		if strings.TrimSpace(s.Platform) == "" && len(s.Platforms) > 0 {
+			s.Platform = strings.Join(s.Platforms, ", ")
+		}
+	}
+	for _, question := range analysis.ClientQuestions {
+		s.ClientQuestions = appendUniqueString(s.ClientQuestions, question)
+	}
+	for _, objection := range analysis.Objections {
+		s.Objections = appendUniqueString(s.Objections, objection)
+	}
+	if analysis.ExamplesRequested {
+		s.ExamplesRequested = true
+	}
+	if strings.TrimSpace(analysis.ClientIntent) != "" {
+		s.ClientIntent = strings.TrimSpace(analysis.ClientIntent)
+	}
+	if strings.TrimSpace(analysis.QuestionnaireStatus) != "" {
+		s.QuestionnaireStatus = strings.TrimSpace(analysis.QuestionnaireStatus)
+	}
+	if analysis.ReadyForManager {
+		s.ReadyForManagerHandoff = true
+	}
+	if len(analysis.UnresolvedQuestions) > 0 {
+		s.UnresolvedQuestions = nil
+		for _, question := range analysis.UnresolvedQuestions {
+			s.UnresolvedQuestions = appendUniqueString(s.UnresolvedQuestions, question)
+		}
+	}
+	if strings.TrimSpace(analysis.RecommendedNextStep) != "" {
+		s.RecommendedNextStep = strings.TrimSpace(analysis.RecommendedNextStep)
+	}
+	if strings.TrimSpace(analysis.ManagerSummary) != "" {
+		s.ManagerSummary = strings.TrimSpace(analysis.ManagerSummary)
 	}
 	if analysis.BusinessLink != nil && strings.TrimSpace(*analysis.BusinessLink) != "" {
 		s.WebsiteOrInstagram = strings.TrimSpace(*analysis.BusinessLink)
@@ -1799,6 +1962,9 @@ func normalizeVideoQuantity(value string) string {
 	}
 	if match := videoQuantityRangePattern.FindStringSubmatch(value); len(match) >= 3 {
 		return normalizeVideoQuantityRange(match[1], match[2])
+	}
+	if match := videoQuantitySingleWithUnitPattern.FindStringSubmatch(value); len(match) >= 2 && validVideoQuantityNumber(match[1]) {
+		return strings.TrimSpace(match[1])
 	}
 	clean := strings.Trim(value, " \t\r\n.,!?;:")
 	if bareVideoQuantitySinglePattern.MatchString(clean) && validVideoQuantityNumber(clean) {

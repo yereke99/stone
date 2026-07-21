@@ -164,10 +164,17 @@ func selectedBackendAction(stage string, backendReply string, askedFields []stri
 
 func knownFieldsSnapshot(conversation Conversation) map[string]string {
 	return map[string]string{
-		"niche":            strings.TrimSpace(conversation.Lead.Niche),
-		"goal":             strings.TrimSpace(conversation.Lead.Goal),
-		"deadline":         strings.TrimSpace(conversation.Lead.Deadline),
-		"selected_package": strings.TrimSpace(conversation.Lead.SelectedPackage),
+		"contact_name":         strings.TrimSpace(firstNonEmpty(conversation.Lead.ContactName, conversation.DisplayName)),
+		"company_name":         strings.TrimSpace(firstNonEmpty(conversation.Lead.CompanyName, conversation.Lead.BrandName, conversation.Lead.ClientName)),
+		"niche":                strings.TrimSpace(conversation.Lead.Niche),
+		"product_or_service":   strings.TrimSpace(conversation.Lead.ProductOrService),
+		"goal":                 strings.TrimSpace(conversation.Lead.Goal),
+		"target_audience":      strings.TrimSpace(conversation.Lead.TargetAudience),
+		"platform":             strings.TrimSpace(firstNonEmpty(conversation.Lead.DistributionPlatform, conversation.Lead.Platform)),
+		"deadline":             strings.TrimSpace(conversation.Lead.Deadline),
+		"budget":               strings.TrimSpace(conversation.Lead.Budget),
+		"selected_package":     strings.TrimSpace(conversation.Lead.SelectedPackage),
+		"questionnaire_status": strings.TrimSpace(questionnaireStatusForMemory(conversation)),
 	}
 }
 

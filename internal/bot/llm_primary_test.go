@@ -174,8 +174,8 @@ func TestScreenshotConversationRegression(t *testing.T) {
 	if !strings.Contains(joinedMessages, "сливочное масло") {
 		t.Fatalf("LLM reply was not sent before follow-up: %#v", sender.messages)
 	}
-	if !conversation.QuestionnaireOfferSent {
-		t.Fatalf("questionnaire was not offered after relevant cases: %#v", conversation)
+	if conversation.QuestionnaireOfferSent {
+		t.Fatalf("questionnaire offer should only be recorded when the LLM asks for it: %#v", conversation)
 	}
 }
 
@@ -376,7 +376,7 @@ func TestRecentUnderstandingMessagesExcludeCurrentAndKeepOrder(t *testing.T) {
 	if len(messages) != 2 {
 		t.Fatalf("recent messages = %d, want 2 (current message excluded): %#v", len(messages), messages)
 	}
-	if messages[0].Role != "customer" || messages[1].Role != "bot" {
+	if messages[0].Role != "client" || messages[1].Role != "bot" {
 		t.Fatalf("roles are wrong: %#v", messages)
 	}
 	if messages[0].Text != "Здравствуйте" || !strings.Contains(messages[1].Text, "Добрый день") {
@@ -404,7 +404,7 @@ func TestRecentUnderstandingMessagesCapAtTenTotal(t *testing.T) {
 	hasCustomer, hasBot := false, false
 	for _, message := range messages {
 		switch message.Role {
-		case "customer":
+		case "client":
 			hasCustomer = true
 		case "bot":
 			hasBot = true

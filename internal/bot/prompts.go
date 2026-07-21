@@ -116,6 +116,17 @@ func FallbackText(language string) string {
 	}
 }
 
+func OpenAITemporaryFallbackText(language string) string {
+	switch normalizeLanguageCode(language) {
+	case "kk":
+		return "Хабарламаңызды алдым. Қазір жүйе жауапты толық талдай алмай тұр, сәл кейін қайта жазамын немесе менеджер жалғастырады."
+	case "en":
+		return "I received your message. I cannot analyze the details reliably right now, so I will get back to you shortly or a manager will continue."
+	default:
+		return "Сообщение получил. Сейчас не могу надёжно разобрать детали, поэтому вернусь с ответом чуть позже или менеджер продолжит диалог."
+	}
+}
+
 func NonTextFallbackText(language string) string {
 	switch normalizeLanguageCode(language) {
 	case "kk":

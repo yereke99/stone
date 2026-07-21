@@ -142,6 +142,14 @@ func selectAIWorkExamples(lead LeadState, analysis CustomerAnalysis, limit int) 
 		limit = maxAIWorkExamples
 	}
 	tags := aiWorkTagsForLead(lead, analysis)
+	return selectAIWorkExamplesByTags(tags, limit)
+}
+
+func selectAIWorkExamplesByTags(tags []string, limit int) AIWorkSelection {
+	if limit < 0 {
+		limit = maxAIWorkExamples
+	}
+	tags = normalizePortfolioTags(tags)
 	if len(tags) == 0 {
 		return AIWorkSelection{}
 	}
